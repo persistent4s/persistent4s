@@ -42,11 +42,10 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A] private (
       if (actualIndex != expectedIndex) {
         (currentEvents, Left(new IndexConflictException(expectedIndex, actualIndex)))
       } else {
-        val lastGlobalPosition = currentEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-        val newEvents = events.flatten.zipWithIndex.map { case ((tags, eventType, event), index) =>
+        val newEvents = events.flatten.map { case (tags, eventType, event) =>
           EventEnvelope(
             EventMetadata(
-              globalPosition = lastGlobalPosition + index.toLong + 1L,
+              globalPosition = currentEvents.size.toLong,
               tags = tags,
               eventType = eventType,
               timestamp = java.time.Instant.now(),
