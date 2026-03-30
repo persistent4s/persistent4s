@@ -18,6 +18,10 @@ package persistent4s
 
 trait Projection[F[_], S, A]:
 
-  def initial: S
+  def handle(state: Option[S], event: EventEnvelope[A]): F[Option[S]]
 
-  def handle(state: S, event: EventEnvelope[A]): F[S]
+  def create(state: S): F[Unit]
+
+  def update(entityId: String, state: S): F[Unit]
+
+  def delete(entityId: String): F[Unit]
