@@ -16,10 +16,7 @@
 
 package persistent4s
 
-trait Projection[F[_], A]:
-
-  def name: String
-
-  def filter: EventFilter
-
-  def handle(event: EventEnvelope[A]): F[Unit]
+final case class EventFilter(
+  eventTypes: Set[String] = Set.empty,
+  tags: Set[Tag] = Set.empty,
+)

@@ -16,10 +16,8 @@
 
 package persistent4s
 
-trait Projection[F[_], A]:
+import fs2.Stream
 
-  def name: String
+trait Projector[F[_], A]:
 
-  def filter: EventFilter
-
-  def handle(event: EventEnvelope[A]): F[Unit]
+  def run(projection: Projection[F, A]): Stream[F, Unit]

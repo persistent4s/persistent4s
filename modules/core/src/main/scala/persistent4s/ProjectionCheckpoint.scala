@@ -16,10 +16,8 @@
 
 package persistent4s
 
-trait Projection[F[_], A]:
+trait ProjectionCheckpoint[F[_]]:
 
-  def name: String
+  def load(projectionName: String): F[Option[Long]]
 
-  def filter: EventFilter
-
-  def handle(event: EventEnvelope[A]): F[Unit]
+  def save(projectionName: String, globalPosition: Long): F[Unit]
