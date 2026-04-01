@@ -16,11 +16,13 @@
 
 package persistent4s.testkit
 
-import persistent4s.{EventStore, Tag, EventEnvelope, IndexConflictException, EventMetadata}
+import persistent4s.{EventStore, EventNotification, Tag, EventEnvelope, IndexConflictException, EventMetadata}
 import cats.effect.*
 import fs2.Stream
+import fs2.concurrent.Topic
 import cats.implicits.*
 import cats.*
+import persistent4s.EventFilter
 
 /** An in-memory implementation of the EventStore trait for testing purposes. This implementation use Ref to store
   * events in memory and does not persist them to any external storage. It is intended for use in unit tests where you
@@ -29,7 +31,9 @@ import cats.*
   */
 final case class InMemoryEventStore[F[_]: Monad: Async, A] private (
   store: Ref[F, Vector[EventEnvelope[A]]],
-) extends EventStore[F, A]:
+  topic: Topic[F, Unit],
+) extends EventStore[F, A]
+    with EventNotification[F]:
 
   def getEvents: F[Vector[EventEnvelope[A]]] = store.get
 
@@ -57,20 +61,26 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A] private (
       }
     }.flatMap {
       case Left(error) => Async[F].raiseError(error)
-      case Right(_)    => Async[F].unit
+      case Right(_)    => topic.publish1(()).void
     }
 
-  override def read(eventTypes: List[String], tags: Set[Tag]*): Stream[F, EventEnvelope[A]] =
+  override def notification: Stream[F, Unit] =
+    topic.subscribe(1)
+
+  override def readFrom(fromPosition: Long, eventFilter: EventFilter): Stream[F, EventEnvelope[A]] =
     Stream
       .eval(store.get)
       .flatMap(events => Stream.emits(events))
       .filter { env =>
-        val matchesTags = env.metadata.tags.exists(tags.flatten.toSet.contains)
-        val matchesTypes = eventTypes.isEmpty || eventTypes.contains(env.metadata.eventType)
-        matchesTags && matchesTypes
+        val matchesTags = eventFilter.tags.isEmpty || env.metadata.tags.exists(eventFilter.tags.contains)
+        val matchesTypes = eventFilter.eventTypes.isEmpty || eventFilter.eventTypes.contains(env.metadata.eventType)
+        matchesTags && matchesTypes && env.metadata.globalPosition > fromPosition
       }
 
 object InMemoryEventStore:
 
   def make[F[_]: Async, A]: F[InMemoryEventStore[F, A]] =
-    Ref.of[F, Vector[EventEnvelope[A]]](Vector.empty).map(InMemoryEventStore(_))
+    for
+      store <- Ref.of[F, Vector[EventEnvelope[A]]](Vector.empty)
+      topic <- Topic[F, Unit]
+    yield InMemoryEventStore(store, topic)
