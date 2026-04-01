@@ -18,6 +18,16 @@ package persistent4s
 
 import fs2.Stream
 
+/** A Projector is responsible for running a Projection. It manages the lifecycle of the projection, including loading
+  * the last checkpoint, subscribing to event notifications, and ensuring that events are processed in the correct
+  * order. The projector should handle any necessary error handling and retries to ensure that the projection processes
+  * events reliably.
+  */
 trait Projector[F[_], A]:
 
+  /** Run the given projection. This should start the projection and keep it running, processing events as they come in.
+    *
+    * @param projection
+    *   the projection to run
+    */
   def run(projection: Projection[F, A]): Stream[F, Unit]

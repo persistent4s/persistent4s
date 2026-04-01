@@ -16,10 +16,29 @@
 
 package persistent4s
 
+/** A Projection defines how to process events from the event store. */
 trait Projection[F[_], A]:
 
+  /** The name of the projection, used for checkpointing. Each projection should have a unique name to avoid conflicts
+    * with other projections.
+    *
+    * @return
+    *   the name of the projection
+    */
   def name: String
 
+  /** The filter that determines which events this projection will process. Only events that match the filter will be
+    * passed to the `handle` method.
+    *
+    * @return
+    *   the event filter for this projection
+    */
   def filter: EventFilter
 
+  /** Handle an incoming event. This method will be called for each event that matches the projection's filter. The
+    * projection should perform any necessary processing of the event, such as updating a read model.
+    *
+    * @param event
+    *   the event to handle
+    */
   def handle(event: EventEnvelope[A]): F[Unit]

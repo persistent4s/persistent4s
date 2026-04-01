@@ -18,6 +18,16 @@ package persistent4s
 
 import fs2.Stream
 
+/** A trait for event stores that can provide a stream of notifications when new events are added. This allows
+  * projectors to react to new events without polling the event store.
+  */
 trait EventNotification[F[_]]:
 
+  /** A stream that emits a unit value whenever a new event is added to the event store. Projectors can subscribe to
+    * this stream to be notified of new events and trigger re-processing. The stream should never complete, and should
+    * emit a value for every new event added to the store.
+    *
+    * @return
+    *   a stream of notifications for new events
+    */
   def notification: Stream[F, Unit]
