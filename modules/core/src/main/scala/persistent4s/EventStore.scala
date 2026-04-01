@@ -37,15 +37,15 @@ trait EventStore[F[_], A]:
     */
   def append(expectedIndex: Long, events: List[(Set[Tag], String, A)]*): F[Unit]
 
-  /** Read events from the event store, filtering by event types and tags. The returned Stream will emit
-    * EventEnvelope[A] instances that match the specified event types and tags. The Stream will complete when there are
-    * no more matching events to read.
+  /** Read events from the event store starting from a specific position, filtering by event types and tags. The
+    * returned Stream will emit EventEnvelope[A] instances that match the specified event types and tags. The Stream
+    * will complete when there are no more matching events to read.
     *
-    * @param eventTypes
-    *   the types of events to read
-    * @param tags
-    *   the tags to filter events by
+    * @param fromPosition
+    *   the position in the event store to start reading from (exclusive)
+    * @param eventFilter
+    *   the filter to apply to the events
     * @return
     *   a Stream of EventEnvelope[A] containing the matching events
     */
-  def read(eventTypes: List[String], tags: Set[Tag]*): Stream[F, EventEnvelope[A]]
+  def readFrom(fromPosition: Long, eventFilter: EventFilter): Stream[F, EventEnvelope[A]]
