@@ -17,16 +17,26 @@
 package persistent4s.examples.school.application
 
 import java.util.UUID
+
 import cats.effect.IO
 
-import persistent4s.examples.school.api.{CourseService, CreateCourseOutput}
+import persistent4s.EventStore
+import persistent4s.examples.school.api.{CourseItem, CourseService, CreateCourseOutput, GetCoursesOutput}
+import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.course.*
-import persistent4s.testkit.implicits.*
+import persistent4s.examples.school.infrastructure.SchoolModule
 
-class CourseServiceImpl extends CourseService[IO]:
+class CourseServiceImpl(module: SchoolModule) extends CourseService[IO]:
+
+  private given EventStore[IO, SchoolEvent] = module.store
 
   def createCourse(title: String, capacity: Int): IO[CreateCourseOutput] =
     for
       courseId <- IO(UUID.randomUUID().toString)
       _        <- CreateCourseHandler.run[IO](CreateCourse(courseId, title, capacity))
     yield CreateCourseOutput(courseId)
+
+  def getCourses(): IO[GetCoursesOutput] =
+    module.courseProjection.getCourses.map(courses =>
+      GetCoursesOutput(courses.map(c => CourseItem(c.courseId, c.title, c.capacity, c.enrolledCount))),
+    )

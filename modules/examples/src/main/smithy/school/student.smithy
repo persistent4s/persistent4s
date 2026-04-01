@@ -6,7 +6,11 @@ use alloy#simpleRestJson
 
 @simpleRestJson
 service StudentService {
-    operations: [CreateStudent, DeleteStudent]
+    operations: [
+        CreateStudent
+        DeleteStudent
+        GetStudents
+    ]
 }
 
 @http(method: "POST", uri: "/students")
@@ -15,9 +19,11 @@ operation CreateStudent {
     input := {
         @required
         name: String
+
         @required
         email: String
     }
+
     output := {
         @required
         studentId: String
@@ -32,4 +38,31 @@ operation DeleteStudent {
         @httpLabel
         studentId: String
     }
+}
+
+@http(method: "GET", uri: "/students")
+@readonly
+operation GetStudents {
+    output := {
+        @required
+        students: StudentList
+    }
+}
+
+list StudentList {
+    member: StudentItem
+}
+
+structure StudentItem {
+    @required
+    studentId: String
+
+    @required
+    name: String
+
+    @required
+    email: String
+
+    @required
+    enrollmentCount: Integer
 }

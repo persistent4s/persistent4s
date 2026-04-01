@@ -20,11 +20,15 @@ import java.util.UUID
 
 import cats.effect.IO
 
-import persistent4s.examples.school.api.{CreateStudentOutput, StudentService}
+import persistent4s.EventStore
+import persistent4s.examples.school.api.{CreateStudentOutput, GetStudentsOutput, StudentItem, StudentService}
+import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.student.*
-import persistent4s.testkit.implicits.*
+import persistent4s.examples.school.infrastructure.SchoolModule
 
-class StudentServiceImpl extends StudentService[IO]:
+class StudentServiceImpl(module: SchoolModule) extends StudentService[IO]:
+
+  private given EventStore[IO, SchoolEvent] = module.store
 
   def createStudent(name: String, email: String): IO[CreateStudentOutput] =
     for
@@ -34,3 +38,8 @@ class StudentServiceImpl extends StudentService[IO]:
 
   def deleteStudent(studentId: String): IO[Unit] =
     DeleteStudentHandler.run[IO](DeleteStudent(studentId))
+
+  def getStudents(): IO[GetStudentsOutput] =
+    module.studentProjection.getStudents.map(students =>
+      GetStudentsOutput(students.map(s => StudentItem(s.studentId, s.name, s.email, s.nbCourses))),
+    )

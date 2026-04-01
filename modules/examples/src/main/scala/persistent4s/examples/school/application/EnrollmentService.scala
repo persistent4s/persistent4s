@@ -18,11 +18,18 @@ package persistent4s.examples.school.application
 
 import cats.effect.IO
 
-import persistent4s.examples.school.api.EnrollmentService
+import persistent4s.EventStore
+import persistent4s.examples.school.api.{EnrollmentService, GetCourseEnrollmentsOutput}
+import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.enrollment.*
-import persistent4s.testkit.implicits.*
+import persistent4s.examples.school.infrastructure.SchoolModule
 
-class EnrollmentServiceImpl extends EnrollmentService[IO]:
+class EnrollmentServiceImpl(module: SchoolModule) extends EnrollmentService[IO]:
+
+  private given EventStore[IO, SchoolEvent] = module.store
 
   def enrollStudent(studentId: String, courseId: String): IO[Unit] =
-    EnrollStudentHandler.run(EnrollStudent(studentId, courseId))
+    EnrollStudentHandler.run[IO](EnrollStudent(studentId, courseId))
+
+  def getCourseEnrollments(courseId: String): IO[GetCourseEnrollmentsOutput] =
+    module.enrollmentProjection.getEnrollments(courseId).map(ids => GetCourseEnrollmentsOutput(ids.toList))

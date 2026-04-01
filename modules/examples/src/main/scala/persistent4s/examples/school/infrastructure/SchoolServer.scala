@@ -29,22 +29,24 @@ import persistent4s.examples.school.application.*
 
 object SchoolServer extends IOApp.Simple:
 
-  val routes: Resource[IO, HttpRoutes[IO]] =
-    for
-      studentRoutes    <- SimpleRestJsonBuilder.routes(StudentServiceImpl()).resource
-      courseRoutes     <- SimpleRestJsonBuilder.routes(CourseServiceImpl()).resource
-      enrollmentRoutes <- SimpleRestJsonBuilder.routes(EnrollmentServiceImpl()).resource
-      eventsRoutes     <- SimpleRestJsonBuilder.routes(EventsServiceImpl()).resource
-      docsRoutes        = docs[IO](StudentService, CourseService, EnrollmentService, EventsService)
-    yield studentRoutes <+> courseRoutes <+> enrollmentRoutes <+> eventsRoutes <+> docsRoutes
-
   def run: IO[Unit] =
-    routes.allocated.map(_._1).flatMap { routes =>
-      EmberServerBuilder
-        .default[IO]
-        .withHost(host"0.0.0.0")
-        .withPort(port"8181")
-        .withHttpApp(routes.orNotFound)
-        .build
-        .useForever
+    SchoolModule.make.use { module =>
+      val routes: Resource[IO, HttpRoutes[IO]] =
+        for
+          studentRoutes    <- SimpleRestJsonBuilder.routes(StudentServiceImpl(module)).resource
+          courseRoutes     <- SimpleRestJsonBuilder.routes(CourseServiceImpl(module)).resource
+          enrollmentRoutes <- SimpleRestJsonBuilder.routes(EnrollmentServiceImpl(module)).resource
+          eventsRoutes     <- SimpleRestJsonBuilder.routes(EventsServiceImpl(module)).resource
+          docsRoutes        = docs[IO](StudentService, CourseService, EnrollmentService, EventsService)
+        yield studentRoutes <+> courseRoutes <+> enrollmentRoutes <+> eventsRoutes <+> docsRoutes
+
+      routes.use { r =>
+        EmberServerBuilder
+          .default[IO]
+          .withHost(host"0.0.0.0")
+          .withPort(port"8181")
+          .withHttpApp(r.orNotFound)
+          .build
+          .useForever
+      }
     }
