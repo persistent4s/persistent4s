@@ -41,6 +41,8 @@ val Http4sV = "0.23.30"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 
+val PureconfigV = "0.17.8"
+
 lazy val root = (project in file("."))
   .enablePlugins(NoPublishPlugin)
   .aggregate(core, postgres, circe, kafka, testkit, tests, examples)
@@ -58,14 +60,16 @@ lazy val core = (project in file("modules/core"))
   )
 
 lazy val postgres = (project in file("modules/postgres"))
-  .dependsOn(core)
+  .dependsOn(core, circe)
   .settings(
     name                 := "persistent4s-postgres",
     libraryDependencies ++= List(
-      "org.tpolecat"      %% "skunk-core"      % SkunkV,
-      "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
-      "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
-      "org.testcontainers" % "postgresql"      % TestcontainersV % Test,
+      "org.tpolecat"          %% "skunk-core"      % SkunkV,
+      "org.tpolecat"          %% "skunk-circe"     % SkunkV,
+      "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
+      "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
+      "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
+      "org.testcontainers"     % "postgresql"      % TestcontainersV % Test,
     ),
   )
 
