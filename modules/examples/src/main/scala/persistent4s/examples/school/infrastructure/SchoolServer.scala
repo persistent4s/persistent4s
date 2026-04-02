@@ -33,11 +33,24 @@ object SchoolServer extends IOApp.Simple:
     SchoolModule.make.use { module =>
       val routes: Resource[IO, HttpRoutes[IO]] =
         for
-          studentRoutes    <- SimpleRestJsonBuilder.routes(StudentServiceImpl(module)).resource
-          courseRoutes     <- SimpleRestJsonBuilder.routes(CourseServiceImpl(module)).resource
-          enrollmentRoutes <- SimpleRestJsonBuilder.routes(EnrollmentServiceImpl(module)).resource
-          eventsRoutes     <- SimpleRestJsonBuilder.routes(EventsServiceImpl(module)).resource
-          docsRoutes        = docs[IO](StudentService, CourseService, EnrollmentService, EventsService)
+          studentRoutes <- SimpleRestJsonBuilder
+                             .routes(StudentServiceImpl(module))
+                             .resource
+          courseRoutes <- SimpleRestJsonBuilder
+                            .routes(CourseServiceImpl(module))
+                            .resource
+          enrollmentRoutes <- SimpleRestJsonBuilder
+                                .routes(EnrollmentServiceImpl(module))
+                                .resource
+          eventsRoutes <- SimpleRestJsonBuilder
+                            .routes(EventsServiceImpl(module))
+                            .resource
+          docsRoutes = docs[IO](
+                         StudentService,
+                         CourseService,
+                         EnrollmentService,
+                         EventsService,
+                       )
         yield studentRoutes <+> courseRoutes <+> enrollmentRoutes <+> eventsRoutes <+> docsRoutes
 
       routes.use { r =>
