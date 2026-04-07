@@ -18,7 +18,7 @@ package persistent4s.testkit
 
 import cats.syntax.all.*
 import cats.effect.IO
-import persistent4s.{IndexConflictException, Tag}
+import persistent4s.{EventFilter, IndexConflictException, Tag}
 import weaver.SimpleIOSuite
 
 object InMemoryEventStoreSuite extends SimpleIOSuite:
@@ -139,7 +139,7 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
       _        <- appendOne(store, 0L, Set(student2), "StudentCreated", TestEvent.StudentCreated("2"))
       _        <- appendOne(store, 1L, Set(student1), "StudentDeleted", TestEvent.StudentDeleted("1"))
       _        <- appendOne(store, 0L, Set(course1), "CourseCreated", TestEvent.CourseCreated("1"))
-      filtered <- store.read(List("StudentCreated"), Set(student1)).compile.toList
+      filtered <- store.readFrom(0L, EventFilter(Set("StudentCreated"), Set(student1))).compile.toList
     yield expect.all(
       filtered.length == 1,
       filtered.head.metadata.tags == Set(student1),
