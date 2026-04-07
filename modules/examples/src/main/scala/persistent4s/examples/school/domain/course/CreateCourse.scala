@@ -16,7 +16,7 @@
 
 package persistent4s.examples.school.domain.course
 
-import cats.effect.Concurrent
+import cats.MonadThrow
 import cats.syntax.all.*
 
 import persistent4s.{CommandHandler, Tag}
@@ -39,8 +39,8 @@ object CreateCourseHandler extends CommandHandler[CreateCourse, CreateCourseStat
       case _: CourseCreated => state.copy(exists = true)
       case _                => state
 
-  def validate[F[_]: Concurrent](state: CreateCourseState, command: CreateCourse): F[Unit] =
-    Concurrent[F].raiseError(new Exception("Course already exists")).whenA(state.exists)
+  def validate[F[_]: MonadThrow](state: CreateCourseState, command: CreateCourse): F[Unit] =
+    MonadThrow[F].raiseError(new Exception("Course already exists")).whenA(state.exists)
 
   def decide(state: CreateCourseState, command: CreateCourse): List[(Set[Tag], SchoolEvent)] =
     List(

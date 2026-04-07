@@ -16,7 +16,7 @@
 
 package persistent4s.examples.school.domain.enrollment
 
-import cats.effect.Concurrent
+import cats.MonadThrow
 import cats.syntax.all.*
 
 import persistent4s.{CommandHandler, Tag}
@@ -51,13 +51,13 @@ object EnrollStudentHandler extends CommandHandler[EnrollStudent, EnrollStudentS
       case StudentEnrolled(studentId, _) => state.copy(enrolledStudents = state.enrolledStudents + studentId)
       case _                             => state
 
-  def validate[F[_]: Concurrent](state: EnrollStudentState, command: EnrollStudent): F[Unit] =
-    Concurrent[F].raiseError(new Exception("Student not found")).whenA(!state.studentExists) *>
-      Concurrent[F].raiseError(new Exception("Course not found")).whenA(!state.courseExists) *>
-      Concurrent[F]
+  def validate[F[_]: MonadThrow](state: EnrollStudentState, command: EnrollStudent): F[Unit] =
+    MonadThrow[F].raiseError(new Exception("Student not found")).whenA(!state.studentExists) *>
+      MonadThrow[F].raiseError(new Exception("Course not found")).whenA(!state.courseExists) *>
+      MonadThrow[F]
         .raiseError(new Exception("Course is full"))
         .whenA(state.enrolledStudents.size >= state.courseCapacity) *>
-      Concurrent[F]
+      MonadThrow[F]
         .raiseError(new Exception("Already enrolled"))
         .whenA(state.enrolledStudents.contains(command.studentId))
 
