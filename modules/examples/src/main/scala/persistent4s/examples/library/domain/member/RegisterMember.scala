@@ -16,7 +16,7 @@
 
 package persistent4s.examples.library.domain.member
 
-import cats.effect.Concurrent
+import cats.MonadThrow
 import cats.syntax.all.*
 
 import persistent4s.{CommandHandler, Tag}
@@ -43,8 +43,8 @@ object RegisterMemberHandler extends CommandHandler[RegisterMember, RegisterMemb
       case _: MemberRegistered => state.copy(exists = true)
       case _                   => state
 
-  def validate[F[_]: Concurrent](state: RegisterMemberState, command: RegisterMember): F[Unit] =
-    Concurrent[F].raiseError(new Exception("Member already registered")).whenA(state.exists)
+  def validate[F[_]: MonadThrow](state: RegisterMemberState, command: RegisterMember): F[Unit] =
+    MonadThrow[F].raiseError(new Exception("Member already registered")).whenA(state.exists)
 
   def decide(state: RegisterMemberState, command: RegisterMember): List[(Set[Tag], LibraryEvent)] =
     List(

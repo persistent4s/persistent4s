@@ -16,7 +16,7 @@
 
 package persistent4s.examples.library.domain.borrowing
 
-import cats.effect.Concurrent
+import cats.MonadThrow
 import cats.syntax.all.*
 
 import java.time.temporal.ChronoUnit
@@ -77,13 +77,13 @@ object BorrowBookHandler extends CommandHandler[BorrowBook, BorrowBookState, Lib
 
       case _ => state
 
-  def validate[F[_]: Concurrent](state: BorrowBookState, command: BorrowBook): F[Unit] =
-    Concurrent[F].raiseError(new Exception("Book not found")).whenA(!state.bookExists) *>
-      Concurrent[F].raiseError(new Exception("Member not found")).whenA(!state.memberExists) *>
-      Concurrent[F]
+  def validate[F[_]: MonadThrow](state: BorrowBookState, command: BorrowBook): F[Unit] =
+    MonadThrow[F].raiseError(new Exception("Book not found")).whenA(!state.bookExists) *>
+      MonadThrow[F].raiseError(new Exception("Member not found")).whenA(!state.memberExists) *>
+      MonadThrow[F]
         .raiseError(new Exception("No copies available"))
         .whenA(state.borrowedCopies >= state.totalCopies) *>
-      Concurrent[F]
+      MonadThrow[F]
         .raiseError(new Exception("Member already has this book"))
         .whenA(state.memberHasBook)
 

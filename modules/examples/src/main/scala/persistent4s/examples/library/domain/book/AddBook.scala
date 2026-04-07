@@ -16,7 +16,7 @@
 
 package persistent4s.examples.library.domain.book
 
-import cats.effect.Concurrent
+import cats.MonadThrow
 import cats.syntax.all.*
 
 import persistent4s.{CommandHandler, Tag}
@@ -44,8 +44,8 @@ object AddBookHandler extends CommandHandler[AddBook, AddBookState, LibraryEvent
       case _: BookAdded => state.copy(exists = true)
       case _            => state
 
-  def validate[F[_]: Concurrent](state: AddBookState, command: AddBook): F[Unit] =
-    Concurrent[F].raiseError(new Exception("Book already exists")).whenA(state.exists)
+  def validate[F[_]: MonadThrow](state: AddBookState, command: AddBook): F[Unit] =
+    MonadThrow[F].raiseError(new Exception("Book already exists")).whenA(state.exists)
 
   def decide(state: AddBookState, command: AddBook): List[(Set[Tag], LibraryEvent)] =
     List(

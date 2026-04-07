@@ -16,7 +16,7 @@
 
 package persistent4s.examples.library.domain.borrowing
 
-import cats.effect.Concurrent
+import cats.MonadThrow
 import cats.syntax.all.*
 
 import persistent4s.{CommandHandler, Tag}
@@ -52,9 +52,9 @@ object ReturnBookHandler extends CommandHandler[ReturnBook, ReturnBookState, Lib
         state.copy(alreadyReturned = true)
       case _ => state
 
-  def validate[F[_]: Concurrent](state: ReturnBookState, command: ReturnBook): F[Unit] =
-    Concurrent[F].raiseError(new Exception("Borrowing not found")).whenA(!state.hasBorrowing) *>
-      Concurrent[F].raiseError(new Exception("Book already returned")).whenA(state.alreadyReturned)
+  def validate[F[_]: MonadThrow](state: ReturnBookState, command: ReturnBook): F[Unit] =
+    MonadThrow[F].raiseError(new Exception("Borrowing not found")).whenA(!state.hasBorrowing) *>
+      MonadThrow[F].raiseError(new Exception("Book already returned")).whenA(state.alreadyReturned)
 
   def decide(state: ReturnBookState, command: ReturnBook): List[(Set[Tag], LibraryEvent)] =
     List(
