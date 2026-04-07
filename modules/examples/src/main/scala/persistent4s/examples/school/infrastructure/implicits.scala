@@ -14,11 +14,20 @@
  * limitations under the License.
  */
 
-package persistent4s.testkit
+package persistent4s.examples.school.infrastructure
 
 import cats.effect.IO
 import cats.effect.unsafe.implicits.global
 
+import persistent4s.EventStore
+import persistent4s.examples.school.domain.SchoolEvent
+import persistent4s.testkit.InMemoryEventStore
+
 object implicits:
 
-  implicit def store[A]: InMemoryEventStore[IO, A] = InMemoryEventStore.make[IO, A].unsafeRunSync()
+  private lazy val sharedStore: InMemoryEventStore[IO, SchoolEvent] =
+    InMemoryEventStore.make[IO, SchoolEvent].unsafeRunSync()
+
+  given InMemoryEventStore[IO, SchoolEvent] = sharedStore
+
+  given EventStore[IO, SchoolEvent] = sharedStore
