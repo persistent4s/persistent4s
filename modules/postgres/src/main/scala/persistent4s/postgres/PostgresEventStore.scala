@@ -83,24 +83,19 @@ final class PostgresEventStore[F[_]: Async, A] private (
       val eventTypesList = eventFilter.eventTypes.toList
       val tagsList = eventFilter.tags.map(_.value).toList
 
-      // Execute the appropriate query based on filter combination
       val eventsF: F[List[EventRow]] =
         (eventTypesList.isEmpty, tagsList.isEmpty) match
           case (true, true) =>
-            // No filters - fetch all events
             session.execute(readAllQuery)(fromPosition)
           case (false, true) =>
-            // Filter by event types only
             session.execute(readByEventTypesQuery(eventTypesList.size))(
               fromPosition *: eventTypesList *: EmptyTuple,
             )
           case (true, false) =>
-            // Filter by tags only
             session.execute(readByTagsQuery(tagsList.size))(
               fromPosition *: tagsList *: EmptyTuple,
             )
           case (false, false) =>
-            // Filter by both event types and tags
             session.execute(
               readByBothQuery(eventTypesList.size, tagsList.size),
             )(fromPosition *: eventTypesList *: tagsList *: EmptyTuple)
@@ -207,27 +202,23 @@ object PostgresEventStore:
   ): PostgresEventStore[F, A] =
     new PostgresEventStore[F, A](pool, codec, channelId)
 
-  // Codec for parsing tags from JSONB
   private val tagsCodec: Codec[Set[Tag]] = jsonb.imap { json =>
     json.asArray
       .map(_.flatMap(_.asString).flatMap(Tag.fromString).toSet)
       .getOrElse(Set.empty)
   }(tags => Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*))
 
-  // Decoder for reading events
   private val eventDecoder: Decoder[
     Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple,
   ] =
     int8 *: text *: tagsCodec *: jsonb *: timestamptz
 
-  // Command to insert a new event
   private val insertEventCommand: Command[String *: Json *: Json *: EmptyTuple] =
     sql"""
       INSERT INTO events (event_type, tags, payload)
       VALUES ($text, $jsonb, $jsonb)
     """.command
 
-  // Query to count conflicting events (events with matching tags after expected index)
   private def conflictCountQuery(
     n: Int,
   ): Query[Long *: List[String] *: EmptyTuple, Long] =
@@ -235,22 +226,19 @@ object PostgresEventStore:
       SELECT COUNT(*)
       FROM events
       WHERE sequence_number > $int8
-        AND jsonb_exists_any(tags, ${text.list(n)})
+        AND jsonb_exists_any(tags, ARRAY[${text.list(n)}])
     """.query(int8)
 
-  // Query to get the last sequence number for events with matching tags
   private def lastSequenceByTagsQuery(n: Int): Query[List[String], Long] =
     sql"""
       SELECT COALESCE(MAX(sequence_number), 0)
       FROM events
-      WHERE jsonb_exists_any(tags, ${text.list(n)})
+      WHERE jsonb_exists_any(tags, ARRAY[${text.list(n)}])
     """.query(int8)
 
-  // Type alias for event row tuple
   private type EventRow =
     Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple
 
-  // Query to read all events (no filters)
   private val readAllQuery: Query[Long, EventRow] =
     sql"""
       SELECT sequence_number, event_type, tags, payload, recorded_at
@@ -259,7 +247,6 @@ object PostgresEventStore:
       ORDER BY sequence_number ASC
     """.query(eventDecoder)
 
-  // Query to read events filtered by event types only
   private def readByEventTypesQuery(
     numEventTypes: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
@@ -267,11 +254,10 @@ object PostgresEventStore:
       SELECT sequence_number, event_type, tags, payload, recorded_at
       FROM events
       WHERE sequence_number > $int8
-        AND event_type = ANY(${text.list(numEventTypes)})
+        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
       ORDER BY sequence_number ASC
     """.query(eventDecoder)
 
-  // Query to read events filtered by tags only
   private def readByTagsQuery(
     numTags: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
@@ -279,11 +265,10 @@ object PostgresEventStore:
       SELECT sequence_number, event_type, tags, payload, recorded_at
       FROM events
       WHERE sequence_number > $int8
-        AND jsonb_exists_any(tags, ${text.list(numTags)})
+        AND jsonb_exists_any(tags, ARRAY[${text.list(numTags)}])
       ORDER BY sequence_number ASC
     """.query(eventDecoder)
 
-  // Query to read events filtered by both event types and tags
   private def readByBothQuery(
     numEventTypes: Int,
     numTags: Int,
@@ -292,7 +277,7 @@ object PostgresEventStore:
       SELECT sequence_number, event_type, tags, payload, recorded_at
       FROM events
       WHERE sequence_number > $int8
-        AND event_type = ANY(${text.list(numEventTypes)})
-        AND jsonb_exists_any(tags, ${text.list(numTags)})
+        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+        AND jsonb_exists_any(tags, ARRAY[${text.list(numTags)}])
       ORDER BY sequence_number ASC
     """.query(eventDecoder)
