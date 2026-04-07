@@ -34,10 +34,10 @@ import pureconfig.ConfigReader
   *   the maximum number of connections in the pool (default: 10)
   */
 final case class PostgresConfig(
-    host: String,
-    port: Int = 5432,
-    user: String,
-    password: String,
-    database: String,
-    maxConnections: Int = 10
+  host: String,
+  port: Int = 5432,
+  user: String,
+  password: String,
+  database: String,
+  maxConnections: Int = 10,
 ) derives ConfigReader
