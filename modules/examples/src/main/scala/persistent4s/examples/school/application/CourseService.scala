@@ -20,8 +20,8 @@ import java.util.UUID
 import cats.effect.IO
 
 import persistent4s.examples.school.api.{CourseService, CreateCourseOutput}
+import persistent4s.examples.school.infrastructure.implicits.given
 import persistent4s.examples.school.domain.course.*
-import persistent4s.testkit.implicits.*
 
 class CourseServiceImpl extends CourseService[IO]:
 
