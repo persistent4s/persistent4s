@@ -19,8 +19,8 @@ package persistent4s.examples.school.application
 import cats.effect.IO
 
 import persistent4s.examples.school.api.EnrollmentService
+import persistent4s.examples.school.infrastructure.implicits.given
 import persistent4s.examples.school.domain.enrollment.*
-import persistent4s.testkit.implicits.*
 
 class EnrollmentServiceImpl extends EnrollmentService[IO]:
 
