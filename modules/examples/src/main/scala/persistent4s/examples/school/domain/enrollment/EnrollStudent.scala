@@ -44,7 +44,7 @@ object EnrollStudentHandler extends CommandHandler[EnrollStudent, EnrollStudentS
   def initial: EnrollStudentState =
     EnrollStudentState(studentExists = false, courseExists = false, courseCapacity = 0, enrolledStudents = Set.empty)
 
-  def evolve(state: EnrollStudentState, event: SchoolEvent): EnrollStudentState =
+  def evolve(command: EnrollStudent, state: EnrollStudentState, event: SchoolEvent): EnrollStudentState =
     event match
       case _: StudentCreated             => state.copy(studentExists = true)
       case CourseCreated(_, _, capacity) => state.copy(courseExists = true, courseCapacity = capacity)

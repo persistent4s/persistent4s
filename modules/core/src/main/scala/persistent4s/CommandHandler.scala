@@ -44,7 +44,7 @@ trait CommandHandler[C, S, E]:
   def initial: S
 
   /** Fold a single event into the current state. */
-  def evolve(state: S, event: E): S
+  def evolve(command: C, state: S, event: E): S
 
   /** Validate the command against the current state. Should raise an error if the command is invalid. */
   def validate[F[_]: MonadThrow](state: S, command: C): F[Unit]
@@ -58,8 +58,8 @@ trait CommandHandler[C, S, E]:
   def run[F[_]: Concurrent](command: C)(using eventStore: EventStore[F, E]): F[Unit] =
     for
       tags      <- Concurrent[F].pure(tags(command))
-      envelopes <- eventStore.readFrom(0L, EventFilter(eventTypes.getOrElse(Set.empty), tags)).compile.toList
-      state      = envelopes.foldLeft(initial)((s, env) => evolve(s, env.payload))
+      envelopes <- eventStore.read(eventTypes.getOrElse(Set.empty).toList, tags).compile.toList
+      state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
       index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
       _         <- validate(state, command)
       decided    = decide(state, command)
