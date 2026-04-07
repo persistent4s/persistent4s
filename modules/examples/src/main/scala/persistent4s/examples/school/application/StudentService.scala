@@ -22,7 +22,8 @@ import cats.effect.IO
 
 import persistent4s.examples.school.api.{CreateStudentOutput, StudentService}
 import persistent4s.examples.school.domain.student.*
-import persistent4s.testkit.implicits.*
+import persistent4s.examples.school.infrastructure.SchoolEventCodec.codec
+import persistent4s.postgres.implicits.*
 
 class StudentServiceImpl extends StudentService[IO]:
 

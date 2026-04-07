@@ -16,10 +16,12 @@
 
 package persistent4s.examples.school.domain.student
 
+import io.circe.Codec
+
 import persistent4s.examples.school.domain.SchoolEvent
 
 sealed trait StudentEvent extends SchoolEvent
 
-final case class StudentCreated(studentId: String, name: String, email: String) extends StudentEvent
+final case class StudentCreated(studentId: String, name: String, email: String) extends StudentEvent derives Codec
 
-final case class StudentDeleted(studentId: String) extends StudentEvent
+final case class StudentDeleted(studentId: String) extends StudentEvent derives Codec

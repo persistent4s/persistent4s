@@ -116,7 +116,7 @@ lazy val tests = (project in file("modules/tests"))
   )
 
 lazy val examples = (project in file("modules/examples"))
-  .dependsOn(core, testkit)
+  .dependsOn(core, testkit, postgres, circe)
   .enablePlugins(NoPublishPlugin, Smithy4sCodegenPlugin)
   .settings(
     name                 := "persistent4s-examples",

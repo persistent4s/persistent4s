@@ -35,9 +35,6 @@ final case class EnrollStudentState(
 
 object EnrollStudentHandler extends CommandHandler[EnrollStudent, EnrollStudentState, SchoolEvent]:
 
-  override def eventTypes: Option[Set[String]] =
-    Some(Set("StudentCreated", "CourseCreated", "StudentEnrolled"))
-
   def tags(command: EnrollStudent): Set[Tag] =
     Set(Tag("student", command.studentId), Tag("course", command.courseId))
 

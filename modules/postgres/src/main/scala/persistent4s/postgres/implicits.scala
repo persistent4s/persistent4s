@@ -14,18 +14,19 @@
  * limitations under the License.
  */
 
-package persistent4s.examples.school.application
+package persistent4s.postgres
 
 import cats.effect.IO
+import cats.effect.unsafe.implicits.global
+import natchez.Trace.Implicits.noop
 
-import persistent4s.examples.school.api.EnrollmentService
-import persistent4s.examples.school.domain.enrollment.*
-import persistent4s.examples.school.infrastructure.SchoolEventCodec.codec
-import persistent4s.postgres.implicits.*
+import persistent4s.EventCodec
 
-class EnrollmentServiceImpl extends EnrollmentService[IO]:
+object implicits:
 
-  def enrollStudent(studentId: String, courseId: String): IO[Unit] =
-    EnrollStudentHandler.run[IO](EnrollStudent(studentId, courseId)).handleErrorWith { e =>
-      IO.println(s"Failed to enroll student $studentId in course $courseId: ${e.getMessage}") >> IO.raiseError(e)
-    }
+  private val defaultConfig = PostgresEventStore.Config(
+    host = "localhost", port = 5450, database = "persistent4s", user = "persistent4s", password = "persistent4s",
+  )
+
+  implicit def store[A](implicit codec: EventCodec[A]): PostgresEventStore[IO, A] =
+    PostgresEventStore.make[IO, A](defaultConfig, codec).allocated.unsafeRunSync()._1

@@ -27,5 +27,5 @@ trait EventCodec[A]:
   /** Serialize an event to a String representation. */
   def encode(event: A): String
 
-  /** Deserialize an event from its type name and String representation. */
-  def decode(eventType: String, payload: String): Either[Throwable, A]
+  /** Deserialize an event from its String representation. */
+  def decode(payload: String): Either[Throwable, A]

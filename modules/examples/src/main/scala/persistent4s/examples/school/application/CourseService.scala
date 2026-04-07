@@ -21,7 +21,8 @@ import cats.effect.IO
 
 import persistent4s.examples.school.api.{CourseService, CreateCourseOutput}
 import persistent4s.examples.school.domain.course.*
-import persistent4s.testkit.implicits.*
+import persistent4s.examples.school.infrastructure.SchoolEventCodec.codec
+import persistent4s.postgres.implicits.*
 
 class CourseServiceImpl extends CourseService[IO]:
 

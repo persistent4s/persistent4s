@@ -45,6 +45,7 @@ object SchoolServer extends IOApp.Simple:
         .withHost(host"0.0.0.0")
         .withPort(port"8181")
         .withHttpApp(routes.orNotFound)
+        .withErrorHandler(e => IO.println(s"There was an error: $e") >> IO.raiseError(e))
         .build
         .useForever
     }

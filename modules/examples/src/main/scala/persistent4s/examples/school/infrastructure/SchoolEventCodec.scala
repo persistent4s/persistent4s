@@ -14,12 +14,12 @@
  * limitations under the License.
  */
 
-package persistent4s.examples.school.domain.enrollment
+package persistent4s.examples.school.infrastructure
 
-import io.circe.{Decoder, Encoder}
-
+import persistent4s.EventCodec
+import persistent4s.circe.CirceEventCodec
 import persistent4s.examples.school.domain.SchoolEvent
 
-sealed trait EnrollmentEvent extends SchoolEvent
+object SchoolEventCodec:
 
-final case class StudentEnrolled(studentId: String, courseId: String) extends EnrollmentEvent derives Encoder, Decoder
+  implicit val codec: EventCodec[SchoolEvent] = CirceEventCodec.auto[SchoolEvent]

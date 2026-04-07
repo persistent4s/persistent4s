@@ -18,21 +18,25 @@ package persistent4s.examples.school.application
 
 import cats.effect.IO
 
+import persistent4s.EventStore
 import persistent4s.examples.school.api.{Event, EventsService, GetEventsOutput}
-import persistent4s.testkit.InMemoryEventStore
-import persistent4s.testkit.implicits.*
+import persistent4s.examples.school.domain.SchoolEvent
+import persistent4s.examples.school.infrastructure.SchoolEventCodec.codec
+import persistent4s.postgres.implicits.*
 
 class EventsServiceImpl extends EventsService[IO]:
 
-  private val store = summon[InMemoryEventStore[IO, ?]]
+  private val store = implicitly[EventStore[IO, SchoolEvent]]
 
   def getEvents(): IO[GetEventsOutput] =
-    store.getEvents.map { events =>
+    store.read(List.empty).compile.toList.map { events =>
       GetEventsOutput(
-        events.toList.map { env =>
+        events.map { env =>
           Event(
-            globalPosition = env.metadata.globalPosition, tags = env.metadata.tags.toList.map(_.value),
-            eventType = env.metadata.eventType, timestamp = env.metadata.timestamp.toString,
+            globalPosition = env.metadata.globalPosition,
+            tags = env.metadata.tags.toList.map(_.value),
+            eventType = env.metadata.eventType,
+            timestamp = env.metadata.timestamp.toString,
             payload = env.payload.toString,
           )
         },

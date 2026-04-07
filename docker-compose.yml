@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:17
+    ports:
+      - "5450:5432"
+    environment:
+      POSTGRES_DB: persistent4s
+      POSTGRES_USER: persistent4s
+      POSTGRES_PASSWORD: persistent4s
+    volumes:
+      - ./modules/postgres/src/main/resources/migration.sql:/docker-entrypoint-initdb.d/01-migration.sql
+      - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

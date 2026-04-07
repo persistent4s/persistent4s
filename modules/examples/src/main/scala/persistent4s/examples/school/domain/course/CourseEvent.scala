@@ -16,8 +16,12 @@
 
 package persistent4s.examples.school.domain.course
 
+import io.circe.{Decoder, Encoder}
+
 import persistent4s.examples.school.domain.SchoolEvent
 
 sealed trait CourseEvent extends SchoolEvent
 
 final case class CourseCreated(courseId: String, title: String, capacity: Int) extends CourseEvent
+    derives Encoder,
+      Decoder
