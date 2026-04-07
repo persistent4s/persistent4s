@@ -34,7 +34,7 @@ object DeleteStudentHandler extends CommandHandler[DeleteStudent, DeleteStudentS
   def initial: DeleteStudentState =
     DeleteStudentState(exists = false)
 
-  def evolve(state: DeleteStudentState, event: SchoolEvent): DeleteStudentState =
+  def evolve(command: DeleteStudent, state: DeleteStudentState, event: SchoolEvent): DeleteStudentState =
     event match
       case _: StudentCreated => state.copy(exists = true)
       case _                 => state

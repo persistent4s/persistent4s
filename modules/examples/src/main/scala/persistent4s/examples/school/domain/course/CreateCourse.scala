@@ -34,7 +34,7 @@ object CreateCourseHandler extends CommandHandler[CreateCourse, CreateCourseStat
   def initial: CreateCourseState =
     CreateCourseState(exists = false)
 
-  def evolve(state: CreateCourseState, event: SchoolEvent): CreateCourseState =
+  def evolve(command: CreateCourse, state: CreateCourseState, event: SchoolEvent): CreateCourseState =
     event match
       case _: CourseCreated => state.copy(exists = true)
       case _                => state
