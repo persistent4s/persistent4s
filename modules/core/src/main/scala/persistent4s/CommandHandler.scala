@@ -18,6 +18,7 @@ package persistent4s
 
 import cats.effect.Concurrent
 import cats.syntax.all.*
+import cats.MonadThrow
 
 /** A CommandHandler defines how a command is processed in an event-sourced system. It reads events from the store to
   * build the current state, validates the command against that state, and decides which new events to produce.
@@ -46,7 +47,7 @@ trait CommandHandler[C, S, E]:
   def evolve(command: C, state: S, event: E): S
 
   /** Validate the command against the current state. Should raise an error if the command is invalid. */
-  def validate[F[_]: Concurrent](state: S, command: C): F[Unit]
+  def validate[F[_]: MonadThrow](state: S, command: C): F[Unit]
 
   /** Produce the events that result from applying the command, each with its own set of tags. Only called after
     * validation passes.

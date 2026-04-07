@@ -1,6 +1,6 @@
 ThisBuild / tlBaseVersion          := "0.1"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
-ThisBuild / scalaVersion           := "3.8.2"
+ThisBuild / scalaVersion           := "3.8.3"
 ThisBuild / tlJdkRelease           := Some(17)
 ThisBuild / organization           := "io.github.antoniojimeneznieto"
 ThisBuild / organizationName       := "persistent4s"
@@ -37,7 +37,7 @@ val Fs2KafkaV = "3.9.1"
 
 val WeaverV = "0.12.0"
 
-val Http4sV = "0.23.30"
+val Http4sV = "0.23.33"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 
