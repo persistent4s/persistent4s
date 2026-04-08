@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package persistent4s
 
 /** An IndexConflictException is thrown when there is a conflict between the expected index and the actual index in the

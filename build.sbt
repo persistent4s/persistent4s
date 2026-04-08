@@ -3,13 +3,10 @@ ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module rest
 ThisBuild / scalaVersion           := "3.8.3"
 ThisBuild / tlJdkRelease           := Some(17)
 ThisBuild / organization           := "io.github.antoniojimeneznieto"
-ThisBuild / organizationName       := "persistent4s"
+ThisBuild / organizationName       := "Antonio Jimenez and Bastien Jolidon"
 ThisBuild / startYear              := Some(2026)
 ThisBuild / licenses               := Seq(License.Apache2)
-ThisBuild / headerLicense          := Some(
-  HeaderLicense.ALv2("2026", "Antonio Jimenez and Bastien Jolidon"),
-)
-ThisBuild / developers := List(
+ThisBuild / developers             := List(
   tlGitHubDev("antoniojimeneznieto", "Antonio Jimenez"),
   tlGitHubDev("Bjolidon", "Bastien Jolidon"),
 )
