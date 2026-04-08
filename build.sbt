@@ -6,7 +6,10 @@ ThisBuild / organization           := "io.github.antoniojimeneznieto"
 ThisBuild / organizationName       := "persistent4s"
 ThisBuild / startYear              := Some(2026)
 ThisBuild / licenses               := Seq(License.Apache2)
-ThisBuild / developers             := List(
+ThisBuild / headerLicense          := Some(
+  HeaderLicense.ALv2("2026", "Antonio Jimenez and Bastien Jolidon"),
+)
+ThisBuild / developers := List(
   tlGitHubDev("antoniojimeneznieto", "Antonio Jimenez"),
   tlGitHubDev("Bjolidon", "Bastien Jolidon"),
 )
