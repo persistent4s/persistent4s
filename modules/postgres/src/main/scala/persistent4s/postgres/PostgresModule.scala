@@ -30,12 +30,10 @@ import skunk.codec.all.*
 
 import persistent4s.EventCodec
 
-/** Errors that can occur during PostgresModule initialization. */
 sealed trait PostgresModuleError extends Throwable
 
 object PostgresModuleError:
 
-  /** No configuration was found at the expected path in application.conf. */
   final case class ConfigNotFound(path: String, details: String) extends PostgresModuleError:
 
     override def getMessage: String =
@@ -56,7 +54,6 @@ object PostgresModuleError:
          |
          |Configuration error details: $details""".stripMargin
 
-  /** The database connection failed. */
   final case class ConnectionFailed(cause: Throwable) extends PostgresModuleError:
 
     override def getMessage: String =
@@ -181,7 +178,6 @@ object PostgresModule:
       session.execute(createEventTypeIndexCommand) *>
       session.execute(createSequenceNumberIndexCommand).void
 
-  // SQL queries for schema management
   private val checkTableExistsQuery: Query[Void, Long] =
     sql"""
       SELECT COUNT(*)

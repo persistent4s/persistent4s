@@ -66,6 +66,7 @@ final class PostgresEventStore[F[_]: Async, A] private (
       pool.use { session =>
         session.transaction.use { _ =>
           for
+            _ <- session.unique(acquireAppendLockQuery)
             _ <- checkForConflicts(session, flatEvents, expectedIndex)
             _ <- flatEvents.traverse_ { case (tags, eventType, event) =>
                    insertEvent(session, tags, eventType, event)
@@ -212,6 +213,9 @@ object PostgresEventStore:
     Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple,
   ] =
     int8 *: text *: tagsCodec *: jsonb *: timestamptz
+
+  private val acquireAppendLockQuery: Query[Void, String] =
+    sql"""SELECT pg_advisory_xact_lock(hashtext('persistent4s_events'))::text""".query(text)
 
   private val insertEventCommand: Command[String *: Json *: Json *: EmptyTuple] =
     sql"""
