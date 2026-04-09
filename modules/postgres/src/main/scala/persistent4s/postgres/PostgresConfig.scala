@@ -31,7 +31,7 @@ import pureconfig.ConfigReader
   * @param database
   *   the database name
   * @param maxConnections
-  *   the maximum number of connections in the pool (default: 10)
+  *   the maximum number of connections in the pool (default: 32)
   */
 final case class PostgresConfig(
   host: String,
@@ -39,5 +39,5 @@ final case class PostgresConfig(
   user: String,
   password: String,
   database: String,
-  maxConnections: Int = 10,
+  maxConnections: Int = 32,
 ) derives ConfigReader
