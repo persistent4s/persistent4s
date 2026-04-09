@@ -31,3 +31,11 @@ trait Projector[F[_], A]:
     *   the projection to run
     */
   def run(projection: Projection[F, A]): Stream[F, Unit]
+
+object Projector:
+
+  def apply[F[_], A](
+    eventStore: EventStore[F, A] & EventNotification[F],
+    checkpoint: ProjectionCheckpoint[F],
+  )(using cats.effect.Async[F]): Projector[F, A] =
+    DefaultProjector(eventStore, checkpoint)

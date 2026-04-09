@@ -14,16 +14,15 @@
  * limitations under the License.
  */
 
-package persistent4s.testkit
+package persistent4s
 
-import persistent4s.*
-import cats.effect.*
+import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Stream
 
-final case class InMemoryProjector[F[_]: Async, A](
-  eventStore: InMemoryEventStore[F, A],
-  checkpoint: InMemoryProjectionCheckpoint[F],
+final case class DefaultProjector[F[_]: Async, A](
+  eventStore: EventStore[F, A] & EventNotification[F],
+  checkpoint: ProjectionCheckpoint[F],
 ) extends Projector[F, A]:
 
   override def run(projection: Projection[F, A]): Stream[F, Unit] =

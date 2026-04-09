@@ -22,7 +22,8 @@ import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.course.CourseProjection
 import persistent4s.examples.school.domain.enrollment.EnrollmentProjection
 import persistent4s.examples.school.domain.student.StudentProjection
-import persistent4s.testkit.{InMemoryEventStore, InMemoryProjectionCheckpoint, InMemoryProjector}
+import persistent4s.DefaultProjector
+import persistent4s.testkit.{InMemoryEventStore, InMemoryProjectionCheckpoint}
 
 final class SchoolModule private (
   val store: InMemoryEventStore[IO, SchoolEvent],
@@ -40,7 +41,7 @@ object SchoolModule:
       studentProj    <- Resource.eval(StudentProjection.make[IO])
       courseProj     <- Resource.eval(CourseProjection.make[IO])
       enrollmentProj <- Resource.eval(EnrollmentProjection.make[IO])
-      projector       = InMemoryProjector[IO, SchoolEvent](store, checkpoint)
+      projector       = DefaultProjector[IO, SchoolEvent](store, checkpoint)
       _              <- projector.run(studentProj).compile.drain.background
       _              <- projector.run(courseProj).compile.drain.background
       _              <- projector.run(enrollmentProj).compile.drain.background

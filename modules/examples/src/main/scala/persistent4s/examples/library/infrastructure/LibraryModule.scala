@@ -17,7 +17,6 @@
 package persistent4s.examples.library.infrastructure
 
 import cats.effect.*
-import fs2.Stream
 import fs2.io.net.Network
 import natchez.Trace.Implicits.noop
 
@@ -51,25 +50,8 @@ object LibraryModule:
       bookProj      <- Resource.eval(BookProjection.make[IO])
       memberProj    <- Resource.eval(MemberProjection.make[IO])
       borrowingProj <- Resource.eval(BorrowingProjection.make[IO])
-      _             <- runProjector(store, checkpoint, bookProj).compile.drain.background
-      _             <- runProjector(store, checkpoint, memberProj).compile.drain.background
-      _             <- runProjector(store, checkpoint, borrowingProj).compile.drain.background
+      projector      = DefaultProjector[IO, LibraryEvent](store, checkpoint)
+      _             <- projector.run(bookProj).compile.drain.background
+      _             <- projector.run(memberProj).compile.drain.background
+      _             <- projector.run(borrowingProj).compile.drain.background
     yield new LibraryModule(store, bookProj, memberProj, borrowingProj)
-
-  private def runProjector[A](
-    store: PostgresEventStore[IO, A] & EventNotification[IO],
-    checkpoint: ProjectionCheckpoint[IO],
-    projection: Projection[IO, A],
-  ): Stream[IO, Unit] =
-    val processEvents: Stream[IO, Unit] =
-      Stream
-        .eval(checkpoint.load(projection.name))
-        .flatMap { lastPosition =>
-          store.readFrom(lastPosition.getOrElse(-1L), projection.filter)
-        }
-        .evalMap { envelope =>
-          projection.handle(envelope) *>
-            checkpoint.save(projection.name, envelope.metadata.globalPosition)
-        }
-
-    (Stream.emit(()) ++ store.notification).flatMap(_ => processEvents)
