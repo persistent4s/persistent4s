@@ -38,6 +38,10 @@ trait Projection[F[_], A]:
   /** Handle an incoming event. This method will be called for each event that matches the projection's filter. The
     * projection should perform any necessary processing of the event, such as updating a read model.
     *
+    * Important note: If the handler is not idempotent, it may be called multiple times for the same event in case of
+    * retries or failures. Therefore, it's crucial to ensure that the handler can safely handle duplicate events without
+    * causing inconsistent state or side effects.
+    *
     * @param event
     *   the event to handle
     */
