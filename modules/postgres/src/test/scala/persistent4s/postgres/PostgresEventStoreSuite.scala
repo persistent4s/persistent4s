@@ -73,9 +73,6 @@ object PostgresEventStoreSuite extends IOSuite:
   ): IO[Unit] =
     store.append(expectedIndex, List((tags, "TestEvent", TestEvent(value))))
 
-  private def reset(store: PostgresEventStore[IO, TestEvent]): IO[Unit] =
-    store.truncateAll
-
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
     result match
       case Left(_: IndexConflictException) => true
@@ -86,7 +83,6 @@ object PostgresEventStoreSuite extends IOSuite:
 
   test("concurrent appends with the same tag allow only one success") { store =>
     for
-      _              <- reset(store)
       id             <- freshId("student")
       tag             = Tag("student", id)
       first           = appendOne(store, 0L, Set(tag), "first").attempt
@@ -104,7 +100,6 @@ object PostgresEventStoreSuite extends IOSuite:
 
   test("concurrent appends with overlapping tag sets allow only one success") { store =>
     for
-      _              <- reset(store)
       studentId      <- freshId("student")
       courseId       <- freshId("course")
       studentTag      = Tag("student", studentId)
@@ -126,7 +121,6 @@ object PostgresEventStoreSuite extends IOSuite:
     val numberOfEvents = 50
 
     for
-      _       <- reset(store)
       runId   <- freshId("distinct")
       tags     = (1 to numberOfEvents).map(index => Tag("student", s"$runId-$index")).toList
       results <- tags.parTraverse { tag =>
@@ -141,17 +135,16 @@ object PostgresEventStoreSuite extends IOSuite:
     )
   }
 
-  test("truncateAll removes stored events and resets sequence numbers") { store =>
+  test("appends with fresh tags can start from expected index zero after prior events") { store =>
     for
-      _        <- reset(store)
-      tag      <- freshId("reset").map(id => Tag("student", id))
-      _        <- appendOne(store, 0L, Set(tag), "before-truncate")
-      _        <- store.truncateAll
-      _        <- appendOne(store, 0L, Set(tag), "after-truncate")
-      events   <- store.readFrom(0L, EventFilter(Set("TestEvent"), Set(tag))).compile.toList
-      positions = events.map(_.metadata.globalPosition)
+      firstTag  <- freshId("first").map(id => Tag("student", id))
+      secondTag <- freshId("second").map(id => Tag("student", id))
+      _         <- appendOne(store, 0L, Set(firstTag), "before")
+      result    <- appendOne(store, 0L, Set(secondTag), "after").attempt
+      events    <- store.readFrom(0L, EventFilter(Set("TestEvent"), Set(secondTag))).compile.toList
     yield expect.all(
       events.length == 1,
-      positions == List(1L),
+      result.isRight,
+      events.head.payload == TestEvent("after"),
     )
   }
