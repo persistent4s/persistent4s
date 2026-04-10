@@ -63,13 +63,14 @@ final class PostgresEventStore[F[_]: Async, A] private (
     val flatEvents = events.flatten.toList
     if flatEvents.isEmpty then Async[F].unit
     else
+      val allTags = flatEvents.flatMap(_._1).toSet
       pool.use { session =>
         session.transaction.use { _ =>
           for
-            _ <- session.unique(acquireAppendLockQuery)
-            _ <- checkForConflicts(session, flatEvents, expectedIndex)
+            _ <- acquireAppendLocks(session, allTags)
+            _ <- checkForConflicts(session, allTags, expectedIndex)
             _ <- flatEvents.traverse_ { case (tags, eventType, event) =>
-                   insertEvent(session, tags, eventType, event)
+                   insertEvent(session, tags, eventType, event).void
                  }
             _ <- session.channel(channelId).notify("")
           yield ()
@@ -130,42 +131,56 @@ final class PostgresEventStore[F[_]: Async, A] private (
 
   private def checkForConflicts(
     session: Session[F],
-    events: List[(Set[Tag], String, A)],
+    tags: Set[Tag],
     expectedIndex: Long,
   ): F[Unit] =
-    val allTags = events.flatMap(_._1).toSet
-    if allTags.isEmpty then Async[F].unit
+    if tags.isEmpty then Async[F].unit
     else
-      val tagList = allTags.map(_.value).toList
+      val tagList = tags.toList.map(_.value)
       for
-        conflictCount <- session.unique(conflictCountQuery(tagList.size))(
-                           expectedIndex *: tagList *: EmptyTuple,
-                         )
+        actualIndex <- session.unique(lastConflictingSequenceQuery(tagList.size))(
+                         expectedIndex *: tagList *: EmptyTuple,
+                       )
         _ <-
-          if conflictCount > 0 then
-            session
-              .unique(lastSequenceByTagsQuery(tagList.size))(tagList)
-              .flatMap { actualIndex =>
-                Async[F].raiseError(
-                  IndexConflictException(expectedIndex, actualIndex),
-                )
-              }
+          if actualIndex > 0 then Async[F].raiseError(IndexConflictException(expectedIndex, actualIndex))
           else Async[F].unit
       yield ()
+
+  private def acquireAppendLocks(
+    session: Session[F],
+    tags: Set[Tag],
+  ): F[Unit] =
+    tags.toList
+      .sortBy(_.value)
+      .traverse_(tag => session.unique(acquireTagLockQuery)(tag.value).void)
 
   private def insertEvent(
     session: Session[F],
     tags: Set[Tag],
     eventType: String,
     event: A,
-  ): F[Unit] =
+  ): F[Long] =
     val tagsJson = tagsToJson(tags)
     val payloadJson = parseJson(codec.encode(event)).getOrElse(Json.obj())
-    session
-      .execute(insertEventCommand)(
-        eventType *: tagsJson *: payloadJson *: EmptyTuple,
-      )
-      .void
+    for
+      sequenceNumber <- session.unique(insertEventQuery)(
+                          eventType *: tagsJson *: payloadJson *: EmptyTuple,
+                        )
+      _ <- insertEventTags(session, sequenceNumber, tags)
+    yield sequenceNumber
+
+  private def insertEventTags(
+    session: Session[F],
+    sequenceNumber: Long,
+    tags: Set[Tag],
+  ): F[Unit] =
+    tags.toList.traverse_ { tag =>
+      session
+        .execute(insertEventTagCommand)(
+          tag.value *: sequenceNumber *: EmptyTuple,
+        )
+        .void
+    }
 
   private def parsePayload(eventType: String, payload: Json): F[A] =
     codec.decode(eventType, payload.noSpaces) match
@@ -214,30 +229,31 @@ object PostgresEventStore:
   ] =
     int8 *: text *: tagsCodec *: jsonb *: timestamptz
 
-  private val acquireAppendLockQuery: Query[Void, String] =
-    sql"""SELECT pg_advisory_xact_lock(hashtext('persistent4s_events'))::text""".query(text)
+  private val acquireTagLockQuery: Query[String, String] =
+    sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
 
-  private val insertEventCommand: Command[String *: Json *: Json *: EmptyTuple] =
+  private val insertEventQuery: Query[String *: Json *: Json *: EmptyTuple, Long] =
     sql"""
       INSERT INTO events (event_type, tags, payload)
       VALUES ($text, $jsonb, $jsonb)
+      RETURNING sequence_number
+    """.query(int8)
+
+  private val insertEventTagCommand: Command[String *: Long *: EmptyTuple] =
+    sql"""
+      INSERT INTO event_tags (tag, sequence_number)
+      VALUES ($text, $int8)
+      ON CONFLICT DO NOTHING
     """.command
 
-  private def conflictCountQuery(
+  private def lastConflictingSequenceQuery(
     n: Int,
   ): Query[Long *: List[String] *: EmptyTuple, Long] =
     sql"""
-      SELECT COUNT(*)
-      FROM events
-      WHERE sequence_number > $int8
-        AND jsonb_exists_any(tags, ARRAY[${text.list(n)}])
-    """.query(int8)
-
-  private def lastSequenceByTagsQuery(n: Int): Query[List[String], Long] =
-    sql"""
       SELECT COALESCE(MAX(sequence_number), 0)
-      FROM events
-      WHERE jsonb_exists_any(tags, ARRAY[${text.list(n)}])
+      FROM event_tags
+      WHERE sequence_number > $int8
+        AND tag = ANY(ARRAY[${text.list(n)}])
     """.query(int8)
 
   private type EventRow =
@@ -266,11 +282,13 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_type, tags, payload, recorded_at
-      FROM events
-      WHERE sequence_number > $int8
-        AND jsonb_exists_any(tags, ARRAY[${text.list(numTags)}])
-      ORDER BY sequence_number ASC
+      SELECT DISTINCT ON (e.sequence_number)
+        e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      FROM event_tags et
+      JOIN events e ON e.sequence_number = et.sequence_number
+      WHERE et.sequence_number > $int8
+        AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+      ORDER BY e.sequence_number ASC
     """.query(eventDecoder)
 
   private def readByBothQuery(
@@ -278,10 +296,12 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_type, tags, payload, recorded_at
-      FROM events
-      WHERE sequence_number > $int8
-        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-        AND jsonb_exists_any(tags, ARRAY[${text.list(numTags)}])
-      ORDER BY sequence_number ASC
+      SELECT DISTINCT ON (e.sequence_number)
+        e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      FROM event_tags et
+      JOIN events e ON e.sequence_number = et.sequence_number
+      WHERE et.sequence_number > $int8
+        AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+        AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+      ORDER BY e.sequence_number ASC
     """.query(eventDecoder)

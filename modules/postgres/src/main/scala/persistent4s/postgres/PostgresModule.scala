@@ -71,7 +71,7 @@ object PostgresModuleError:
 /** A module that provides a fully-initialized PostgresEventStore. It handles:
   *   - Loading configuration from application.conf
   *   - Establishing database connections
-  *   - Creating the event store table if it doesn't exist
+  *   - Creating the event store schema if it doesn't exist
   *   - Providing the PostgresEventStore instance
   */
 object PostgresModule:
@@ -154,36 +154,29 @@ object PostgresModule:
   ): F[Unit] =
     pool.use { session =>
       for
-        tableExists <- checkTableExists(session)
-        _           <-
-          if tableExists then
-            logger.info(
-              "Event store table 'events' already exists, starting normally",
-            )
-          else
-            logger.info(
-              "Event store table 'events' not found, creating schema...",
-            ) *>
-              createSchema(session) *>
-              logger.info("Event store schema created successfully")
+        eventsTableExists <- checkTableExists(session, "events")
+        _                 <-
+          if !eventsTableExists then logger.info("Event store schema not found, creating schema...")
+          else logger.info("Event store schema already exists, ensuring required objects are present")
+        _ <- createSchema(session)
       yield ()
     }
 
-  private def checkTableExists[F[_]: Sync](session: Session[F]): F[Boolean] =
-    session.unique(checkTableExistsQuery).map(_ > 0)
+  private def checkTableExists[F[_]: Sync](session: Session[F], tableName: String): F[Boolean] =
+    session.unique(checkTableExistsQuery)(tableName).map(_ > 0)
 
   private def createSchema[F[_]: Sync](session: Session[F]): F[Unit] =
     session.execute(createTableCommand) *>
-      session.execute(createTagsIndexCommand) *>
       session.execute(createEventTypeIndexCommand) *>
-      session.execute(createSequenceNumberIndexCommand).void
+      session.execute(createEventTagsTableCommand) *>
+      session.execute(createEventTagsSequenceIndexCommand).void
 
-  private val checkTableExistsQuery: Query[Void, Long] =
+  private val checkTableExistsQuery: Query[String, Long] =
     sql"""
       SELECT COUNT(*)
       FROM information_schema.tables
       WHERE table_schema = 'public'
-        AND table_name = 'events'
+        AND table_name = $text
     """.query(int8)
 
   private val createTableCommand: Command[Void] =
@@ -197,9 +190,13 @@ object PostgresModule:
       )
     """.command
 
-  private val createTagsIndexCommand: Command[Void] =
+  private val createEventTagsTableCommand: Command[Void] =
     sql"""
-      CREATE INDEX IF NOT EXISTS idx_events_tags ON events USING GIN (tags)
+      CREATE TABLE IF NOT EXISTS event_tags (
+        tag             TEXT   NOT NULL,
+        sequence_number BIGINT NOT NULL REFERENCES events(sequence_number) ON DELETE CASCADE,
+        PRIMARY KEY (tag, sequence_number)
+      )
     """.command
 
   private val createEventTypeIndexCommand: Command[Void] =
@@ -207,7 +204,7 @@ object PostgresModule:
       CREATE INDEX IF NOT EXISTS idx_events_event_type ON events (event_type)
     """.command
 
-  private val createSequenceNumberIndexCommand: Command[Void] =
+  private val createEventTagsSequenceIndexCommand: Command[Void] =
     sql"""
-      CREATE INDEX IF NOT EXISTS idx_events_sequence_number ON events (sequence_number)
+      CREATE INDEX IF NOT EXISTS idx_event_tags_sequence_number ON event_tags (sequence_number)
     """.command
