@@ -37,7 +37,7 @@ val Fs2KafkaV = "3.9.1"
 
 val WeaverV = "0.12.0"
 
-val Http4sV = "0.23.33"
+val Http4sV = "0.23.34"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 
