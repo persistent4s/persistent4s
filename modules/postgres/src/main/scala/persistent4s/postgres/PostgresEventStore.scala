@@ -143,16 +143,15 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
       val tagList = tags.toList.map(_.value)
       val eventTypeList = eventTypes.toList.map(_.value)
       for
-        actualIndex <- (eventTypeList.isEmpty match
-          case true =>
-            session.unique(lastConflictingSequenceByTagsQuery(tagList.size))(
-              expectedIndex *: tagList *: EmptyTuple,
-            )
-          case false =>
-            session.unique(lastConflictingSequenceByBothQuery(tagList.size, eventTypeList.size))(
-              expectedIndex *: tagList *: eventTypeList *: EmptyTuple,
-            )
-        )
+        actualIndex <- eventTypeList.isEmpty match
+                         case true =>
+                           session.unique(lastConflictingSequenceByTagsQuery(tagList.size))(
+                             expectedIndex *: tagList *: EmptyTuple,
+                           )
+                         case false =>
+                           session.unique(lastConflictingSequenceByBothQuery(tagList.size, eventTypeList.size))(
+                             expectedIndex *: tagList *: eventTypeList *: EmptyTuple,
+                           )
         _ <-
           if actualIndex > 0 then Async[F].raiseError(IndexConflictException(expectedIndex, actualIndex))
           else Async[F].unit

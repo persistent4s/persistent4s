@@ -41,7 +41,14 @@ final case class BorrowBookState(
 object BorrowBookHandler extends CommandHandler[BorrowBook, BorrowBookState, LibraryEvent]:
 
   override def eventTypes: Option[Set[EventTypeName]] =
-    Some(Set(EventTypeName.of[BookAdded], EventTypeName.of[MemberRegistered], EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]))
+    Some(
+      Set(
+        EventTypeName.of[BookAdded],
+        EventTypeName.of[MemberRegistered],
+        EventTypeName.of[BookBorrowed],
+        EventTypeName.of[BookReturned],
+      ),
+    )
 
   def tags(command: BorrowBook): Set[Tag] =
     Set(Tag("book", command.bookId), Tag("member", command.memberId))
