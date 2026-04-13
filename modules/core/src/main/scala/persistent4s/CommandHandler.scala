@@ -81,11 +81,12 @@ trait CommandHandler[C, S, E]:
   )(using eventStore: EventStore[F, E]): F[Unit] =
     for
       tags      <- Concurrent[F].pure(tags(command))
-      envelopes <- eventStore.readFrom(0L, EventFilter(eventTypes.getOrElse(Set.empty), tags)).compile.toList
+      filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
+      envelopes <- eventStore.readFrom(0L, filter).compile.toList
       state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
       index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
       _         <- validate(state, command)
       decided    = decide(state, command)
       events     = decided.map((tags, event) => (tags, event.getClass.getSimpleName, event))
-      _         <- eventStore.append(index, events)
+      _         <- eventStore.append(filter, index, events)
     yield ()
