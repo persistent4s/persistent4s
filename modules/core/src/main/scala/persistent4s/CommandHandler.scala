@@ -30,7 +30,7 @@ import cats.MonadThrow
   * @tparam E
   *   the event type
   */
-trait CommandHandler[C, S, E]:
+trait CommandHandler[C, S, E <: Event]:
 
   /** Which tags to read from the event store for this command. */
   def tags(command: C): Set[Tag]
@@ -38,7 +38,7 @@ trait CommandHandler[C, S, E]:
   /** The event types that this handler is interested in for building the state. If not specified, all events with the
     * relevant tags will be included.
     */
-  def eventTypes: Option[Set[String]] = None
+  def eventTypes: Option[Set[EventTypeName]] = None
 
   /** The initial state before any events have been applied. */
   def initial: S
@@ -87,6 +87,6 @@ trait CommandHandler[C, S, E]:
       index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
       _         <- validate(state, command)
       decided    = decide(state, command)
-      events     = decided.map((tags, event) => (tags, event.getClass.getSimpleName, event))
+      events     = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
       _         <- eventStore.append(filter, index, events)
     yield ()

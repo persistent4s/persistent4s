@@ -16,6 +16,6 @@
 
 package persistent4s.postgres
 
-import persistent4s.EventStore
+import persistent4s.{Event, EventStore}
 
-trait PostgresEventStore[F[_], A] extends EventStore[F, A]
+trait PostgresEventStore[F[_], A <: Event] extends EventStore[F, A]

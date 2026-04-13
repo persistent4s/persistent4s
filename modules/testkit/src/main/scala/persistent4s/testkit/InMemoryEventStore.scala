@@ -16,7 +16,16 @@
 
 package persistent4s.testkit
 
-import persistent4s.{EventStore, EventNotification, Tag, EventEnvelope, IndexConflictException, EventMetadata}
+import persistent4s.{
+  Event,
+  EventStore,
+  EventNotification,
+  Tag,
+  EventEnvelope,
+  IndexConflictException,
+  EventMetadata,
+  EventTypeName,
+}
 import cats.effect.*
 import fs2.Stream
 import fs2.concurrent.Topic
@@ -29,7 +38,7 @@ import persistent4s.EventFilter
   * want to verify the behavior of your command handlers and event processing logic without relying on an actual
   * database or event store.
   */
-final case class InMemoryEventStore[F[_]: Monad: Async, A] private (
+final case class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
   store: Ref[F, Vector[EventEnvelope[A]]],
   topic: Topic[F, Unit],
 ) extends EventStore[F, A]
@@ -37,7 +46,11 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A] private (
 
   def getEvents: F[Vector[EventEnvelope[A]]] = store.get
 
-  override def append(eventFilter: EventFilter, expectedIndex: Long, events: List[(Set[Tag], String, A)]*): F[Unit] =
+  override def append(
+    eventFilter: EventFilter,
+    expectedIndex: Long,
+    events: List[(Set[Tag], EventTypeName, A)]*,
+  ): F[Unit] =
     store.modify { currentEvents =>
       val relevantEvents = currentEvents.filter(env =>
         (eventFilter.eventTypes.isEmpty || eventFilter.eventTypes.contains(env.metadata.eventType)) &&
@@ -82,7 +95,7 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A] private (
 
 object InMemoryEventStore:
 
-  def make[F[_]: Async, A]: F[InMemoryEventStore[F, A]] =
+  def make[F[_]: Async, A <: Event]: F[InMemoryEventStore[F, A]] =
     for
       store <- Ref.of[F, Vector[EventEnvelope[A]]](Vector.empty)
       topic <- Topic[F, Unit]

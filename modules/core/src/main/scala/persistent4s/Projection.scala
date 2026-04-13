@@ -17,7 +17,7 @@
 package persistent4s
 
 /** A Projection defines how to process events from the event store. */
-trait Projection[F[_], A]:
+trait Projection[F[_], A <: Event]:
 
   /** The name of the projection, used for checkpointing. Each projection should have a unique name to avoid conflicts
     * with other projections.

@@ -21,7 +21,7 @@ import cats.effect.*
 import cats.syntax.all.*
 import fs2.Stream
 
-final case class InMemoryProjector[F[_]: Async, A](
+final case class InMemoryProjector[F[_]: Async, A <: Event](
   eventStore: InMemoryEventStore[F, A],
   checkpoint: InMemoryProjectionCheckpoint[F],
 ) extends Projector[F, A]:

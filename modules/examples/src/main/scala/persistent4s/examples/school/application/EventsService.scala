@@ -31,7 +31,7 @@ class EventsServiceImpl(module: SchoolModule) extends EventsService[IO]:
         events.toList.map { env =>
           Event(
             globalPosition = env.metadata.globalPosition, tags = env.metadata.tags.toList.map(_.value),
-            eventType = env.metadata.eventType, timestamp = env.metadata.timestamp.toString,
+            eventType = env.metadata.eventType.value, timestamp = env.metadata.timestamp.toString,
             payload = env.payload.toString,
           )
         },

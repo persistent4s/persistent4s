@@ -19,7 +19,7 @@ package persistent4s.examples.school.domain.enrollment
 import cats.MonadThrow
 import cats.syntax.all.*
 
-import persistent4s.{CommandHandler, Tag}
+import persistent4s.{CommandHandler, EventTypeName, Tag}
 import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.course.CourseCreated
 import persistent4s.examples.school.domain.student.StudentCreated
@@ -35,8 +35,8 @@ final case class EnrollStudentState(
 
 object EnrollStudentHandler extends CommandHandler[EnrollStudent, EnrollStudentState, SchoolEvent]:
 
-  override def eventTypes: Option[Set[String]] =
-    Some(Set("StudentCreated", "CourseCreated", "StudentEnrolled"))
+  override def eventTypes: Option[Set[EventTypeName]] =
+    Some(Set(EventTypeName.of[StudentCreated], EventTypeName.of[CourseCreated], EventTypeName.of[StudentEnrolled]))
 
   def tags(command: EnrollStudent): Set[Tag] =
     Set(Tag("student", command.studentId), Tag("course", command.courseId))

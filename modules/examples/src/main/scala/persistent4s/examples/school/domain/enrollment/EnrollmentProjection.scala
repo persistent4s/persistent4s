@@ -28,7 +28,7 @@ final class EnrollmentProjection[F[_]: Async] private (
   val name: String = "enrollment-projection"
 
   val filter: EventFilter = EventFilter(
-    eventTypes = Set("StudentEnrolled"),
+    eventTypes = Set(EventTypeName.of[StudentEnrolled]),
   )
 
   def handle(event: EventEnvelope[SchoolEvent]): F[Unit] =
