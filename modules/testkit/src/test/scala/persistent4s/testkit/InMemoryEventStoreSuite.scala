@@ -48,7 +48,7 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
     eventType: String,
     event: TestEvent,
   ): IO[Unit] =
-    store.append(expectedIndex, List((tags, eventType, event)))
+    store.append(EventFilter(Set.empty, tags), expectedIndex, List((tags, eventType, event)))
 
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
     result match
