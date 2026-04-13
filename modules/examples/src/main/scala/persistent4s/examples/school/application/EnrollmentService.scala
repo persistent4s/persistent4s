@@ -22,14 +22,12 @@ import persistent4s.EventStore
 import persistent4s.examples.school.api.{EnrollmentService, GetCourseEnrollmentsOutput}
 import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.enrollment.*
-import persistent4s.examples.school.infrastructure.SchoolModule
 
-class EnrollmentServiceImpl(module: SchoolModule) extends EnrollmentService[IO]:
-
-  private given EventStore[IO, SchoolEvent] = module.store
+class EnrollmentServiceImpl(enrollmentProjection: EnrollmentProjection[IO])(using EventStore[IO, SchoolEvent])
+    extends EnrollmentService[IO]:
 
   def enrollStudent(studentId: String, courseId: String): IO[Unit] =
     EnrollStudentHandler.run[IO](EnrollStudent(studentId, courseId))
 
   def getCourseEnrollments(courseId: String): IO[GetCourseEnrollmentsOutput] =
-    module.enrollmentProjection.getEnrollments(courseId).map(ids => GetCourseEnrollmentsOutput(ids.toList))
+    enrollmentProjection.getEnrollments(courseId).map(ids => GetCourseEnrollmentsOutput(ids.toList))

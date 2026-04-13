@@ -18,7 +18,7 @@ package persistent4s.circe
 
 import io.circe.{Json, parser}
 
-import persistent4s.EventCodec
+import persistent4s.{Event, EventCodec, EventTypeName}
 
 /** Circe-based implementation of EventCodec. Users provide circe Encoder/Decoder instances for their event types, and
   * this bridges them to the core EventCodec interface.
@@ -32,13 +32,13 @@ object CirceEventCodec:
     * @param decodeEvent
     *   a function that decodes an event from its type name and a circe Json value
     */
-  def make[A](
+  def make[A <: Event](
     encodeEvent: A => Json,
-    decodeEvent: (String, Json) => Either[Throwable, A],
+    decodeEvent: (EventTypeName, Json) => Either[Throwable, A],
   ): EventCodec[A] =
     new EventCodec[A]:
       def encode(event: A): String =
         encodeEvent(event).noSpaces
 
-      def decode(eventType: String, payload: String): Either[Throwable, A] =
+      def decode(eventType: EventTypeName, payload: String): Either[Throwable, A] =
         parser.parse(payload).left.map(e => e: Throwable).flatMap(json => decodeEvent(eventType, json))

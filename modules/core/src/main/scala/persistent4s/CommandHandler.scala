@@ -30,7 +30,7 @@ import cats.MonadThrow
   * @tparam E
   *   the event type
   */
-trait CommandHandler[C, S, E]:
+trait CommandHandler[C, S, E <: Event]:
 
   /** Which tags to read from the event store for this command. */
   def tags(command: C): Set[Tag]
@@ -38,7 +38,7 @@ trait CommandHandler[C, S, E]:
   /** The event types that this handler is interested in for building the state. If not specified, all events with the
     * relevant tags will be included.
     */
-  def eventTypes: Option[Set[String]] = None
+  def eventTypes: Option[Set[EventTypeName]] = None
 
   /** The initial state before any events have been applied. */
   def initial: S
@@ -54,15 +54,39 @@ trait CommandHandler[C, S, E]:
     */
   def decide(state: S, command: C): List[(Set[Tag], E)]
 
-  /** Execute a command using this handler and the given event store. */
-  def run[F[_]: Concurrent](command: C)(using eventStore: EventStore[F, E]): F[Unit] =
+  /** Maximum number of retry attempts on optimistic concurrency conflicts. Override to customize. Default is 3. */
+  def maxRetries: Int = 3
+
+  /** Execute a command using this handler and the given event store. On optimistic concurrency conflict
+    * (IndexConflictException), the command is automatically retried with fresh state up to maxRetries times. The
+    * command is re-validated against the new state and may still succeed.
+    */
+  def run[F[_]: Concurrent](command: C)(using
+    eventStore: EventStore[F, E],
+  ): F[Unit] =
+    runWithRetry(command, maxRetries)
+
+  private def runWithRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
+    eventStore: EventStore[F, E],
+  ): F[Unit] =
+    attempt(command).handleErrorWith {
+      case _: IndexConflictException if retriesLeft > 0 =>
+        runWithRetry(command, retriesLeft - 1)
+      case e =>
+        Concurrent[F].raiseError(e)
+    }
+
+  private def attempt[F[_]: Concurrent](
+    command: C,
+  )(using eventStore: EventStore[F, E]): F[Unit] =
     for
       tags      <- Concurrent[F].pure(tags(command))
-      envelopes <- eventStore.readFrom(0L, EventFilter(eventTypes.getOrElse(Set.empty), tags)).compile.toList
+      filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
+      envelopes <- eventStore.readFrom(0L, filter).compile.toList
       state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
       index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
       _         <- validate(state, command)
       decided    = decide(state, command)
-      events     = decided.map((tags, event) => (tags, event.getClass.getSimpleName, event))
-      _         <- eventStore.append(index, events)
+      events     = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
+      _         <- eventStore.append(filter, index, events)
     yield ()

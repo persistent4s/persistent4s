@@ -16,4 +16,6 @@
 
 package persistent4s.examples.school.domain
 
-trait SchoolEvent
+import persistent4s.Event
+
+trait SchoolEvent extends Event

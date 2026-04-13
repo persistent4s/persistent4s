@@ -18,7 +18,7 @@ package persistent4s.testkit
 
 import cats.syntax.all.*
 import cats.effect.IO
-import persistent4s.{EventFilter, IndexConflictException, Tag}
+import persistent4s.{Event, EventFilter, EventTypeName, IndexConflictException, Tag}
 import weaver.SimpleIOSuite
 
 object InMemoryEventStoreSuite extends SimpleIOSuite:
@@ -29,7 +29,7 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
 
   private val course1 = Tag("course", "1")
 
-  sealed trait TestEvent
+  sealed trait TestEvent extends Event
 
   object TestEvent:
 
@@ -45,10 +45,10 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
     store: InMemoryEventStore[IO, TestEvent],
     expectedIndex: Long,
     tags: Set[Tag],
-    eventType: String,
+    eventType: EventTypeName,
     event: TestEvent,
   ): IO[Unit] =
-    store.append(expectedIndex, List((tags, eventType, event)))
+    store.append(EventFilter(Set.empty, tags), expectedIndex, List((tags, eventType, event)))
 
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
     result match
@@ -59,22 +59,34 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
     for
       store <- InMemoryEventStore.make[IO, TestEvent]
       event  = TestEvent.StudentCreated("1")
-      _     <- appendOne(store, 0L, Set(student1), "StudentCreated", event)
+      _     <- appendOne(store, 0L, Set(student1), EventTypeName.of[TestEvent.StudentCreated], event)
       saved <- store.getEvents
     yield expect.all(
       saved.length == 1,
       saved.head.metadata.globalPosition == 1L,
       saved.head.metadata.tags == Set(student1),
-      saved.head.metadata.eventType == "StudentCreated",
+      saved.head.metadata.eventType == EventTypeName.of[TestEvent.StudentCreated],
       saved.head.payload == event,
     )
   }
 
   test("concurrent appends with the same tag allow only one success") {
     for
-      store        <- InMemoryEventStore.make[IO, TestEvent]
-      first         = appendOne(store, 0L, Set(student1), "StudentCreated", TestEvent.StudentCreated("1")).attempt
-      second        = appendOne(store, 0L, Set(student1), "StudentDeleted", TestEvent.StudentDeleted("1")).attempt
+      store <- InMemoryEventStore.make[IO, TestEvent]
+      first  = appendOne(
+                store,
+                0L,
+                Set(student1),
+                EventTypeName.of[TestEvent.StudentCreated],
+                TestEvent.StudentCreated("1"),
+              ).attempt
+      second = appendOne(
+                 store,
+                 0L,
+                 Set(student1),
+                 EventTypeName.of[TestEvent.StudentDeleted],
+                 TestEvent.StudentDeleted("1"),
+               ).attempt
       results      <- (first, second).parTupled
       events       <- store.getEvents
       successCount  = List(results._1, results._2).count(_.isRight)
@@ -93,10 +105,16 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
                 store,
                 0L,
                 Set(student1, course1),
-                "EnrollmentCreated",
+                EventTypeName.of[TestEvent.EnrollmentCreated],
                 TestEvent.EnrollmentCreated("1", "1"),
               ).attempt
-      second        = appendOne(store, 0L, Set(student1), "StudentCreated", TestEvent.StudentCreated("1")).attempt
+      second = appendOne(
+                 store,
+                 0L,
+                 Set(student1),
+                 EventTypeName.of[TestEvent.StudentCreated],
+                 TestEvent.StudentCreated("1"),
+               ).attempt
       results      <- (first, second).parTupled
       events       <- store.getEvents
       successCount  = List(results._1, results._2).count(_.isRight)
@@ -118,7 +136,7 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
                      store,
                      0L,
                      Set(Tag("student", index.toString)),
-                     "StudentCreated",
+                     EventTypeName.of[TestEvent.StudentCreated],
                      TestEvent.StudentCreated(index.toString),
                    ).attempt
                  }
@@ -134,16 +152,20 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
 
   test("read filters events by tags and event types") {
     for
-      store    <- InMemoryEventStore.make[IO, TestEvent]
-      _        <- appendOne(store, 0L, Set(student1), "StudentCreated", TestEvent.StudentCreated("1"))
-      _        <- appendOne(store, 0L, Set(student2), "StudentCreated", TestEvent.StudentCreated("2"))
-      _        <- appendOne(store, 1L, Set(student1), "StudentDeleted", TestEvent.StudentDeleted("1"))
-      _        <- appendOne(store, 0L, Set(course1), "CourseCreated", TestEvent.CourseCreated("1"))
-      filtered <- store.readFrom(0L, EventFilter(Set("StudentCreated"), Set(student1))).compile.toList
+      store <- InMemoryEventStore.make[IO, TestEvent]
+      _     <-
+        appendOne(store, 0L, Set(student1), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("1"))
+      _ <-
+        appendOne(store, 0L, Set(student2), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("2"))
+      _ <-
+        appendOne(store, 1L, Set(student1), EventTypeName.of[TestEvent.StudentDeleted], TestEvent.StudentDeleted("1"))
+      _        <- appendOne(store, 0L, Set(course1), EventTypeName.of[TestEvent.CourseCreated], TestEvent.CourseCreated("1"))
+      filtered <-
+        store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent.StudentCreated]), Set(student1))).compile.toList
     yield expect.all(
       filtered.length == 1,
       filtered.head.metadata.tags == Set(student1),
-      filtered.head.metadata.eventType == "StudentCreated",
+      filtered.head.metadata.eventType == EventTypeName.of[TestEvent.StudentCreated],
       filtered.head.payload == TestEvent.StudentCreated("1"),
     )
   }

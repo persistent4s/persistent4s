@@ -18,10 +18,10 @@ package persistent4s.examples.school.domain.student
 
 import persistent4s.*
 import persistent4s.examples.school.domain.SchoolEvent
+import persistent4s.examples.school.domain.student.{StudentCreated, StudentDeleted}
+import persistent4s.examples.school.domain.enrollment.StudentEnrolled
 import cats.effect.*
 import cats.syntax.all.*
-
-import persistent4s.examples.school.domain.enrollment.StudentEnrolled
 
 final case class StudentView(studentId: String, name: String, email: String, nbCourses: Int = 0)
 
@@ -32,7 +32,8 @@ final class StudentProjection[F[_]: Async] private (
   val name: String = "student-projection"
 
   val filter: EventFilter = EventFilter(
-    eventTypes = Set("StudentCreated", "StudentDeleted", "StudentEnrolled"),
+    eventTypes =
+      Set(EventTypeName.of[StudentCreated], EventTypeName.of[StudentDeleted], EventTypeName.of[StudentEnrolled]),
   )
 
   def handle(event: EventEnvelope[SchoolEvent]): F[Unit] =

@@ -21,7 +21,7 @@ import fs2.Stream
 /** An EventStore is a component that allows you to append and read events in an event-sourced system. Appending events
   * to the store is done with optimistic concurrency control.
   */
-trait EventStore[F[_], A]:
+trait EventStore[F[_], A <: Event]:
 
   /** Append events to the event store. The expected index is used for optimistic concurrency control. If the actual
     * index in the event store does not match the expected index, an IndexConflictException is thrown and none of the
@@ -35,7 +35,7 @@ trait EventStore[F[_], A]:
     *   a F[Unit] that completes when the events have been appended, or fails with an IndexConflictException if the
     *   expected index does not match the actual index
     */
-  def append(expectedIndex: Long, events: List[(Set[Tag], String, A)]*): F[Unit]
+  def append(eventFilter: EventFilter, expectedIndex: Long, events: List[(Set[Tag], EventTypeName, A)]*): F[Unit]
 
   /** Read events from the event store starting from a specific position, filtering by event types and tags. The
     * returned Stream will emit EventEnvelope[A] instances that match the specified event types and tags. The Stream

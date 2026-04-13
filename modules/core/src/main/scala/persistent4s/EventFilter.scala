@@ -29,6 +29,6 @@ package persistent4s
   * @param tags
   */
 final case class EventFilter(
-  eventTypes: Set[String] = Set.empty,
+  eventTypes: Set[EventTypeName] = Set.empty,
   tags: Set[Tag] = Set.empty,
 )

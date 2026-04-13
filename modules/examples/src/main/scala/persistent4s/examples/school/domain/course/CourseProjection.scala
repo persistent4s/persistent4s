@@ -31,7 +31,7 @@ final class CourseProjection[F[_]: Async] private (
   val name: String = "course-projection"
 
   val filter: EventFilter = EventFilter(
-    eventTypes = Set("CourseCreated", "StudentEnrolled"),
+    eventTypes = Set(EventTypeName.of[CourseCreated], EventTypeName.of[StudentEnrolled]),
   )
 
   def handle(event: EventEnvelope[SchoolEvent]): F[Unit] =

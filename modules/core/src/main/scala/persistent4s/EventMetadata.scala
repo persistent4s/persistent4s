@@ -34,6 +34,6 @@ import java.time.Instant
 final case class EventMetadata(
   globalPosition: Long,
   tags: Set[Tag],
-  eventType: String,
+  eventType: EventTypeName,
   timestamp: Instant,
 )
