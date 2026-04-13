@@ -37,7 +37,7 @@ final class BookProjection[F[_]: Async] private (
   val name: String = "book-projection"
 
   val filter: EventFilter = EventFilter(
-    eventTypes = Set("BookAdded", "BookBorrowed", "BookReturned"),
+    eventTypes = Set(EventTypeName.of[BookAdded], EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]),
   )
 
   def handle(event: EventEnvelope[LibraryEvent]): F[Unit] =

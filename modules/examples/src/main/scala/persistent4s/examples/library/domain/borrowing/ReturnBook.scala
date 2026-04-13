@@ -19,7 +19,7 @@ package persistent4s.examples.library.domain.borrowing
 import cats.MonadThrow
 import cats.syntax.all.*
 
-import persistent4s.{CommandHandler, Tag}
+import persistent4s.{CommandHandler, EventTypeName, Tag}
 import persistent4s.examples.library.domain.*
 import java.time.OffsetDateTime
 
@@ -35,8 +35,8 @@ final case class ReturnBookState(
 
 object ReturnBookHandler extends CommandHandler[ReturnBook, ReturnBookState, LibraryEvent]:
 
-  override def eventTypes: Option[Set[String]] =
-    Some(Set("BookBorrowed", "BookReturned"))
+  override def eventTypes: Option[Set[EventTypeName]] =
+    Some(Set(EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]))
 
   def tags(command: ReturnBook): Set[Tag] =
     Set(Tag("book", command.bookId), Tag("member", command.memberId))

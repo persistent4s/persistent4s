@@ -47,7 +47,7 @@ import persistent4s.*
   * @param codec
   *   the event codec for serializing/deserializing events
   */
-final class PostgresEventStore[F[_]: Async, A] private (
+final class PostgresEventStore[F[_]: Async, A <: Event] private (
   pool: Resource[F, Session[F]],
   codec: EventCodec[A],
   channelId: Identifier,
@@ -57,18 +57,20 @@ final class PostgresEventStore[F[_]: Async, A] private (
   import PostgresEventStore.*
 
   override def append(
+    eventFilter: EventFilter,
     expectedIndex: Long,
-    events: List[(Set[Tag], String, A)]*,
+    events: List[(Set[Tag], EventTypeName, A)]*,
   ): F[Unit] =
     val flatEvents = events.flatten.toList
     if flatEvents.isEmpty then Async[F].unit
     else
-      val allTags = flatEvents.flatMap(_._1).toSet
+      val allTags = eventFilter.tags
+      val eventTypes = eventFilter.eventTypes
       pool.use { session =>
         session.transaction.use { _ =>
           for
             _ <- acquireAppendLocks(session, allTags)
-            _ <- checkForConflicts(session, allTags, expectedIndex)
+            _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
             _ <- flatEvents.traverse_ { case (tags, eventType, event) =>
                    insertEvent(session, tags, eventType, event).void
                  }
@@ -82,7 +84,7 @@ final class PostgresEventStore[F[_]: Async, A] private (
     eventFilter: EventFilter,
   ): Stream[F, EventEnvelope[A]] =
     Stream.resource(pool).flatMap { session =>
-      val eventTypesList = eventFilter.eventTypes.toList
+      val eventTypesList = eventFilter.eventTypes.toList.map(_.value)
       val tagsList = eventFilter.tags.map(_.value).toList
 
       val eventsF: F[List[EventRow]] =
@@ -106,12 +108,13 @@ final class PostgresEventStore[F[_]: Async, A] private (
         Stream
           .emits(events)
           .evalMap { case (seqNum, eventType, tags, payload, recordedAt) =>
-            parsePayload(eventType, payload).map { event =>
+            val eventTypeName = EventTypeName.fromString(eventType)
+            parsePayload(eventTypeName, payload).map { event =>
               EventEnvelope(
                 EventMetadata(
                   globalPosition = seqNum,
                   tags = tags,
-                  eventType = eventType,
+                  eventType = eventTypeName,
                   timestamp = recordedAt.toInstant,
                 ),
                 event,
@@ -132,15 +135,24 @@ final class PostgresEventStore[F[_]: Async, A] private (
   private def checkForConflicts(
     session: Session[F],
     tags: Set[Tag],
+    eventTypes: Set[EventTypeName],
     expectedIndex: Long,
   ): F[Unit] =
     if tags.isEmpty then Async[F].unit
     else
       val tagList = tags.toList.map(_.value)
+      val eventTypeList = eventTypes.toList.map(_.value)
       for
-        actualIndex <- session.unique(lastConflictingSequenceQuery(tagList.size))(
-                         expectedIndex *: tagList *: EmptyTuple,
-                       )
+        actualIndex <- (eventTypeList.isEmpty match
+          case true =>
+            session.unique(lastConflictingSequenceByTagsQuery(tagList.size))(
+              expectedIndex *: tagList *: EmptyTuple,
+            )
+          case false =>
+            session.unique(lastConflictingSequenceByBothQuery(tagList.size, eventTypeList.size))(
+              expectedIndex *: tagList *: eventTypeList *: EmptyTuple,
+            )
+        )
         _ <-
           if actualIndex > 0 then Async[F].raiseError(IndexConflictException(expectedIndex, actualIndex))
           else Async[F].unit
@@ -157,14 +169,14 @@ final class PostgresEventStore[F[_]: Async, A] private (
   private def insertEvent(
     session: Session[F],
     tags: Set[Tag],
-    eventType: String,
+    eventType: EventTypeName,
     event: A,
   ): F[Long] =
     val tagsJson = tagsToJson(tags)
     val payloadJson = parseJson(codec.encode(event)).getOrElse(Json.obj())
     for
       sequenceNumber <- session.unique(insertEventQuery)(
-                          eventType *: tagsJson *: payloadJson *: EmptyTuple,
+                          eventType.value *: tagsJson *: payloadJson *: EmptyTuple,
                         )
       _ <- insertEventTags(session, sequenceNumber, tags)
     yield sequenceNumber
@@ -182,7 +194,7 @@ final class PostgresEventStore[F[_]: Async, A] private (
         .void
     }
 
-  private def parsePayload(eventType: String, payload: Json): F[A] =
+  private def parsePayload(eventType: EventTypeName, payload: Json): F[A] =
     codec.decode(eventType, payload.noSpaces) match
       case Right(event) => Async[F].pure(event)
       case Left(error)  => Async[F].raiseError(error)
@@ -211,7 +223,7 @@ object PostgresEventStore:
     * @return
     *   a new PostgresEventStore instance
     */
-  def apply[F[_]: Async, A](
+  def apply[F[_]: Async, A <: Event](
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
     channelId: Identifier = NotificationChannel,
@@ -246,14 +258,27 @@ object PostgresEventStore:
       ON CONFLICT DO NOTHING
     """.command
 
-  private def lastConflictingSequenceQuery(
-    n: Int,
+  private def lastConflictingSequenceByTagsQuery(
+    numTags: Int,
   ): Query[Long *: List[String] *: EmptyTuple, Long] =
     sql"""
-      SELECT COALESCE(MAX(sequence_number), 0)
-      FROM event_tags
-      WHERE sequence_number > $int8
-        AND tag = ANY(ARRAY[${text.list(n)}])
+      SELECT COALESCE(MAX(et.sequence_number), 0)
+      FROM event_tags et
+      WHERE et.sequence_number > $int8
+        AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+    """.query(int8)
+
+  private def lastConflictingSequenceByBothQuery(
+    numTags: Int,
+    numEventTypes: Int,
+  ): Query[Long *: List[String] *: List[String] *: EmptyTuple, Long] =
+    sql"""
+      SELECT COALESCE(MAX(et.sequence_number), 0)
+      FROM event_tags et
+      JOIN events e ON e.sequence_number = et.sequence_number
+      WHERE et.sequence_number > $int8
+        AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
     """.query(int8)
 
   private type EventRow =

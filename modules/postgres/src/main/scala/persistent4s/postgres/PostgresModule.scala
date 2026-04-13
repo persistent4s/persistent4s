@@ -29,6 +29,7 @@ import skunk.implicits.*
 import skunk.codec.all.*
 
 import persistent4s.EventCodec
+import persistent4s.Event
 
 sealed trait PostgresModuleError extends Throwable
 
@@ -87,7 +88,7 @@ object PostgresModule:
     * @return
     *   a Resource containing the PostgresEventStore, or fails with a clear error message
     */
-  def make[F[_]: Async: Network: Trace: Console, A](
+  def make[F[_]: Async: Network: Trace: Console, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
   ): Resource[F, PostgresEventStore[F, A]] =
@@ -112,7 +113,7 @@ object PostgresModule:
     * @return
     *   a Resource containing the PostgresEventStore
     */
-  def makeWithConfig[F[_]: Async: Network: Trace: Console, A](
+  def makeWithConfig[F[_]: Async: Network: Trace: Console, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
   ): Resource[F, PostgresEventStore[F, A]] =

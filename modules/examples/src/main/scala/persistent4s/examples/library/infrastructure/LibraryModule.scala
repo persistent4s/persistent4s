@@ -40,7 +40,7 @@ object LibraryModule:
 
   val eventCodec: EventCodec[LibraryEvent] = CirceEventCodec.make[LibraryEvent](
     encodeEvent = LibraryEvent.encoder.apply,
-    decodeEvent = (eventType, json) => LibraryEvent.decoder(eventType, json).left.map(e => e: Throwable),
+    decodeEvent = (eventType, json) => LibraryEvent.decoder(eventType.value, json).left.map(e => e: Throwable),
   )
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =

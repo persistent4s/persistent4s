@@ -36,7 +36,7 @@ final class MemberProjection[F[_]: Async] private (
   val name: String = "member-projection"
 
   val filter: EventFilter = EventFilter(
-    eventTypes = Set("MemberRegistered", "BookBorrowed", "BookReturned"),
+    eventTypes = Set(EventTypeName.of[MemberRegistered], EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]),
   )
 
   def handle(event: EventEnvelope[LibraryEvent]): F[Unit] =

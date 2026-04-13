@@ -21,7 +21,7 @@ import cats.syntax.all.*
 
 import java.time.temporal.ChronoUnit
 
-import persistent4s.{CommandHandler, Tag}
+import persistent4s.{CommandHandler, EventTypeName, Tag}
 import persistent4s.examples.library.domain.*
 import java.time.OffsetDateTime
 
@@ -40,8 +40,8 @@ final case class BorrowBookState(
 
 object BorrowBookHandler extends CommandHandler[BorrowBook, BorrowBookState, LibraryEvent]:
 
-  override def eventTypes: Option[Set[String]] =
-    Some(Set("BookAdded", "MemberRegistered", "BookBorrowed", "BookReturned"))
+  override def eventTypes: Option[Set[EventTypeName]] =
+    Some(Set(EventTypeName.of[BookAdded], EventTypeName.of[MemberRegistered], EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]))
 
   def tags(command: BorrowBook): Set[Tag] =
     Set(Tag("book", command.bookId), Tag("member", command.memberId))

@@ -35,7 +35,7 @@ class EventsServiceImpl(module: LibraryModule) extends EventsService[IO]:
           events.map { e =>
             EventItem(
               globalPosition = e.metadata.globalPosition,
-              eventType = e.metadata.eventType,
+              eventType = e.metadata.eventType.value,
               tags = e.metadata.tags.map(_.value).toList,
               timestamp = Timestamp.fromInstant(e.metadata.timestamp),
             )

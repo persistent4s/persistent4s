@@ -34,7 +34,7 @@ trait Projector[F[_], A <: Event]:
 
 object Projector:
 
-  def apply[F[_], A](
+  def apply[F[_], A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: ProjectionCheckpoint[F],
   )(using cats.effect.Async[F]): Projector[F, A] =

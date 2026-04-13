@@ -21,7 +21,9 @@ import io.circe.syntax.*
 
 import java.time.OffsetDateTime
 
-sealed trait LibraryEvent
+import persistent4s.Event
+
+sealed trait LibraryEvent extends Event
 
 sealed trait BookEvent extends LibraryEvent
 
