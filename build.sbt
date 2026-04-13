@@ -27,7 +27,7 @@ val CirceV = "0.14.15"
 
 val Log4CatsV = "2.8.0"
 
-val Otel4sV = "0.15.2"
+val Otel4sV = "0.16.0"
 
 val LogbackV = "1.5.32"
 
@@ -37,7 +37,7 @@ val Fs2KafkaV = "3.9.1"
 
 val WeaverV = "0.12.0"
 
-val Http4sV = "0.23.33"
+val Http4sV = "0.23.34"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 
