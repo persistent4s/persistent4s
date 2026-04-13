@@ -24,11 +24,9 @@ import persistent4s.EventStore
 import persistent4s.examples.school.api.{CourseItem, CourseService, CreateCourseOutput, GetCoursesOutput}
 import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.course.*
-import persistent4s.examples.school.infrastructure.SchoolModule
 
-class CourseServiceImpl(module: SchoolModule) extends CourseService[IO]:
-
-  private given EventStore[IO, SchoolEvent] = module.store
+class CourseServiceImpl(courseProjection: CourseProjection[IO])(using EventStore[IO, SchoolEvent])
+    extends CourseService[IO]:
 
   def createCourse(title: String, capacity: Int): IO[CreateCourseOutput] =
     for
@@ -37,6 +35,6 @@ class CourseServiceImpl(module: SchoolModule) extends CourseService[IO]:
     yield CreateCourseOutput(courseId)
 
   def getCourses(): IO[GetCoursesOutput] =
-    module.courseProjection.getCourses.map(courses =>
+    courseProjection.getCourses.map(courses =>
       GetCoursesOutput(courses.map(c => CourseItem(c.courseId, c.title, c.capacity, c.enrolledCount))),
     )

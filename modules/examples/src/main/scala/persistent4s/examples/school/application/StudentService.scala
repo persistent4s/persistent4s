@@ -24,11 +24,9 @@ import persistent4s.EventStore
 import persistent4s.examples.school.api.{CreateStudentOutput, GetStudentsOutput, StudentItem, StudentService}
 import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.student.*
-import persistent4s.examples.school.infrastructure.SchoolModule
 
-class StudentServiceImpl(module: SchoolModule) extends StudentService[IO]:
-
-  private given EventStore[IO, SchoolEvent] = module.store
+class StudentServiceImpl(studentProjection: StudentProjection[IO])(using EventStore[IO, SchoolEvent])
+    extends StudentService[IO]:
 
   def createStudent(name: String, email: String): IO[CreateStudentOutput] =
     for
@@ -40,6 +38,6 @@ class StudentServiceImpl(module: SchoolModule) extends StudentService[IO]:
     DeleteStudentHandler.run[IO](DeleteStudent(studentId))
 
   def getStudents(): IO[GetStudentsOutput] =
-    module.studentProjection.getStudents.map(students =>
+    studentProjection.getStudents.map(students =>
       GetStudentsOutput(students.map(s => StudentItem(s.studentId, s.name, s.email, s.nbCourses))),
     )
