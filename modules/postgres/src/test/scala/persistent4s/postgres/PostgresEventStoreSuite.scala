@@ -27,6 +27,8 @@ import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
 import persistent4s.{EventFilter, IndexConflictException, Tag}
 import weaver.IOSuite
+import persistent4s.EventTypeName
+import persistent4s.Event
 
 object PostgresEventStoreSuite extends IOSuite:
 
@@ -39,7 +41,7 @@ object PostgresEventStoreSuite extends IOSuite:
       PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec)
     }
 
-  final case class TestEvent(value: String) derives Encoder.AsObject, Decoder
+  final case class TestEvent(value: String) extends Event derives Encoder.AsObject, Decoder
 
   private type Container = PostgreSQLContainer[Nothing]
 
@@ -71,7 +73,11 @@ object PostgresEventStoreSuite extends IOSuite:
     tags: Set[Tag],
     value: String,
   ): IO[Unit] =
-    store.append(expectedIndex, List((tags, "TestEvent", TestEvent(value))))
+    store.append(
+      EventFilter(Set.empty, tags),
+      expectedIndex,
+      List((tags, EventTypeName.of[TestEvent], TestEvent(value))),
+    )
 
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
     result match
@@ -88,9 +94,21 @@ object PostgresEventStoreSuite extends IOSuite:
       first           = appendOne(store, 0L, Set(tag), "first").attempt
       second          = appendOne(store, 0L, Set(tag), "second").attempt
       results        <- (first, second).parTupled
-      matchingEvents <- store.readFrom(0L, EventFilter(Set("TestEvent"), Set(tag))).compile.toList
-      successCount    = List(results._1, results._2).count(_.isRight)
-      conflictCount   = List(results._1, results._2).count(isConflict)
+      matchingEvents <- store
+                          .readFrom(
+                            0L,
+                            EventFilter(
+                              Set(
+                                EventTypeName
+                                  .of[TestEvent],
+                              ),
+                              Set(tag),
+                            ),
+                          )
+                          .compile
+                          .toList
+      successCount  = List(results._1, results._2).count(_.isRight)
+      conflictCount = List(results._1, results._2).count(isConflict)
     yield expect.all(
       successCount == 1,
       conflictCount == 1,
@@ -107,9 +125,10 @@ object PostgresEventStoreSuite extends IOSuite:
       first           = appendOne(store, 0L, Set(studentTag, courseTag), "enrollment").attempt
       second          = appendOne(store, 0L, Set(studentTag), "student-update").attempt
       results        <- (first, second).parTupled
-      matchingEvents <- store.readFrom(0L, EventFilter(Set("TestEvent"), Set(studentTag))).compile.toList
-      successCount    = List(results._1, results._2).count(_.isRight)
-      conflictCount   = List(results._1, results._2).count(isConflict)
+      matchingEvents <-
+        store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(studentTag))).compile.toList
+      successCount  = List(results._1, results._2).count(_.isRight)
+      conflictCount = List(results._1, results._2).count(isConflict)
     yield expect.all(
       successCount == 1,
       conflictCount == 1,
@@ -126,7 +145,7 @@ object PostgresEventStoreSuite extends IOSuite:
       results <- tags.parTraverse { tag =>
                    appendOne(store, 0L, Set(tag), tag.id).attempt
                  }
-      events   <- store.readFrom(0L, EventFilter(Set("TestEvent"), tags.toSet)).compile.toList
+      events   <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), tags.toSet)).compile.toList
       positions = events.map(_.metadata.globalPosition)
     yield expect.all(
       results.forall(_.isRight),
@@ -141,7 +160,7 @@ object PostgresEventStoreSuite extends IOSuite:
       secondTag <- freshId("second").map(id => Tag("student", id))
       _         <- appendOne(store, 0L, Set(firstTag), "before")
       result    <- appendOne(store, 0L, Set(secondTag), "after").attempt
-      events    <- store.readFrom(0L, EventFilter(Set("TestEvent"), Set(secondTag))).compile.toList
+      events    <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(secondTag))).compile.toList
     yield expect.all(
       events.length == 1,
       result.isRight,
