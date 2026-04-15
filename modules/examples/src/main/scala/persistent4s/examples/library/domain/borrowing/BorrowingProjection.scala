@@ -56,6 +56,9 @@ final class BorrowingProjection[F[_]: Async] private (
     (state, event.payload) match
       case (None, BookBorrowed(bookId, memberId, borrowedAt, dueDate)) =>
         BorrowingState(bookId, memberId, borrowedAt, dueDate, None).some.pure[F]
+      case (Some(borrowingState), BookBorrowed(bookId, memberId, borrowedAt, dueDate))
+          if borrowingState.returnedAt.nonEmpty =>
+        BorrowingState(bookId, memberId, borrowedAt, dueDate, None).some.pure[F]
       case (Some(borrowingState), BookReturned(bookId, memberId, returnedAt)) =>
         BorrowingState(bookId, memberId, borrowingState.borrowedAt, borrowingState.dueDate, Some(returnedAt)).some
           .pure[F]
