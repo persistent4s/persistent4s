@@ -25,6 +25,8 @@ operation BorrowBook {
         @required
         memberId: String
     }
+
+    errors: [ValidationError, NotFoundError]
 }
 
 @http(method: "POST", uri: "/borrowings/{bookId}/{memberId}/return")
@@ -39,6 +41,8 @@ operation ReturnBook {
         @required
         memberId: String
     }
+
+    errors: [ValidationError, NotFoundError]
 }
 
 @http(method: "GET", uri: "/borrowings")

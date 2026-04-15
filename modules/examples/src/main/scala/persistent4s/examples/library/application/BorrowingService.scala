@@ -30,10 +30,20 @@ class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore
     extends BorrowingService[IO]:
 
   def borrowBook(bookId: String, memberId: String): IO[Unit] =
-    BorrowBookHandler.run[IO](BorrowBook(UUID.fromString(bookId), UUID.fromString(memberId)))
+    BorrowBookHandler
+      .run[IO](BorrowBook(UUID.fromString(bookId), UUID.fromString(memberId)))
+      .adaptError {
+        case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
+        case e                                        => ValidationError(e.getMessage)
+      }
 
   def returnBook(bookId: String, memberId: String): IO[Unit] =
-    ReturnBookHandler.run[IO](ReturnBook(UUID.fromString(bookId), UUID.fromString(memberId)))
+    ReturnBookHandler
+      .run[IO](ReturnBook(UUID.fromString(bookId), UUID.fromString(memberId)))
+      .adaptError {
+        case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
+        case e                                        => ValidationError(e.getMessage)
+      }
 
   def getBorrowings(): IO[GetBorrowingsOutput] =
     repository.getBorrowings.map(borrowings => GetBorrowingsOutput(borrowings.map(toBorrowingItem)))

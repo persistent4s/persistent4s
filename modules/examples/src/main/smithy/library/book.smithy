@@ -31,6 +31,8 @@ operation AddBook {
         @required
         bookId: String
     }
+
+    errors: [ValidationError]
 }
 
 @http(method: "GET", uri: "/books")
@@ -55,6 +57,8 @@ operation GetBook {
         @required
         book: BookItem
     }
+
+    errors: [NotFoundError]
 }
 
 list BookList {

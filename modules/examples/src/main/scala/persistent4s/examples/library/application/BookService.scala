@@ -28,10 +28,11 @@ import persistent4s.examples.library.domain.book.*
 class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, LibraryEvent]) extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
-    for
+    (for
       bookId <- IO(UUID.randomUUID())
       _      <- AddBookHandler.run[IO](AddBook(bookId, title, author, totalCopies))
-    yield AddBookOutput(bookId.toString())
+    yield AddBookOutput(bookId.toString()))
+      .adaptError { case e => ValidationError(e.getMessage) }
 
   def getBooks(): IO[GetBooksOutput] =
     repository.getBooks.map(books =>
@@ -42,5 +43,5 @@ class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, Libra
     repository.find(UUID.fromString(bookId)).flatMap {
       case Some(b) =>
         IO.pure(GetBookOutput(BookItem(b.bookId.toString(), b.title, b.author, b.totalCopies, b.availableCopies)))
-      case None => IO.raiseError(new Exception(s"Book not found: $bookId"))
+      case None => IO.raiseError(NotFoundError(s"Book not found: $bookId"))
     }

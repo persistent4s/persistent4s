@@ -28,6 +28,8 @@ operation RegisterMember {
         @required
         memberId: String
     }
+
+    errors: [ValidationError]
 }
 
 @http(method: "GET", uri: "/members")
@@ -52,6 +54,8 @@ operation GetMember {
         @required
         member: MemberItem
     }
+
+    errors: [NotFoundError]
 }
 
 list MemberList {

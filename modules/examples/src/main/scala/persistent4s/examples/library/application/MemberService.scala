@@ -28,10 +28,11 @@ import persistent4s.examples.library.domain.member.*
 class MemberServiceImpl(repository: MemberRepository[IO])(using EventStore[IO, LibraryEvent]) extends MemberService[IO]:
 
   def registerMember(name: String, email: String): IO[RegisterMemberOutput] =
-    for
+    (for
       memberId <- IO(UUID.randomUUID())
       _        <- RegisterMemberHandler.run[IO](RegisterMember(memberId, name, email))
-    yield RegisterMemberOutput(memberId.toString())
+    yield RegisterMemberOutput(memberId.toString()))
+      .adaptError { case e => ValidationError(e.getMessage) }
 
   def getMembers(): IO[GetMembersOutput] =
     repository.getMembers
@@ -42,5 +43,5 @@ class MemberServiceImpl(repository: MemberRepository[IO])(using EventStore[IO, L
   def getMember(memberId: String): IO[GetMemberOutput] =
     repository.find(UUID.fromString(memberId)).flatMap {
       case Some(m) => IO.pure(GetMemberOutput(MemberItem(m.memberId.toString(), m.name, m.email, m.borrowedBooks)))
-      case None    => IO.raiseError(new Exception(s"Member not found: $memberId"))
+      case None    => IO.raiseError(NotFoundError(s"Member not found: $memberId"))
     }
