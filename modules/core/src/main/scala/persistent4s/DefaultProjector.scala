@@ -16,16 +16,23 @@
 
 package persistent4s
 
+import cats.Applicative
 import cats.effect.Async
+import cats.effect.Deferred
+import cats.effect.Ref
 import cats.syntax.all.*
 import fs2.Stream
-import cats.Applicative
 
 final case class DefaultProjector[F[_]: Async, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
   checkpoint: ProjectionCheckpoint[F],
   batchSize: Int = 100,
 ) extends Projector[F, A]:
+
+  final private case class WakeupState(
+    pending: Boolean,
+    signal: Deferred[F, Unit],
+  )
 
   // TODO add error handling
   override def run[K](projection: Projection[F, A, K]): Stream[F, Unit] = {
@@ -72,5 +79,35 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
         .chunkN(batchSize)
         .evalMap(chunk => processBatch(chunk.toList))
 
-    (Stream.emit(()) ++ eventStore.notification).flatMap(_ => processEvents)
+    def markPending(wakeupState: Ref[F, WakeupState]): F[Unit] =
+      wakeupState.modify {
+        case current @ WakeupState(true, _) =>
+          current -> Applicative[F].unit
+        case WakeupState(false, signal) =>
+          WakeupState(pending = true, signal) -> signal.complete(()).void
+      }.flatten
+
+    def awaitWork(wakeupState: Ref[F, WakeupState]): F[Unit] =
+      Deferred[F, Unit].flatMap { nextSignal =>
+        wakeupState.modify {
+          case WakeupState(true, _) =>
+            WakeupState(pending = false, nextSignal) -> Applicative[F].unit
+          case current @ WakeupState(false, signal) =>
+            current -> (signal.get *> awaitWork(wakeupState))
+        }.flatten
+      }
+
+    Stream.eval(Deferred[F, Unit]).flatMap { initialSignal =>
+      Stream.eval(Ref.of[F, WakeupState](WakeupState(pending = true, initialSignal))).flatMap { wakeupState =>
+        val notifications =
+          eventStore.notification.evalMap(_ => markPending(wakeupState)).drain
+
+        val projector =
+          Stream
+            .repeatEval(awaitWork(wakeupState))
+            .flatMap(_ => processEvents)
+
+        projector.concurrently(notifications)
+      }
+    }
   }
