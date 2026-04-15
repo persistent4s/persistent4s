@@ -16,6 +16,8 @@
 
 package persistent4s
 
+import java.util.UUID
+
 /** A Tag is a simple key-value pair that can be associated with an event in the event store. Tags are used to
   * categorize and filter events when reading from the event store. Each tag consists of a category and an identifier,
   * and the value of the tag is a string in the format "category:id". The Tag class provides a method to convert a Tag
@@ -31,6 +33,9 @@ final case class Tag(category: String, id: String):
   def value: String = s"$category:$id"
 
 object Tag:
+
+  def apply(category: String, id: UUID): Tag =
+    Tag(category, id.toString)
 
   def fromString(s: String): Option[Tag] =
     s.split(":", 2) match
