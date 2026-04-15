@@ -170,7 +170,8 @@ object PostgresModule:
     session.execute(createTableCommand) *>
       session.execute(createEventTypeIndexCommand) *>
       session.execute(createEventTagsTableCommand) *>
-      session.execute(createEventTagsSequenceIndexCommand).void
+      session.execute(createEventTagsSequenceIndexCommand) *>
+      session.execute(PostgresProjectionCheckpoint.createTableCommand).void
 
   private val checkTableExistsQuery: Query[String, Long] =
     sql"""
