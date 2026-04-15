@@ -28,8 +28,7 @@ import persistent4s.examples.library.domain.*
 import persistent4s.examples.library.domain.book.{BookProjection, BookRepository}
 import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, BorrowingRepository}
 import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
-import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule}
-import persistent4s.testkit.InMemoryProjectionCheckpoint
+import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule, PostgresProjectionCheckpoint}
 
 final class LibraryModule private (
   val store: PostgresEventStore[IO, LibraryEvent],
@@ -59,7 +58,7 @@ object LibraryModule:
       bookRepo       = BookRepository.make[IO](viewPool)
       memberRepo     = MemberRepository.make[IO](viewPool)
       borrowingRepo  = BorrowingRepository.make[IO](viewPool)
-      checkpoint    <- Resource.eval(InMemoryProjectionCheckpoint.make[IO])
+      checkpoint     = PostgresProjectionCheckpoint.make[IO](viewPool)
       bookProj      <- Resource.eval(BookProjection.make[IO](bookRepo))
       memberProj    <- Resource.eval(MemberProjection.make[IO](memberRepo))
       borrowingProj <- Resource.eval(BorrowingProjection.make[IO](borrowingRepo))
