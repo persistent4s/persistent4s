@@ -23,6 +23,13 @@ import fs2.Stream
   * order. The projector should handle any necessary error handling and retries to ensure that the projection processes
   * events reliably.
   *
+  * Delivery semantics are projector-dependent. The default implementation processes events sequentially within each
+  * batch while keeping the intermediate state in memory. When a batch completes successfully, it persists the updated
+  * states and advances the checkpoint once for the last processed event. If handling an event fails, it persists the
+  * successfully computed state up to the previous event and saves the checkpoint for that last fully processed event
+  * before failing the stream. Unless state persistence and checkpoint persistence are committed atomically, processing
+  * remains at-least-once and projection persistence should therefore be idempotent.
+  *
   * @tparam F
   *   the effect type, such as IO
   * @tparam A
@@ -33,6 +40,8 @@ import fs2.Stream
 trait Projector[F[_], A <: Event]:
 
   /** Run the given projection. This should start the projection and keep it running, processing events as they come in.
+    * The returned stream may replay already processed events after a failure unless the projection state updates and
+    * checkpoint updates are persisted atomically. The default projector only checkpoints fully processed events.
     *
     * @param projection
     *   the projection to run

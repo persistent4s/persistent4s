@@ -34,34 +34,61 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
     signal: Deferred[F, Unit],
   )
 
-  // TODO add error handling
+  final private case class BatchProgress[K, S](
+    stateCache: Map[K, Option[S]],
+    dirtyKeys: Set[K],
+    lastProcessedPosition: Option[Long],
+  )
+
+  // TODO add custom error recovery / retry hooks
   override def run[K](projection: Projection[F, A, K]): Stream[F, Unit] = {
+
+    def persistProgress(progress: BatchProgress[K, projection.State]): F[Unit] =
+      progress.dirtyKeys.toList.traverse_ { key =>
+        projection.persist(key, progress.stateCache.getOrElse(key, None))
+      } *> progress.lastProcessedPosition.traverse_(checkpoint.save(projection.name, _)).void
+
+    def processEvent(
+      progress: BatchProgress[K, projection.State],
+      event: EventEnvelope[A],
+    ): F[BatchProgress[K, projection.State]] =
+      val eventKeys = projection.resolveKeys(event)
+
+      eventKeys
+        .foldLeftM(progress.stateCache) { (stateCache, key) =>
+          projection.handle(stateCache.getOrElse(key, None), event).map { stateN =>
+            stateCache.updated(key, stateN)
+          }
+        }
+        .map { stateCacheN =>
+          progress.copy(
+            stateCache = stateCacheN,
+            dirtyKeys = progress.dirtyKeys ++ eventKeys,
+            lastProcessedPosition = Some(event.metadata.globalPosition),
+          )
+        }
 
     def processBatch(batch: List[EventEnvelope[A]]): F[Unit] =
       if (batch.isEmpty) Applicative[F].unit
       else {
-        val keyedEvents = batch.flatMap { event =>
-          projection.resolveKeys(event).map(_ -> event)
-        }
-        val grouped = keyedEvents.groupBy(_._1)
-        val keys = grouped.keySet
+        val keys = batch.flatMap(event => projection.resolveKeys(event)).toSet
 
         for {
-          existing <- keys.toList.traverse(key => projection.fetchState(key).tupleLeft(key)).map(_.toMap)
+          initialStates <- keys.toList.traverse(key => projection.fetchState(key).tupleLeft(key)).map(_.toMap)
 
-          finalStates <- grouped.toList.foldLeftM(Map.empty[K, Option[projection.State]]) { case (acc, (key, pairs)) =>
-                           val eventsForKey = pairs.map(_._2)
-                           val state0 = existing.getOrElse(key, None)
+          progress0 = BatchProgress[K, projection.State](
+                        stateCache = initialStates,
+                        dirtyKeys = Set.empty,
+                        lastProcessedPosition = None,
+                      )
 
-                           eventsForKey
-                             .foldLeftM(state0)(projection.handle)
-                             .map(stateN => acc.updated(key, stateN))
-                         }
+          finalProgress <- batch.foldLeftM(progress0) { (progress, event) =>
+                             processEvent(progress, event).handleErrorWith { error =>
+                               persistProgress(progress) *> Async[F].raiseError(error)
+                             }
+                           }
 
-          _ <- finalStates.toList.traverse_ { case (key, state) =>
-                 projection.persist(key, state)
-               }
-          _ <- checkpoint.save(projection.name, batch.last.metadata.globalPosition)
+          _ <- persistProgress(finalProgress)
         } yield ()
       }
 
