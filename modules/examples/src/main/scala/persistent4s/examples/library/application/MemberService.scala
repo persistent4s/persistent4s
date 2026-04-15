@@ -24,25 +24,23 @@ import persistent4s.EventStore
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.member.*
-import persistent4s.examples.library.infrastructure.LibraryModule
 
-class MemberServiceImpl(module: LibraryModule) extends MemberService[IO]:
-
-  private given EventStore[IO, LibraryEvent] = module.store
+class MemberServiceImpl(repository: MemberRepository[IO])(using EventStore[IO, LibraryEvent]) extends MemberService[IO]:
 
   def registerMember(name: String, email: String): IO[RegisterMemberOutput] =
     for
-      memberId <- IO(UUID.randomUUID().toString)
+      memberId <- IO(UUID.randomUUID())
       _        <- RegisterMemberHandler.run[IO](RegisterMember(memberId, name, email))
-    yield RegisterMemberOutput(memberId)
+    yield RegisterMemberOutput(memberId.toString())
 
   def getMembers(): IO[GetMembersOutput] =
-    module.memberProjection.getMembers.map(members =>
-      GetMembersOutput(members.map(m => MemberItem(m.memberId, m.name, m.email, m.borrowedBooks))),
-    )
+    repository.getMembers
+      .map(members =>
+        GetMembersOutput(members.map(m => MemberItem(m.memberId.toString(), m.name, m.email, m.borrowedBooks))),
+      )
 
   def getMember(memberId: String): IO[GetMemberOutput] =
-    module.memberProjection.getMember(memberId).flatMap {
-      case Some(m) => IO.pure(GetMemberOutput(MemberItem(m.memberId, m.name, m.email, m.borrowedBooks)))
+    repository.find(UUID.fromString(memberId)).flatMap {
+      case Some(m) => IO.pure(GetMemberOutput(MemberItem(m.memberId.toString(), m.name, m.email, m.borrowedBooks)))
       case None    => IO.raiseError(new Exception(s"Member not found: $memberId"))
     }

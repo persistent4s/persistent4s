@@ -22,10 +22,11 @@ import cats.syntax.all.*
 import persistent4s.{CommandHandler, EventTypeName, Tag}
 import persistent4s.examples.library.domain.*
 import java.time.OffsetDateTime
+import java.util.UUID
 
 final case class ReturnBook(
-  bookId: String,
-  memberId: String,
+  bookId: UUID,
+  memberId: UUID,
 )
 
 final case class ReturnBookState(

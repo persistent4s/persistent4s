@@ -22,36 +22,34 @@ import persistent4s.EventStore
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.borrowing.*
-import persistent4s.examples.library.infrastructure.LibraryModule
 import smithy4s.Timestamp
 
-class BorrowingServiceImpl(module: LibraryModule) extends BorrowingService[IO]:
+import java.util.UUID
 
-  private given EventStore[IO, LibraryEvent] = module.store
+class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore[IO, LibraryEvent])
+    extends BorrowingService[IO]:
 
   def borrowBook(bookId: String, memberId: String): IO[Unit] =
-    BorrowBookHandler.run[IO](BorrowBook(bookId, memberId))
+    BorrowBookHandler.run[IO](BorrowBook(UUID.fromString(bookId), UUID.fromString(memberId)))
 
   def returnBook(bookId: String, memberId: String): IO[Unit] =
-    ReturnBookHandler.run[IO](ReturnBook(bookId, memberId))
+    ReturnBookHandler.run[IO](ReturnBook(UUID.fromString(bookId), UUID.fromString(memberId)))
 
   def getBorrowings(): IO[GetBorrowingsOutput] =
-    module.borrowingProjection.getBorrowings.map(borrowings => GetBorrowingsOutput(borrowings.map(toBorrowingItem)))
+    repository.getBorrowings.map(borrowings => GetBorrowingsOutput(borrowings.map(toBorrowingItem)))
 
   def getActiveBorrowings(): IO[GetActiveBorrowingsOutput] =
-    module.borrowingProjection.getActiveBorrowings.map(borrowings =>
-      GetActiveBorrowingsOutput(borrowings.map(toBorrowingItem)),
-    )
+    repository.getActiveBorrowings.map(borrowings => GetActiveBorrowingsOutput(borrowings.map(toBorrowingItem)))
 
   def getMemberBorrowings(memberId: String): IO[GetMemberBorrowingsOutput] =
-    module.borrowingProjection
-      .getBorrowingsByMember(memberId)
+    repository
+      .getMemberBorrowings(UUID.fromString(memberId))
       .map(borrowings => GetMemberBorrowingsOutput(borrowings.map(toBorrowingItem)))
 
-  private def toBorrowingItem(b: BorrowingView): BorrowingItem =
+  private def toBorrowingItem(b: BorrowingState): BorrowingItem =
     BorrowingItem(
-      bookId = b.bookId,
-      memberId = b.memberId,
+      bookId = b.bookId.toString(),
+      memberId = b.memberId.toString(),
       borrowedAt = Timestamp.fromInstant(b.borrowedAt.toInstant),
       dueDate = Timestamp.fromInstant(b.dueDate.toInstant),
       returnedAt = b.returnedAt.map(returnedAt => Timestamp.fromInstant(returnedAt.toInstant)),

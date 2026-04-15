@@ -12,6 +12,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./init-views.sql:/docker-entrypoint-initdb.d/init-views.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U library -d library_events"]
       interval: 5s

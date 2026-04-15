@@ -16,49 +16,20 @@
 
 package persistent4s.examples.library.infrastructure
 
-import cats.effect.{IO, IOApp, Resource}
-import cats.syntax.all.*
+import cats.effect.{IO, IOApp}
 import com.comcast.ip4s.*
 import org.http4s.ember.server.EmberServerBuilder
-import org.http4s.HttpRoutes
-import smithy4s.http4s.SimpleRestJsonBuilder
-import smithy4s.http4s.swagger.docs
-
-import persistent4s.examples.library.api.*
-import persistent4s.examples.library.application.*
 
 object LibraryServer extends IOApp.Simple:
 
   def run: IO[Unit] =
     LibraryModule.make().use { module =>
-      val routes: Resource[IO, HttpRoutes[IO]] =
-        for
-          bookRoutes <- SimpleRestJsonBuilder
-                          .routes(BookServiceImpl(module))
-                          .resource
-          memberRoutes <- SimpleRestJsonBuilder
-                            .routes(MemberServiceImpl(module))
-                            .resource
-          borrowingRoutes <- SimpleRestJsonBuilder
-                               .routes(BorrowingServiceImpl(module))
-                               .resource
-          eventsRoutes <- SimpleRestJsonBuilder
-                            .routes(EventsServiceImpl(module))
-                            .resource
-          docsRoutes = docs[IO](
-                         BookService,
-                         MemberService,
-                         BorrowingService,
-                         EventsService,
-                       )
-        yield bookRoutes <+> memberRoutes <+> borrowingRoutes <+> eventsRoutes <+> docsRoutes
-
-      routes.use { r =>
+      LibraryRoutes.make(module).use { routes =>
         EmberServerBuilder
           .default[IO]
           .withHost(host"0.0.0.0")
           .withPort(port"8182")
-          .withHttpApp(r.orNotFound)
+          .withHttpApp(routes.orNotFound)
           .build
           .useForever
       }

@@ -21,9 +21,10 @@ import cats.syntax.all.*
 
 import persistent4s.{CommandHandler, Tag}
 import persistent4s.examples.library.domain.{BookAdded, LibraryEvent}
+import java.util.UUID
 
 final case class AddBook(
-  bookId: String,
+  bookId: UUID,
   title: String,
   author: String,
   totalCopies: Int,

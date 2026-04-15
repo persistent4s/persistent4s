@@ -24,26 +24,23 @@ import persistent4s.EventStore
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
-import persistent4s.examples.library.infrastructure.LibraryModule
 
-class BookServiceImpl(module: LibraryModule) extends BookService[IO]:
-
-  private given EventStore[IO, LibraryEvent] = module.store
+class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, LibraryEvent]) extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
     for
-      bookId <- IO(UUID.randomUUID().toString)
+      bookId <- IO(UUID.randomUUID())
       _      <- AddBookHandler.run[IO](AddBook(bookId, title, author, totalCopies))
-    yield AddBookOutput(bookId)
+    yield AddBookOutput(bookId.toString())
 
   def getBooks(): IO[GetBooksOutput] =
-    module.bookProjection.getBooks.map(books =>
-      GetBooksOutput(books.map(b => BookItem(b.bookId, b.title, b.author, b.totalCopies, b.availableCopies))),
+    repository.getBooks.map(books =>
+      GetBooksOutput(books.map(b => BookItem(b.bookId.toString(), b.title, b.author, b.totalCopies, b.availableCopies))),
     )
 
   def getBook(bookId: String): IO[GetBookOutput] =
-    module.bookProjection.getBook(bookId).flatMap {
+    repository.find(UUID.fromString(bookId)).flatMap {
       case Some(b) =>
-        IO.pure(GetBookOutput(BookItem(b.bookId, b.title, b.author, b.totalCopies, b.availableCopies)))
+        IO.pure(GetBookOutput(BookItem(b.bookId.toString(), b.title, b.author, b.totalCopies, b.availableCopies)))
       case None => IO.raiseError(new Exception(s"Book not found: $bookId"))
     }

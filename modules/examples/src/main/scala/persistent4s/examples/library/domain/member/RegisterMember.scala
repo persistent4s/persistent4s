@@ -21,9 +21,10 @@ import cats.syntax.all.*
 
 import persistent4s.{CommandHandler, Tag}
 import persistent4s.examples.library.domain.{LibraryEvent, MemberRegistered}
+import java.util.UUID
 
 final case class RegisterMember(
-  memberId: String,
+  memberId: UUID,
   name: String,
   email: String,
 )

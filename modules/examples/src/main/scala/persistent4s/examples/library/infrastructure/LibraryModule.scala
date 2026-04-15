@@ -19,14 +19,16 @@ package persistent4s.examples.library.infrastructure
 import cats.effect.*
 import fs2.io.net.Network
 import natchez.Trace.Implicits.noop
+import pureconfig.ConfigSource
+import skunk.*
 
 import persistent4s.*
 import persistent4s.circe.CirceEventCodec
 import persistent4s.examples.library.domain.*
-import persistent4s.examples.library.domain.book.BookProjection
-import persistent4s.examples.library.domain.borrowing.BorrowingProjection
-import persistent4s.examples.library.domain.member.MemberProjection
-import persistent4s.postgres.{PostgresEventStore, PostgresModule}
+import persistent4s.examples.library.domain.book.{BookProjection, BookRepository}
+import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, BorrowingRepository}
+import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
+import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule}
 import persistent4s.testkit.InMemoryProjectionCheckpoint
 
 final class LibraryModule private (
@@ -34,6 +36,9 @@ final class LibraryModule private (
   val bookProjection: BookProjection[IO],
   val memberProjection: MemberProjection[IO],
   val borrowingProjection: BorrowingProjection[IO],
+  val bookRepository: BookRepository[IO],
+  val memberRepository: MemberRepository[IO],
+  val borrowingRepository: BorrowingRepository[IO],
 )
 
 object LibraryModule:
@@ -45,13 +50,27 @@ object LibraryModule:
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
     for
-      store         <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      store    <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      config   <- Resource.eval(loadConfig(configPath))
+      viewPool <- Session.pooled[IO](
+                    host = config.host, port = config.port, user = config.user, password = Some(config.password),
+                    database = config.database, max = config.maxConnections,
+                  )
+      bookRepo       = BookRepository.make[IO](viewPool)
+      memberRepo     = MemberRepository.make[IO](viewPool)
+      borrowingRepo  = BorrowingRepository.make[IO](viewPool)
       checkpoint    <- Resource.eval(InMemoryProjectionCheckpoint.make[IO])
-      bookProj      <- Resource.eval(BookProjection.make[IO])
-      memberProj    <- Resource.eval(MemberProjection.make[IO])
-      borrowingProj <- Resource.eval(BorrowingProjection.make[IO])
+      bookProj      <- Resource.eval(BookProjection.make[IO](bookRepo))
+      memberProj    <- Resource.eval(MemberProjection.make[IO](memberRepo))
+      borrowingProj <- Resource.eval(BorrowingProjection.make[IO](borrowingRepo))
       projector      = DefaultProjector[IO, LibraryEvent](store, checkpoint)
       _             <- projector.run(bookProj).compile.drain.background
       _             <- projector.run(memberProj).compile.drain.background
       _             <- projector.run(borrowingProj).compile.drain.background
-    yield new LibraryModule(store, bookProj, memberProj, borrowingProj)
+    yield new LibraryModule(store, bookProj, memberProj, borrowingProj, bookRepo, memberRepo, borrowingRepo)
+
+  private def loadConfig(configPath: String): IO[PostgresConfig] =
+    IO.delay(ConfigSource.default.at(configPath).load[PostgresConfig]).flatMap {
+      case Right(config) => IO.pure(config)
+      case Left(errors)  => IO.raiseError(new RuntimeException(errors.prettyPrint()))
+    }

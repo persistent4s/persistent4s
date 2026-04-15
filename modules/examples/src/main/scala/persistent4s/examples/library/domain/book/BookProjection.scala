@@ -21,9 +21,11 @@ import cats.syntax.all.*
 
 import persistent4s.*
 import persistent4s.examples.library.domain.{BookAdded, BookBorrowed, BookReturned, LibraryEvent}
+import persistent4s.examples.library.application.Repository
+import java.util.UUID
 
-final case class BookView(
-  bookId: String,
+final case class BookState(
+  bookId: UUID,
   title: String,
   author: String,
   totalCopies: Int,
@@ -31,37 +33,40 @@ final case class BookView(
 )
 
 final class BookProjection[F[_]: Async] private (
-  state: Ref[F, Map[String, BookView]],
-) extends StatelessProjection[F, LibraryEvent]:
+  repository: Repository[F, UUID, BookState],
+) extends Projection[F, LibraryEvent, UUID]:
 
-  val name: String = "book-projection"
+  type State = BookState
 
-  val filter: EventFilter = EventFilter(
+  override val name: String = "book-projection"
+
+  override val filter: EventFilter = EventFilter(
     eventTypes = Set(EventTypeName.of[BookAdded], EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]),
   )
 
-  def handle(event: EventEnvelope[LibraryEvent]): F[Unit] =
-    event.payload match
-      case BookAdded(bookId, title, author, totalCopies) =>
-        state.update(_.updated(bookId, BookView(bookId, title, author, totalCopies, totalCopies)))
-      case BookBorrowed(bookId, _, _, _) =>
-        state.update(_.updatedWith(bookId) {
-          case Some(view) => Some(view.copy(availableCopies = view.availableCopies - 1))
-          case None       => throw new Exception(s"Book with ID $bookId not found in projection")
-        })
-      case BookReturned(bookId, _, _) =>
-        state.update(_.updatedWith(bookId) {
-          case Some(view) => Some(view.copy(availableCopies = view.availableCopies + 1))
-          case None       => throw new Exception(s"Book with ID $bookId not found in projection")
-        })
-      case _ => Async[F].unit
+  override def resolveKeys(event: EventEnvelope[LibraryEvent]): List[UUID] = event.payload match
+    case BookAdded(bookId, _, _, _)    => List(bookId)
+    case BookBorrowed(bookId, _, _, _) => List(bookId)
+    case BookReturned(bookId, _, _)    => List(bookId)
+    case _                             => Nil
 
-  def getBooks: F[List[BookView]] = state.get.map(_.values.toList)
+  override def fetchState(key: UUID): F[Option[BookState]] = repository.find(key)
 
-  def getBook(bookId: String): F[Option[BookView]] = state.get.map(_.get(bookId))
+  override def handle(state: Option[BookState], event: EventEnvelope[LibraryEvent]): F[Option[BookState]] =
+    (state, event.payload) match
+      case (None, BookAdded(bookId, title, author, totalCopies)) =>
+        BookState(bookId, title, author, totalCopies, totalCopies).some.pure[F]
+      case (Some(s), BookBorrowed(bookId, _, _, _)) =>
+        Some(s.copy(availableCopies = s.availableCopies - 1)).pure[F]
+      case (Some(s), BookReturned(bookId, _, _)) =>
+        Some(s.copy(availableCopies = s.availableCopies + 1)).pure[F]
+      case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
+
+  override def persist(key: UUID, state: Option[BookState]): F[Unit] = state match
+    case Some(bookState) => repository.save(key, bookState)
+    case None            => repository.delete(key)
 
 object BookProjection:
 
-  def make[F[_]: Async]: F[BookProjection[F]] =
-    for state <- Ref.of[F, Map[String, BookView]](Map.empty)
-    yield new BookProjection(state)
+  def make[F[_]: Async](repository: Repository[F, UUID, BookState]): F[BookProjection[F]] =
+    Async[F].pure(new BookProjection(repository))

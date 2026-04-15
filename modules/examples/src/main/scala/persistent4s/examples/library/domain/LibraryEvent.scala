@@ -22,6 +22,7 @@ import io.circe.syntax.*
 import java.time.OffsetDateTime
 
 import persistent4s.Event
+import java.util.UUID
 
 sealed trait LibraryEvent extends Event
 
@@ -33,7 +34,7 @@ sealed trait BorrowingEvent extends LibraryEvent
 
 // Book Events
 final case class BookAdded(
-  bookId: String,
+  bookId: UUID,
   title: String,
   author: String,
   totalCopies: Int,
@@ -41,22 +42,22 @@ final case class BookAdded(
 
 // Member Events
 final case class MemberRegistered(
-  memberId: String,
+  memberId: UUID,
   name: String,
   email: String,
 ) extends MemberEvent derives Encoder, Decoder
 
 // Borrowing Events
 final case class BookBorrowed(
-  bookId: String,
-  memberId: String,
+  bookId: UUID,
+  memberId: UUID,
   borrowedAt: OffsetDateTime,
   dueDate: OffsetDateTime,
 ) extends BorrowingEvent derives Encoder, Decoder
 
 final case class BookReturned(
-  bookId: String,
-  memberId: String,
+  bookId: UUID,
+  memberId: UUID,
   returnedAt: OffsetDateTime,
 ) extends BorrowingEvent derives Encoder, Decoder
 

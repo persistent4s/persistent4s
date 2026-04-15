@@ -21,53 +21,52 @@ import cats.syntax.all.*
 
 import persistent4s.*
 import persistent4s.examples.library.domain.{BookBorrowed, BookReturned, LibraryEvent}
+import persistent4s.examples.library.application.Repository
 import java.time.OffsetDateTime
+import java.util.UUID
 
-final case class BorrowingView(
-  bookId: String,
-  memberId: String,
+final case class BorrowingState(
+  bookId: UUID,
+  memberId: UUID,
   borrowedAt: OffsetDateTime,
   dueDate: OffsetDateTime,
   returnedAt: Option[OffsetDateTime],
 )
 
 final class BorrowingProjection[F[_]: Async] private (
-  state: Ref[F, Map[(String, String), BorrowingView]],
-) extends StatelessProjection[F, LibraryEvent]:
+  repository: Repository[F, (UUID, UUID), BorrowingState],
+) extends Projection[F, LibraryEvent, (UUID, UUID)]:
 
-  val name: String = "borrowing-projection"
+  type State = BorrowingState
 
-  val filter: EventFilter = EventFilter(
+  override val name: String = "borrowing-projection"
+
+  override val filter: EventFilter = EventFilter(
     eventTypes = Set(EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]),
   )
 
-  def handle(event: EventEnvelope[LibraryEvent]): F[Unit] =
-    event.payload match
-      case BookBorrowed(bookId, memberId, borrowedAt, dueDate) =>
-        val borrowingKey = (bookId, memberId)
-        state.update(
-          _.updated(borrowingKey, BorrowingView(bookId, memberId, borrowedAt, dueDate, None)),
-        )
-      case BookReturned(bookId, memberId, returnedAt) =>
-        val borrowingKey = (bookId, memberId)
-        state.update(_.updatedWith(borrowingKey) {
-          case Some(view) => Some(view.copy(returnedAt = Some(returnedAt)))
-          case None       => None
-        })
-      case _ => Async[F].unit
+  override def resolveKeys(event: EventEnvelope[LibraryEvent]): List[(UUID, UUID)] = event.payload match
+    case BookBorrowed(bookId, memberId, _, _) => List((bookId, memberId))
+    case BookReturned(bookId, memberId, _)    => List((bookId, memberId))
+    case _                                    => Nil
 
-  def getBorrowings: F[List[BorrowingView]] = state.get.map(_.values.toList)
+  override def fetchState(key: (UUID, UUID)): F[Option[BorrowingState]] = repository.find(key)
 
-  def getActiveBorrowings: F[List[BorrowingView]] =
-    state.get.map(_.values.filter(_.returnedAt.isEmpty).toList)
+  override def handle(state: Option[BorrowingState], event: EventEnvelope[LibraryEvent]): F[Option[BorrowingState]] =
+    (state, event.payload) match
+      case (None, BookBorrowed(bookId, memberId, borrowedAt, dueDate)) =>
+        BorrowingState(bookId, memberId, borrowedAt, dueDate, None).some.pure[F]
+      case (Some(borrowingState), BookReturned(bookId, memberId, returnedAt)) =>
+        BorrowingState(bookId, memberId, borrowingState.borrowedAt, borrowingState.dueDate, Some(returnedAt)).some
+          .pure[F]
+      case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
 
-  def getBorrowingsByMember(memberId: String): F[List[BorrowingView]] =
-    state.get.map(_.values.filter(_.memberId == memberId).toList)
-
-  def getBorrowingsByBook(bookId: String): F[List[BorrowingView]] =
-    state.get.map(_.values.filter(_.bookId == bookId).toList)
+  override def persist(key: (UUID, UUID), state: Option[BorrowingState]): F[Unit] =
+    state match
+      case Some(borrowingState) => repository.save(key, borrowingState)
+      case None                 => repository.delete(key)
 
 object BorrowingProjection:
 
-  def make[F[_]: Async]: F[BorrowingProjection[F]] =
-    Ref.of[F, Map[(String, String), BorrowingView]](Map.empty).map(new BorrowingProjection(_))
+  def make[F[_]: Async](repository: Repository[F, (UUID, UUID), BorrowingState]): F[BorrowingProjection[F]] =
+    Async[F].pure(new BorrowingProjection(repository))
