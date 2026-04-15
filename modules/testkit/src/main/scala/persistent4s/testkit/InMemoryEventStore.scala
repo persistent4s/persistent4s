@@ -44,6 +44,14 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
 ) extends EventStore[F, A]
     with EventNotification[F]:
 
+  private def matchesEventFilter(env: EventEnvelope[A], eventFilter: EventFilter): Boolean =
+    val matchesTags =
+      eventFilter.tags.isEmpty || env.metadata.tags.exists(eventFilter.tags.contains)
+    val matchesTypes =
+      eventFilter.eventTypes.isEmpty || eventFilter.eventTypes.contains(env.metadata.eventType)
+
+    matchesTags && matchesTypes
+
   def getEvents: F[Vector[EventEnvelope[A]]] = store.get
 
   override def append(
@@ -52,10 +60,7 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
     events: List[(Set[Tag], EventTypeName, A)]*,
   ): F[Unit] =
     store.modify { currentEvents =>
-      val relevantEvents = currentEvents.filter(env =>
-        (eventFilter.eventTypes.isEmpty || eventFilter.eventTypes.contains(env.metadata.eventType)) &&
-          (env.metadata.tags.exists(eventFilter.tags.contains)),
-      )
+      val relevantEvents = currentEvents.filter(env => matchesEventFilter(env, eventFilter))
       val actualIndex = relevantEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
 
       if (actualIndex != expectedIndex) {
@@ -87,11 +92,7 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
     Stream
       .eval(store.get)
       .flatMap(events => Stream.emits(events))
-      .filter { env =>
-        val matchesTags = env.metadata.tags.exists(eventFilter.tags.contains)
-        val matchesTypes = eventFilter.eventTypes.isEmpty || eventFilter.eventTypes.contains(env.metadata.eventType)
-        matchesTags && matchesTypes && env.metadata.globalPosition > fromPosition
-      }
+      .filter(env => matchesEventFilter(env, eventFilter) && env.metadata.globalPosition > fromPosition)
 
 object InMemoryEventStore:
 

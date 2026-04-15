@@ -169,3 +169,41 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
       filtered.head.payload == TestEvent.StudentCreated("1"),
     )
   }
+
+  test("read with empty tags matches all tags") {
+    for
+      store <- InMemoryEventStore.make[IO, TestEvent]
+      _     <-
+        appendOne(store, 0L, Set(student1), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("1"))
+      _ <-
+        appendOne(store, 0L, Set(student2), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("2"))
+      _ <-
+        appendOne(store, 0L, Set(course1), EventTypeName.of[TestEvent.CourseCreated], TestEvent.CourseCreated("1"))
+      filtered <-
+        store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent.StudentCreated]), Set.empty)).compile.toList
+    yield expect.all(
+      filtered.length == 2,
+      filtered.map(_.metadata.tags).toSet == Set(Set(student1), Set(student2)),
+      filtered.map(_.payload).toSet == Set(TestEvent.StudentCreated("1"), TestEvent.StudentCreated("2")),
+    )
+  }
+
+  test("append with empty tags uses all tags for conflict detection") {
+    for
+      store <- InMemoryEventStore.make[IO, TestEvent]
+      _     <-
+        appendOne(store, 0L, Set(student1), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("1"))
+      result <- store
+                  .append(
+                    EventFilter(Set.empty, Set.empty),
+                    1L,
+                    List((Set(student2), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("2"))),
+                  )
+                  .attempt
+      events <- store.getEvents
+    yield expect.all(
+      result.isRight,
+      events.length == 2,
+      events.map(_.payload).toList == List(TestEvent.StudentCreated("1"), TestEvent.StudentCreated("2")),
+    )
+  }

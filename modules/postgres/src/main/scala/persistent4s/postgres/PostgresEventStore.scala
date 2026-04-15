@@ -138,24 +138,29 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     eventTypes: Set[EventTypeName],
     expectedIndex: Long,
   ): F[Unit] =
-    if tags.isEmpty then Async[F].unit
-    else
-      val tagList = tags.toList.map(_.value)
-      val eventTypeList = eventTypes.toList.map(_.value)
-      for
-        actualIndex <- eventTypeList.isEmpty match
-                         case true =>
-                           session.unique(lastConflictingSequenceByTagsQuery(tagList.size))(
-                             expectedIndex *: tagList *: EmptyTuple,
-                           )
-                         case false =>
-                           session.unique(lastConflictingSequenceByBothQuery(tagList.size, eventTypeList.size))(
-                             expectedIndex *: tagList *: eventTypeList *: EmptyTuple,
-                           )
-        _ <-
-          if actualIndex > 0 then Async[F].raiseError(IndexConflictException(expectedIndex, actualIndex))
-          else Async[F].unit
-      yield ()
+    val tagList = tags.toList.map(_.value)
+    val eventTypeList = eventTypes.toList.map(_.value)
+
+    for
+      actualIndex <- (tagList.isEmpty, eventTypeList.isEmpty) match
+                       case (true, true) =>
+                         session.unique(lastConflictingSequenceQuery)(expectedIndex)
+                       case (true, false) =>
+                         session.unique(lastConflictingSequenceByEventTypesQuery(eventTypeList.size))(
+                           expectedIndex *: eventTypeList *: EmptyTuple,
+                         )
+                       case (false, true) =>
+                         session.unique(lastConflictingSequenceByTagsQuery(tagList.size))(
+                           expectedIndex *: tagList *: EmptyTuple,
+                         )
+                       case (false, false) =>
+                         session.unique(lastConflictingSequenceByBothQuery(tagList.size, eventTypeList.size))(
+                           expectedIndex *: tagList *: eventTypeList *: EmptyTuple,
+                         )
+      _ <-
+        if actualIndex > 0 then Async[F].raiseError(IndexConflictException(expectedIndex, actualIndex))
+        else Async[F].unit
+    yield ()
 
   private def acquireAppendLocks(
     session: Session[F],
@@ -256,6 +261,23 @@ object PostgresEventStore:
       VALUES ($text, $int8)
       ON CONFLICT DO NOTHING
     """.command
+
+  private val lastConflictingSequenceQuery: Query[Long, Long] =
+    sql"""
+      SELECT COALESCE(MAX(sequence_number), 0)
+      FROM events
+      WHERE sequence_number > $int8
+    """.query(int8)
+
+  private def lastConflictingSequenceByEventTypesQuery(
+    numEventTypes: Int,
+  ): Query[Long *: List[String] *: EmptyTuple, Long] =
+    sql"""
+      SELECT COALESCE(MAX(sequence_number), 0)
+      FROM events
+      WHERE sequence_number > $int8
+        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+    """.query(int8)
 
   private def lastConflictingSequenceByTagsQuery(
     numTags: Int,

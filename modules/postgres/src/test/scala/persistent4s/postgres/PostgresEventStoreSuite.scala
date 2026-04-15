@@ -167,3 +167,18 @@ object PostgresEventStoreSuite extends IOSuite:
       events.head.payload == TestEvent("after"),
     )
   }
+
+  test("append with empty tags uses all tags for conflict detection") { store =>
+    for
+      firstTag  <- freshId("first").map(id => Tag("student", id))
+      secondTag <- freshId("second").map(id => Tag("student", id))
+      _         <- appendOne(store, 0L, Set(firstTag), "before")
+      result    <- store
+                  .append(
+                    EventFilter(Set.empty, Set.empty),
+                    0L,
+                    List((Set(secondTag), EventTypeName.of[TestEvent], TestEvent("after"))),
+                  )
+                  .attempt
+    yield expect(isConflict(result))
+  }
