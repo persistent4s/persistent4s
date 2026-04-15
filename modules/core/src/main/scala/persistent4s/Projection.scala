@@ -16,8 +16,18 @@
 
 package persistent4s
 
-/** A Projection defines how to process events from the event store. */
-trait Projection[F[_], A <: Event]:
+/** A Projection defines how to process events from the event store.
+  *
+  * @tparam F
+  *   the effect type, such as IO
+  * @tparam A
+  *   the event type, which must extend the Event trait
+  * @tparam K
+  *   the key type for fetching and persisting state
+  */
+trait Projection[F[_], A <: Event, K]:
+
+  type State
 
   /** The name of the projection, used for checkpointing. Each projection should have a unique name to avoid conflicts
     * with other projections.
@@ -35,6 +45,30 @@ trait Projection[F[_], A <: Event]:
     */
   def filter: EventFilter
 
+  /** @return the initial state of the projection */
+  def initialState: State
+
+  /** Resolve keys for a given event. This method is used to determine which keys are affected by an event, and
+    * therefore which state entries need to be fetched and updated. An event may affect multiple keys.
+    *
+    * @param event
+    *   the event for which to resolve the keys
+    * @return
+    *   the resolved keys for the given event
+    */
+  def resolveKeys(event: EventEnvelope[A]): List[K]
+
+  /** Fetch the current state for a given key. This method will be called before processing an event to get the current
+    * state that should be updated based on the event. The implementation can choose how to store and retrieve state,
+    * such as using a database or an in-memory cache.
+    *
+    * @param key
+    *   the key for which to fetch the state
+    * @return
+    *   the current state associated with the given key
+    */
+  def fetchState(key: K): F[Option[State]]
+
   /** Handle an incoming event. This method will be called for each event that matches the projection's filter. The
     * projection should perform any necessary processing of the event, such as updating a read model.
     *
@@ -42,7 +76,22 @@ trait Projection[F[_], A <: Event]:
     * retries or failures. Therefore, it's crucial to ensure that the handler can safely handle duplicate events without
     * causing inconsistent state or side effects.
     *
+    * @param state
+    *   the state of the projection before processing the event.
     * @param event
     *   the event to handle
     */
-  def handle(event: EventEnvelope[A]): F[Unit]
+  def handle(state: State, event: EventEnvelope[A]): F[State]
+
+  /** Persist the current state for a given key. This method will be called after processing an event to save the
+    * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
+    * cache.
+    *
+    * @param key
+    *   the key for which to persist the state
+    * @param state
+    *   the state to persist
+    * @return
+    *   a F[Unit] that completes when the state has been persisted
+    */
+  def persist(key: K, state: State): F[Unit]

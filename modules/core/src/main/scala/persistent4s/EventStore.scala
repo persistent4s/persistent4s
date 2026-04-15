@@ -20,6 +20,11 @@ import fs2.Stream
 
 /** An EventStore is a component that allows you to append and read events in an event-sourced system. Appending events
   * to the store is done with optimistic concurrency control.
+  *
+  * @tparam F
+  *   the effect type, such as IO
+  * @tparam A
+  *   the event type, which must extend the Event trait
   */
 trait EventStore[F[_], A <: Event]:
 

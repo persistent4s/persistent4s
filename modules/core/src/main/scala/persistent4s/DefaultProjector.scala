@@ -19,22 +19,58 @@ package persistent4s
 import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Stream
+import cats.Applicative
 
 final case class DefaultProjector[F[_]: Async, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
   checkpoint: ProjectionCheckpoint[F],
+  batchSize: Int = 100,
 ) extends Projector[F, A]:
 
-  override def run(projection: Projection[F, A]): Stream[F, Unit] =
-    val processEvents: Stream[F, Unit] =
+  // TODO add error handling
+  override def run[K](projection: Projection[F, A, K]): Stream[F, Unit] = {
+
+    def processBatch(batch: List[EventEnvelope[A]]): F[Unit] =
+      if (batch.isEmpty) Applicative[F].unit
+      else {
+        val keyedEvents = batch.flatMap { event =>
+          projection.resolveKeys(event).map(_ -> event)
+        }
+        val grouped = keyedEvents.groupBy(_._1)
+        val keys = grouped.keySet
+
+        for {
+          existing <- keys.toList.foldLeftM(Map.empty[K, projection.State]) { (acc, key) =>
+                        projection.fetchState(key).map {
+                          case Some(state) => acc.updated(key, state)
+                          case None        => acc
+                        }
+                      }
+
+          finalStates <- grouped.toList.foldLeftM(Map.empty[K, projection.State]) { case (acc, (key, pairs)) =>
+                           val eventsForKey = pairs.map(_._2)
+                           val state0 = existing.getOrElse(key, projection.initialState)
+
+                           eventsForKey
+                             .foldLeftM(state0)(projection.handle)
+                             .map(stateN => acc.updated(key, stateN))
+                         }
+
+          _ <- finalStates.toList.traverse_ { case (key, state) =>
+                 projection.persist(key, state)
+               }
+          _ <- checkpoint.save(projection.name, batch.last.metadata.globalPosition)
+        } yield ()
+      }
+
+    def processEvents: Stream[F, Unit] =
       Stream
         .eval(checkpoint.load(projection.name))
         .flatMap { lastPosition =>
           eventStore.readFrom(lastPosition.getOrElse(-1L), projection.filter)
         }
-        .evalMap { envelope =>
-          projection.handle(envelope) *>
-            checkpoint.save(projection.name, envelope.metadata.globalPosition)
-        }
+        .chunkN(batchSize)
+        .evalMap(chunk => processBatch(chunk.toList))
 
     (Stream.emit(()) ++ eventStore.notification).flatMap(_ => processEvents)
+  }

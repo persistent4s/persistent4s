@@ -22,6 +22,13 @@ import fs2.Stream
   * the last checkpoint, subscribing to event notifications, and ensuring that events are processed in the correct
   * order. The projector should handle any necessary error handling and retries to ensure that the projection processes
   * events reliably.
+  *
+  * @tparam F
+  *   the effect type, such as IO
+  * @tparam A
+  *   the event type, which must extend the Event trait
+  * @tparam K
+  *   the key type for fetching and persisting state
   */
 trait Projector[F[_], A <: Event]:
 
@@ -30,7 +37,7 @@ trait Projector[F[_], A <: Event]:
     * @param projection
     *   the projection to run
     */
-  def run(projection: Projection[F, A]): Stream[F, Unit]
+  def run[K](projection: Projection[F, A, K]): Stream[F, Unit]
 
 object Projector:
 
