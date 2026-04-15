@@ -45,9 +45,6 @@ trait Projection[F[_], A <: Event, K]:
     */
   def filter: EventFilter
 
-  /** @return the initial state of the projection */
-  def initialState: State
-
   /** Resolve keys for a given event. This method is used to determine which keys are affected by an event, and
     * therefore which state entries need to be fetched and updated. An event may affect multiple keys.
     *
@@ -77,21 +74,23 @@ trait Projection[F[_], A <: Event, K]:
     * causing inconsistent state or side effects.
     *
     * @param state
-    *   the state of the projection before processing the event.
+    *   the current state of the projection before processing the event, if it exists.
     * @param event
     *   the event to handle
+    * @return
+    *   the updated state after processing the event, or None if the state should not exist anymore
     */
-  def handle(state: State, event: EventEnvelope[A]): F[State]
+  def handle(state: Option[State], event: EventEnvelope[A]): F[Option[State]]
 
   /** Persist the current state for a given key. This method will be called after processing an event to save the
     * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
-    * cache.
+    * cache. Passing None indicates that the state should be removed for that key.
     *
     * @param key
     *   the key for which to persist the state
     * @param state
-    *   the state to persist
+    *   the state to persist, if it exists
     * @return
     *   a F[Unit] that completes when the state has been persisted
     */
-  def persist(key: K, state: State): F[Unit]
+  def persist(key: K, state: Option[State]): F[Unit]

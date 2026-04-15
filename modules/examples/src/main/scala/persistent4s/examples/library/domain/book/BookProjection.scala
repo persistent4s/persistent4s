@@ -32,7 +32,7 @@ final case class BookView(
 
 final class BookProjection[F[_]: Async] private (
   state: Ref[F, Map[String, BookView]],
-) extends Projection[F, LibraryEvent]:
+) extends StatelessProjection[F, LibraryEvent]:
 
   val name: String = "book-projection"
 

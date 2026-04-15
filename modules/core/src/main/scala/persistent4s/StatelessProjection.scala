@@ -1,12 +1,11 @@
 package persistent4s
 
 import cats.Applicative
+import cats.syntax.all.*
 
 trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A, scala.Unit] {
 
   type State = scala.Unit
-
-  override def initialState: State = ()
 
   override def resolveKeys(event: EventEnvelope[A]): List[Unit] = List(())
 
@@ -14,8 +13,9 @@ trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A
 
   def handle(event: EventEnvelope[A]): F[Unit]
 
-  final def handle(state: Unit, event: EventEnvelope[A]): F[Unit] = handle(event)
+  final def handle(state: Option[Unit], event: EventEnvelope[A]): F[Option[Unit]] =
+    handle(event).as(state)
 
-  override def persist(key: Unit, state: Unit): F[Unit] = Applicative[F].unit
+  override def persist(key: Unit, state: Option[Unit]): F[Unit] = Applicative[F].unit
 
 }

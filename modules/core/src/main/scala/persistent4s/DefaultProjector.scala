@@ -47,16 +47,11 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
         val keys = grouped.keySet
 
         for {
-          existing <- keys.toList.foldLeftM(Map.empty[K, projection.State]) { (acc, key) =>
-                        projection.fetchState(key).map {
-                          case Some(state) => acc.updated(key, state)
-                          case None        => acc
-                        }
-                      }
+          existing <- keys.toList.traverse(key => projection.fetchState(key).tupleLeft(key)).map(_.toMap)
 
-          finalStates <- grouped.toList.foldLeftM(Map.empty[K, projection.State]) { case (acc, (key, pairs)) =>
+          finalStates <- grouped.toList.foldLeftM(Map.empty[K, Option[projection.State]]) { case (acc, (key, pairs)) =>
                            val eventsForKey = pairs.map(_._2)
-                           val state0 = existing.getOrElse(key, projection.initialState)
+                           val state0 = existing.getOrElse(key, None)
 
                            eventsForKey
                              .foldLeftM(state0)(projection.handle)

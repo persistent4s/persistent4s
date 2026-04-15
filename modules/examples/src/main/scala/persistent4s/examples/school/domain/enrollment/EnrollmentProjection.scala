@@ -23,7 +23,7 @@ import persistent4s.examples.school.domain.SchoolEvent
 
 final class EnrollmentProjection[F[_]: Async] private (
   state: Ref[F, Set[(String, String)]],
-) extends Projection[F, SchoolEvent]:
+) extends StatelessProjection[F, SchoolEvent]:
 
   val name: String = "enrollment-projection"
 

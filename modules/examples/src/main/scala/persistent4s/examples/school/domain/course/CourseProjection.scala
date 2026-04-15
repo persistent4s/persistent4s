@@ -26,7 +26,7 @@ final case class CourseView(courseId: String, title: String, capacity: Int, enro
 
 final class CourseProjection[F[_]: Async] private (
   state: Ref[F, Map[String, CourseView]],
-) extends Projection[F, SchoolEvent]:
+) extends StatelessProjection[F, SchoolEvent]:
 
   val name: String = "course-projection"
 

@@ -27,7 +27,7 @@ final case class StudentView(studentId: String, name: String, email: String, nbC
 
 final class StudentProjection[F[_]: Async] private (
   state: Ref[F, Map[String, StudentView]],
-) extends Projection[F, SchoolEvent]:
+) extends StatelessProjection[F, SchoolEvent]:
 
   val name: String = "student-projection"
 

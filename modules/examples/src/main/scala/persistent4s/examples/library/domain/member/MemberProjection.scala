@@ -31,7 +31,7 @@ final case class MemberView(
 
 final class MemberProjection[F[_]: Async] private (
   state: Ref[F, Map[String, MemberView]],
-) extends Projection[F, LibraryEvent]:
+) extends StatelessProjection[F, LibraryEvent]:
 
   val name: String = "member-projection"
 

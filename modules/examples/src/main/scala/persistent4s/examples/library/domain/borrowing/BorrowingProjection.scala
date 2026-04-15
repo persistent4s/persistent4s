@@ -33,7 +33,7 @@ final case class BorrowingView(
 
 final class BorrowingProjection[F[_]: Async] private (
   state: Ref[F, Map[(String, String), BorrowingView]],
-) extends Projection[F, LibraryEvent]:
+) extends StatelessProjection[F, LibraryEvent]:
 
   val name: String = "borrowing-projection"
 
