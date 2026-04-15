@@ -31,8 +31,7 @@ class MemberServiceImpl(repository: MemberRepository[IO])(using EventStore[IO, L
     (for
       memberId <- IO(UUID.randomUUID())
       _        <- RegisterMemberHandler.run[IO](RegisterMember(memberId, name, email))
-    yield RegisterMemberOutput(memberId.toString()))
-      .adaptError { case e => ValidationError(e.getMessage) }
+    yield RegisterMemberOutput(memberId.toString())).adaptError { case e => ValidationError(e.getMessage) }
 
   def getMembers(): IO[GetMembersOutput] =
     repository.getMembers

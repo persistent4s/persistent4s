@@ -34,7 +34,7 @@ class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore
       .run[IO](BorrowBook(UUID.fromString(bookId), UUID.fromString(memberId)))
       .adaptError {
         case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
-        case e                                        => ValidationError(e.getMessage)
+        case e                                       => ValidationError(e.getMessage)
       }
 
   def returnBook(bookId: String, memberId: String): IO[Unit] =
@@ -42,7 +42,7 @@ class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore
       .run[IO](ReturnBook(UUID.fromString(bookId), UUID.fromString(memberId)))
       .adaptError {
         case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
-        case e                                        => ValidationError(e.getMessage)
+        case e                                       => ValidationError(e.getMessage)
       }
 
   def getBorrowings(): IO[GetBorrowingsOutput] =

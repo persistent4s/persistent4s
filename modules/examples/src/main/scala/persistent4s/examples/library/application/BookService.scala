@@ -31,8 +31,7 @@ class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, Libra
     (for
       bookId <- IO(UUID.randomUUID())
       _      <- AddBookHandler.run[IO](AddBook(bookId, title, author, totalCopies))
-    yield AddBookOutput(bookId.toString()))
-      .adaptError { case e => ValidationError(e.getMessage) }
+    yield AddBookOutput(bookId.toString())).adaptError { case e => ValidationError(e.getMessage) }
 
   def getBooks(): IO[GetBooksOutput] =
     repository.getBooks.map(books =>
