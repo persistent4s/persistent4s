@@ -27,8 +27,8 @@ import cats.syntax.all.*
   * event. All events are routed through a single virtual key (`Unit`), so `fetchState`, `resolveKeys`, and `persist`
   * are all no-ops.
   *
-  * Because there is no state, the at-least-once delivery guarantee still applies: `handle` may be called more than
-  * once for the same event after a failure and restart, so implementations should be idempotent.
+  * Because there is no state, the at-least-once delivery guarantee still applies: `handle` may be called more than once
+  * for the same event after a failure and restart, so implementations should be idempotent.
   *
   * @tparam F
   *   the effect type, such as IO
