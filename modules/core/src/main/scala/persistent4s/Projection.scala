@@ -73,12 +73,16 @@ trait Projection[F[_], A <: Event, K]:
     * retries or failures. Therefore, it's crucial to ensure that the handler can safely handle duplicate events without
     * causing inconsistent state or side effects.
     *
+    * Returning `Some(state)` causes the projector to call `persist(key, Some(state))` for that key after the batch
+    * completes. Returning `None` causes the projector to call `persist(key, None)`, signalling that the state for
+    * that key should be deleted. The `persist` implementation is responsible for carrying out the actual deletion.
+    *
     * @param state
-    *   the current state of the projection before processing the event, if it exists.
+    *   the current state of the projection before processing the event, or `None` if no state exists yet for the key
     * @param event
     *   the event to handle
     * @return
-    *   the updated state after processing the event, or None if the state should not exist anymore
+    *   the updated state, or `None` to request deletion of the state for this key
     */
   def handle(state: Option[State], event: EventEnvelope[A]): F[Option[State]]
 

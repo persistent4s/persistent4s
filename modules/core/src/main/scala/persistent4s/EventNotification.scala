@@ -23,11 +23,15 @@ import fs2.Stream
   */
 trait EventNotification[F[_]]:
 
-  /** A stream that emits a unit value whenever a new event is added to the event store. Projectors can subscribe to
-    * this stream to be notified of new events and trigger re-processing. The stream should never complete, and should
-    * emit a value for every new event added to the store.
+  /** A stream that emits a unit value to signal that new events have been appended to the store. Projectors subscribe
+    * to this stream to avoid polling. The stream should never complete.
+    *
+    * Implementations are only required to emit at least one signal per [[EventStore.append]] call, not necessarily one
+    * per individual event. Consumers must therefore treat each emission as "there may be new events" and re-read from
+    * their last checkpoint, rather than assuming exactly one emission per event. The [[DefaultProjector]] already
+    * handles this correctly by coalescing multiple signals into a single catch-up pass.
     *
     * @return
-    *   a stream of notifications for new events
+    *   an infinite stream of wake-up signals
     */
   def notification: Stream[F, Unit]
