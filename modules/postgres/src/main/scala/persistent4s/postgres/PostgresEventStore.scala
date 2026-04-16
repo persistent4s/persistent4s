@@ -83,44 +83,52 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     fromPosition: Long,
     eventFilter: EventFilter,
   ): Stream[F, EventEnvelope[A]] =
+    val eventTypesList = eventFilter.eventTypes.toList.map(_.value)
+    val tagsList = eventFilter.tags.map(_.value).toList
+
     Stream.resource(pool).flatMap { session =>
-      val eventTypesList = eventFilter.eventTypes.toList.map(_.value)
-      val tagsList = eventFilter.tags.map(_.value).toList
+      Stream.resource(session.transaction).flatMap { _ =>
+        val rowStream: Stream[F, EventRow] =
+          (eventTypesList.isEmpty, tagsList.isEmpty) match
+            case (true, true) =>
+              Stream
+                .eval(session.prepare(readAllQuery))
+                .flatMap(
+                  _.stream(fromPosition, FetchSize),
+                )
+            case (false, true) =>
+              Stream
+                .eval(session.prepare(readByEventTypesQuery(eventTypesList.size)))
+                .flatMap(
+                  _.stream(fromPosition *: eventTypesList *: EmptyTuple, FetchSize),
+                )
+            case (true, false) =>
+              Stream
+                .eval(session.prepare(readByTagsQuery(tagsList.size)))
+                .flatMap(
+                  _.stream(fromPosition *: tagsList *: EmptyTuple, FetchSize),
+                )
+            case (false, false) =>
+              Stream
+                .eval(session.prepare(readByBothQuery(eventTypesList.size, tagsList.size)))
+                .flatMap(
+                  _.stream(fromPosition *: eventTypesList *: tagsList *: EmptyTuple, FetchSize),
+                )
 
-      val eventsF: F[List[EventRow]] =
-        (eventTypesList.isEmpty, tagsList.isEmpty) match
-          case (true, true) =>
-            session.execute(readAllQuery)(fromPosition)
-          case (false, true) =>
-            session.execute(readByEventTypesQuery(eventTypesList.size))(
-              fromPosition *: eventTypesList *: EmptyTuple,
+        rowStream.evalMap { case (seqNum, eventType, tags, payload, recordedAt) =>
+          val eventTypeName = EventTypeName.fromString(eventType)
+          parsePayload(eventTypeName, payload).map { event =>
+            EventEnvelope(
+              EventMetadata(
+                globalPosition = seqNum,
+                tags = tags,
+                eventType = eventTypeName,
+                timestamp = recordedAt.toInstant,
+              ),
+              event,
             )
-          case (true, false) =>
-            session.execute(readByTagsQuery(tagsList.size))(
-              fromPosition *: tagsList *: EmptyTuple,
-            )
-          case (false, false) =>
-            session.execute(
-              readByBothQuery(eventTypesList.size, tagsList.size),
-            )(fromPosition *: eventTypesList *: tagsList *: EmptyTuple)
-
-      Stream.eval(eventsF.map(_.toList)).flatMap { events =>
-        Stream
-          .emits(events)
-          .evalMap { case (seqNum, eventType, tags, payload, recordedAt) =>
-            val eventTypeName = EventTypeName.fromString(eventType)
-            parsePayload(eventTypeName, payload).map { event =>
-              EventEnvelope(
-                EventMetadata(
-                  globalPosition = seqNum,
-                  tags = tags,
-                  eventType = eventTypeName,
-                  timestamp = recordedAt.toInstant,
-                ),
-                event,
-              )
-            }
           }
+        }
       }
     }
 
@@ -215,6 +223,9 @@ object PostgresEventStore:
       .getOrElse(
         sys.error("Invalid channel identifier"),
       )
+
+  /** Number of rows fetched per cursor round-trip when streaming events from PostgreSQL. */
+  private val FetchSize: Int = 256
 
   /** Create a new PostgresEventStore.
     *
