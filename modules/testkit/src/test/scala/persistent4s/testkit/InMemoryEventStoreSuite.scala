@@ -17,9 +17,11 @@
 package persistent4s.testkit
 
 import cats.syntax.all.*
-import cats.effect.IO
+import cats.effect.{Deferred, IO}
 import persistent4s.{Event, EventFilter, EventTypeName, IndexConflictException, Tag}
 import weaver.SimpleIOSuite
+
+import scala.concurrent.duration.*
 
 object InMemoryEventStoreSuite extends SimpleIOSuite:
 
@@ -186,6 +188,67 @@ object InMemoryEventStoreSuite extends SimpleIOSuite:
       filtered.map(_.metadata.tags).toSet == Set(Set(student1), Set(student2)),
       filtered.map(_.payload).toSet == Set(TestEvent.StudentCreated("1"), TestEvent.StudentCreated("2")),
     )
+  }
+
+  test("readFrom skips events at or before the given position") {
+    for
+      store <- InMemoryEventStore.make[IO, TestEvent]
+      _     <-
+        appendOne(store, 0L, Set(student1), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("1"))
+      _ <-
+        appendOne(store, 1L, Set(student1), EventTypeName.of[TestEvent.StudentDeleted], TestEvent.StudentDeleted("1"))
+      _ <-
+        appendOne(store, 2L, Set(student1), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("1"))
+      filter  = EventFilter(Set.empty, Set(student1))
+      all    <- store.readFrom(0L, filter).compile.toList
+      after1 <- store.readFrom(1L, filter).compile.toList
+      after2 <- store.readFrom(2L, filter).compile.toList
+    yield expect.all(
+      all.length == 3,
+      after1.length == 2,
+      after2.length == 1,
+      after2.head.metadata.eventType == EventTypeName.of[TestEvent.StudentCreated],
+    )
+  }
+
+  test("readFrom with empty event types matches all event types") {
+    for
+      store <- InMemoryEventStore.make[IO, TestEvent]
+      _     <-
+        appendOne(store, 0L, Set(student1), EventTypeName.of[TestEvent.StudentCreated], TestEvent.StudentCreated("1"))
+      _ <-
+        appendOne(store, 1L, Set(student1), EventTypeName.of[TestEvent.StudentDeleted], TestEvent.StudentDeleted("1"))
+      filtered <- store.readFrom(0L, EventFilter(Set.empty, Set(student1))).compile.toList
+    yield expect.all(
+      filtered.length == 2,
+      filtered.map(_.metadata.eventType).toSet == Set(
+        EventTypeName.of[TestEvent.StudentCreated],
+        EventTypeName.of[TestEvent.StudentDeleted],
+      ),
+    )
+  }
+
+  test("notification emits after each append") {
+    for
+      store    <- InMemoryEventStore.make[IO, TestEvent]
+      notified <- Deferred[IO, Unit]
+      _        <- store.notification
+             .evalTap(_ => notified.complete(()).void)
+             .compile
+             .drain
+             .background
+             .use { _ =>
+               IO.sleep(50.millis) *>
+                 appendOne(
+                   store,
+                   0L,
+                   Set(student1),
+                   EventTypeName.of[TestEvent.StudentCreated],
+                   TestEvent.StudentCreated("1"),
+                 ) *>
+                 notified.get.timeout(2.seconds)
+             }
+    yield success
   }
 
   test("append with empty tags uses all tags for conflict detection") {

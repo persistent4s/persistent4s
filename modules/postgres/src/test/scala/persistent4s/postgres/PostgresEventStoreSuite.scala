@@ -87,6 +87,54 @@ object PostgresEventStoreSuite extends IOSuite:
   private def freshId(prefix: String): IO[String] =
     IO(s"$prefix-${UUID.randomUUID().toString}")
 
+  test("append stores event with correct payload, tags, and event type") { store =>
+    for
+      id     <- freshId("student")
+      tag     = Tag("student", id)
+      _      <- appendOne(store, 0L, Set(tag), "hello")
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.payload == TestEvent("hello"),
+      events.head.metadata.tags == Set(tag),
+      events.head.metadata.eventType == EventTypeName.of[TestEvent],
+      events.head.metadata.globalPosition >= 1L,
+    )
+  }
+
+  test("readFrom skips events at or before the given position") { store =>
+    // In Postgres the expectedIndex is the actual globalPosition of the last matching event,
+    // not a per-tag counter — so we read it back after each append rather than hardcoding.
+    for
+      id        <- freshId("student")
+      tag        = Tag("student", id)
+      readFilter = EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))
+      _         <- appendOne(store, 0L, Set(tag), "e1")
+      pos1      <- store.readFrom(0L, readFilter).compile.toList.map(_.head.metadata.globalPosition)
+      _         <- appendOne(store, pos1, Set(tag), "e2")
+      pos2      <- store.readFrom(0L, readFilter).compile.toList.map(_.last.metadata.globalPosition)
+      _         <- appendOne(store, pos2, Set(tag), "e3")
+      all       <- store.readFrom(0L, readFilter).compile.toList
+      after     <- store.readFrom(pos1, readFilter).compile.toList
+    yield expect.all(
+      all.length == 3,
+      after.length == 2,
+      after.map(_.payload) == List(TestEvent("e2"), TestEvent("e3")),
+    )
+  }
+
+  test("readFrom with empty event type filter matches all event types") { store =>
+    for
+      id     <- freshId("student")
+      tag     = Tag("student", id)
+      _      <- appendOne(store, 0L, Set(tag), "hello")
+      events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.payload == TestEvent("hello"),
+    )
+  }
+
   test("concurrent appends with the same tag allow only one success") { store =>
     for
       id             <- freshId("student")
