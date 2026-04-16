@@ -28,17 +28,27 @@ import fs2.Stream
   */
 trait EventStore[F[_], A <: Event]:
 
-  /** Append events to the event store. The expected index is used for optimistic concurrency control. If the actual
-    * index in the event store does not match the expected index, an IndexConflictException is thrown and none of the
-    * events are appended.
+  /** Append events to the event store using optimistic concurrency control.
     *
+    * The `expectedIndex` must equal the global position of the most recent event that matches `eventFilter`. If another
+    * event matching the filter has been appended concurrently, the actual index will be higher and an
+    * [[IndexConflictException]] is raised with no events written. Pass `expectedIndex = 0` when no prior matching
+    * events are expected (i.e. this is the first append for that filter scope).
+    *
+    * The `events` parameter is variadic so that callers who build events in separate groups can pass multiple lists
+    * without flattening them first. All lists are treated as a single ordered sequence — there is no semantic
+    * difference between one list of N events and N lists of one event each.
+    *
+    * If all lists are empty the call is a no-op: no events are written and no notification is emitted.
+    *
+    * @param eventFilter
+    *   the filter used to determine the concurrency scope (which prior events are checked for conflicts)
     * @param expectedIndex
-    *   the expected index of the event store before appending the events
+    *   the global position of the last known matching event, or 0 if none are expected
     * @param events
-    *   the events to append, each with a set of tags and an event type
+    *   one or more lists of events to append, each event paired with its tags and type name
     * @return
-    *   a F[Unit] that completes when the events have been appended, or fails with an IndexConflictException if the
-    *   expected index does not match the actual index
+    *   a F[Unit] that completes when the events have been written, or fails with [[IndexConflictException]] on conflict
     */
   def append(eventFilter: EventFilter, expectedIndex: Long, events: List[(Set[Tag], EventTypeName, A)]*): F[Unit]
 

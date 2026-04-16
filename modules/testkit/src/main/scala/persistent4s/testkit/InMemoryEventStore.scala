@@ -60,31 +60,32 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
     events: List[(Set[Tag], EventTypeName, A)]*,
   ): F[Unit] =
     if events.forall(_.isEmpty) then Async[F].unit
-    else store.modify { currentEvents =>
-      val relevantEvents = currentEvents.filter(env => matchesEventFilter(env, eventFilter))
-      val actualIndex = relevantEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
+    else
+      store.modify { currentEvents =>
+        val relevantEvents = currentEvents.filter(env => matchesEventFilter(env, eventFilter))
+        val actualIndex = relevantEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
 
-      if (actualIndex != expectedIndex) {
-        (currentEvents, Left(new IndexConflictException(expectedIndex, actualIndex)))
-      } else {
-        val lastGlobalPosition = currentEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-        val newEvents = events.flatten.zipWithIndex.map { case ((tags, eventType, event), index) =>
-          EventEnvelope(
-            EventMetadata(
-              globalPosition = lastGlobalPosition + index.toLong + 1L,
-              tags = tags,
-              eventType = eventType,
-              timestamp = java.time.Instant.now(),
-            ),
-            event,
-          )
+        if (actualIndex != expectedIndex) {
+          (currentEvents, Left(new IndexConflictException(expectedIndex, actualIndex)))
+        } else {
+          val lastGlobalPosition = currentEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
+          val newEvents = events.flatten.zipWithIndex.map { case ((tags, eventType, event), index) =>
+            EventEnvelope(
+              EventMetadata(
+                globalPosition = lastGlobalPosition + index.toLong + 1L,
+                tags = tags,
+                eventType = eventType,
+                timestamp = java.time.Instant.now(),
+              ),
+              event,
+            )
+          }
+          (currentEvents ++ newEvents, Right(()))
         }
-        (currentEvents ++ newEvents, Right(()))
+      }.flatMap {
+        case Left(error) => Async[F].raiseError(error)
+        case Right(_)    => topic.publish1(()).void
       }
-    }.flatMap {
-      case Left(error) => Async[F].raiseError(error)
-      case Right(_)    => topic.publish1(()).void
-    }
 
   override def notification: Stream[F, Unit] =
     topic.subscribe(1)

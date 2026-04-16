@@ -74,8 +74,8 @@ trait Projection[F[_], A <: Event, K]:
     * causing inconsistent state or side effects.
     *
     * Returning `Some(state)` causes the projector to call `persist(key, Some(state))` for that key after the batch
-    * completes. Returning `None` causes the projector to call `persist(key, None)`, signalling that the state for
-    * that key should be deleted. The `persist` implementation is responsible for carrying out the actual deletion.
+    * completes. Returning `None` causes the projector to call `persist(key, None)`, signalling that the state for that
+    * key should be deleted. The `persist` implementation is responsible for carrying out the actual deletion.
     *
     * @param state
     *   the current state of the projection before processing the event, or `None` if no state exists yet for the key
