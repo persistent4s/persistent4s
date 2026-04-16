@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 persistent4s
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,7 +44,7 @@ object EnrollStudentHandler extends CommandHandler[EnrollStudent, EnrollStudentS
   def initial: EnrollStudentState =
     EnrollStudentState(studentExists = false, courseExists = false, courseCapacity = 0, enrolledStudents = Set.empty)
 
-  def evolve(state: EnrollStudentState, event: SchoolEvent): EnrollStudentState =
+  def evolve(command: EnrollStudent, state: EnrollStudentState, event: SchoolEvent): EnrollStudentState =
     event match
       case _: StudentCreated             => state.copy(studentExists = true)
       case CourseCreated(_, _, capacity) => state.copy(courseExists = true, courseCapacity = capacity)

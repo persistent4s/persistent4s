@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 persistent4s
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ object DeleteStudentHandler extends CommandHandler[DeleteStudent, DeleteStudentS
   def initial: DeleteStudentState =
     DeleteStudentState(exists = false)
 
-  def evolve(state: DeleteStudentState, event: SchoolEvent): DeleteStudentState =
+  def evolve(command: DeleteStudent, state: DeleteStudentState, event: SchoolEvent): DeleteStudentState =
     event match
       case _: StudentCreated => state.copy(exists = true)
       case _                 => state

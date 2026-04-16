@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 persistent4s
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ package persistent4s.examples.school.application
 import cats.effect.IO
 
 import persistent4s.examples.school.api.EnrollmentService
+import persistent4s.examples.school.infrastructure.implicits.given
 import persistent4s.examples.school.domain.enrollment.*
-import persistent4s.testkit.implicits.*
 
 class EnrollmentServiceImpl extends EnrollmentService[IO]:
 

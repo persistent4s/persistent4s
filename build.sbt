@@ -1,9 +1,9 @@
 ThisBuild / tlBaseVersion          := "0.1"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
-ThisBuild / scalaVersion           := "3.8.2"
+ThisBuild / scalaVersion           := "3.8.3"
 ThisBuild / tlJdkRelease           := Some(17)
 ThisBuild / organization           := "io.github.antoniojimeneznieto"
-ThisBuild / organizationName       := "persistent4s"
+ThisBuild / organizationName       := "Antonio Jimenez and Bastien Jolidon"
 ThisBuild / startYear              := Some(2026)
 ThisBuild / licenses               := Seq(License.Apache2)
 ThisBuild / developers             := List(
@@ -27,7 +27,7 @@ val CirceV = "0.14.15"
 
 val Log4CatsV = "2.8.0"
 
-val Otel4sV = "0.15.2"
+val Otel4sV = "0.16.0"
 
 val LogbackV = "1.5.32"
 
@@ -37,7 +37,7 @@ val Fs2KafkaV = "3.9.1"
 
 val WeaverV = "0.12.0"
 
-val Http4sV = "0.23.30"
+val Http4sV = "0.23.34"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 

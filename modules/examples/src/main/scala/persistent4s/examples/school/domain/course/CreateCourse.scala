@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 persistent4s
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,7 +34,7 @@ object CreateCourseHandler extends CommandHandler[CreateCourse, CreateCourseStat
   def initial: CreateCourseState =
     CreateCourseState(exists = false)
 
-  def evolve(state: CreateCourseState, event: SchoolEvent): CreateCourseState =
+  def evolve(command: CreateCourse, state: CreateCourseState, event: SchoolEvent): CreateCourseState =
     event match
       case _: CourseCreated => state.copy(exists = true)
       case _                => state

@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 persistent4s
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,12 +19,13 @@ package persistent4s.examples.school.application
 import cats.effect.IO
 
 import persistent4s.examples.school.api.{Event, EventsService, GetEventsOutput}
+import persistent4s.examples.school.domain.SchoolEvent
+import persistent4s.examples.school.infrastructure.implicits.given
 import persistent4s.testkit.InMemoryEventStore
-import persistent4s.testkit.implicits.*
 
 class EventsServiceImpl extends EventsService[IO]:
 
-  private val store = summon[InMemoryEventStore[IO, ?]]
+  private val store = summon[InMemoryEventStore[IO, SchoolEvent]]
 
   def getEvents(): IO[GetEventsOutput] =
     store.getEvents.map { events =>

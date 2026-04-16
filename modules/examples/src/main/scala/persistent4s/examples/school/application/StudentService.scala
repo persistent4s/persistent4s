@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 persistent4s
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -21,8 +21,8 @@ import java.util.UUID
 import cats.effect.IO
 
 import persistent4s.examples.school.api.{CreateStudentOutput, StudentService}
+import persistent4s.examples.school.infrastructure.implicits.given
 import persistent4s.examples.school.domain.student.*
-import persistent4s.testkit.implicits.*
 
 class StudentServiceImpl extends StudentService[IO]:
 
