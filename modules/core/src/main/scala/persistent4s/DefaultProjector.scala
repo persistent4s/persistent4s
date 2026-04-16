@@ -23,6 +23,28 @@ import cats.effect.Ref
 import cats.syntax.all.*
 import fs2.Stream
 
+/** The default [[Projector]] implementation.
+  *
+  * Events are read in chunks of up to `batchSize` and processed sequentially within each chunk. For each chunk, all
+  * distinct keys are looked up once via [[Projection.fetchState]], the events are folded in order, and the resulting
+  * states are persisted together with a single checkpoint advance. This amortizes the I/O cost of checkpointing over
+  * many events.
+  *
+  * On handler failure mid-batch, the successfully computed states up to the failing event are persisted and the
+  * checkpoint is advanced to the last fully processed position before the error is re-raised. The stream then
+  * terminates; the caller is responsible for restarting it (e.g. via `Stream.retry` or a supervisor).
+  *
+  * New events are detected via [[EventNotification]]. Notifications are coalesced: if multiple events arrive while a
+  * batch is being processed, only one additional pass is triggered rather than one per notification.
+  *
+  * @param eventStore
+  *   the event store to read from, which must also implement [[EventNotification]]
+  * @param checkpoint
+  *   durable storage for the last processed position per projection
+  * @param batchSize
+  *   maximum number of events processed in a single batch (default: 100). A larger value reduces checkpoint overhead
+  *   but increases memory usage and the reprocessing window after a failure.
+  */
 final case class DefaultProjector[F[_]: Async, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
   checkpoint: ProjectionCheckpoint[F],
@@ -40,7 +62,7 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
     lastProcessedPosition: Option[Long],
   )
 
-  // TODO add custom error recovery / retry hooks
+  // TODO How should we handle failure? What do we do if the process dies?
   override def run[K](projection: Projection[F, A, K]): Stream[F, Unit] = {
 
     def persistProgress(progress: BatchProgress[K, projection.State]): F[Unit] =

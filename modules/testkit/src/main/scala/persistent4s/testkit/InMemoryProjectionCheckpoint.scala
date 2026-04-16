@@ -20,6 +20,13 @@ import persistent4s.ProjectionCheckpoint
 import cats.effect.*
 import cats.syntax.all.*
 
+/** An in-memory [[ProjectionCheckpoint]] for use in tests.
+  *
+  * Checkpoints are stored in a `Ref` and are lost when the effect scope ends. Use this in unit tests to verify that
+  * your projections resume correctly from a given position without requiring a real database.
+  *
+  * Not suitable for production use — checkpoints are not durable and will not survive application restarts.
+  */
 final case class InMemoryProjectionCheckpoint[F[_]: Async] private (
   store: Ref[F, Map[String, Long]],
 ) extends ProjectionCheckpoint[F]:

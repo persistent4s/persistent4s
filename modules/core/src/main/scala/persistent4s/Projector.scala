@@ -50,6 +50,16 @@ trait Projector[F[_], A <: Event]:
 
 object Projector:
 
+  /** Create a [[DefaultProjector]] with the given event store and checkpoint.
+    *
+    * @param eventStore
+    *   the event store to read from, which must also implement [[EventNotification]]
+    * @param checkpoint
+    *   durable storage for the last processed position per projection
+    * @param batchSize
+    *   maximum number of events processed in a single batch (default: 100). A larger value reduces checkpoint overhead
+    *   but increases memory usage and the reprocessing window after a failure.
+    */
   def apply[F[_], A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: ProjectionCheckpoint[F],
