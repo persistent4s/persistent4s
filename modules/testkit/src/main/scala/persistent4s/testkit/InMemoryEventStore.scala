@@ -33,10 +33,14 @@ import cats.implicits.*
 import cats.*
 import persistent4s.EventFilter
 
-/** An in-memory implementation of the EventStore trait for testing purposes. This implementation use Ref to store
-  * events in memory and does not persist them to any external storage. It is intended for use in unit tests where you
-  * want to verify the behavior of your command handlers and event processing logic without relying on an actual
-  * database or event store.
+/** An in-memory implementation of the EventStore trait for testing purposes.
+  *
+  * All events are stored in a `Ref` and are lost when the effect scope ends — there is no durability. This is
+  * intentional for unit tests, but be aware that the store grows unboundedly for the lifetime of the `Ref`: in
+  * long-running integration test suites that append large numbers of events, memory usage will accumulate until the
+  * store is garbage-collected at the end of the test scope.
+  *
+  * Not suitable for production use.
   */
 final case class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
   store: Ref[F, Vector[EventEnvelope[A]]],

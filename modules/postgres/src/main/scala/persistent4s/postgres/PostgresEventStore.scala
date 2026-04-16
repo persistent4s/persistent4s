@@ -39,6 +39,11 @@ import persistent4s.*
   *   - payload: JSONB NOT NULL
   *   - recorded_at: TIMESTAMPTZ NOT NULL
   *
+  * [[readFrom]] streams events lazily using a PostgreSQL server-side cursor (fetching 256 rows per round-trip), so it
+  * is safe to use on stores with millions of events without loading them all into memory. A read-only transaction is
+  * held open for the lifetime of the stream; callers must ensure the stream is fully consumed or cancelled to release
+  * the connection back to the pool.
+  *
   * Notifications are sent via PostgreSQL NOTIFY/LISTEN mechanism, enabling cross-process and cross-machine event
   * notifications for horizontal scaling.
   *
