@@ -52,8 +52,8 @@ object LibraryModule:
       resources <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
       store      = resources.eventStore
       checkpoint = resources.checkpoint
-      config   <- Resource.eval(loadConfig(configPath))
-      viewPool <- Session.pooled[IO](
+      config    <- Resource.eval(loadConfig(configPath))
+      viewPool  <- Session.pooled[IO](
                     host = config.host, port = config.port, user = config.user, password = Some(config.password),
                     database = config.database, max = config.maxConnections,
                   )
