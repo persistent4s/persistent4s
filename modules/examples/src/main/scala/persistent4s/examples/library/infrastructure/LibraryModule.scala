@@ -28,7 +28,7 @@ import persistent4s.examples.library.domain.*
 import persistent4s.examples.library.domain.book.{BookProjection, BookRepository}
 import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, BorrowingRepository}
 import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
-import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule, PostgresProjectionCheckpoint}
+import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule}
 
 final class LibraryModule private (
   val store: PostgresEventStore[IO, LibraryEvent],
@@ -49,7 +49,9 @@ object LibraryModule:
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
     for
-      store    <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      resources <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      store      = resources.eventStore
+      checkpoint = resources.checkpoint
       config   <- Resource.eval(loadConfig(configPath))
       viewPool <- Session.pooled[IO](
                     host = config.host, port = config.port, user = config.user, password = Some(config.password),
@@ -58,7 +60,6 @@ object LibraryModule:
       bookRepo       = BookRepository.make[IO](viewPool)
       memberRepo     = MemberRepository.make[IO](viewPool)
       borrowingRepo  = BorrowingRepository.make[IO](viewPool)
-      checkpoint     = PostgresProjectionCheckpoint.make[IO](viewPool)
       bookProj      <- Resource.eval(BookProjection.make[IO](bookRepo))
       memberProj    <- Resource.eval(MemberProjection.make[IO](memberRepo))
       borrowingProj <- Resource.eval(BorrowingProjection.make[IO](borrowingRepo))

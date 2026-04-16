@@ -38,7 +38,7 @@ object PostgresEventStoreSuite extends IOSuite:
 
   override def sharedResource: Resource[IO, Res] =
     postgresContainerResource.flatMap { container =>
-      PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec)
+      PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec).map(_.eventStore)
     }
 
   final case class TestEvent(value: String) extends Event derives Encoder.AsObject, Decoder

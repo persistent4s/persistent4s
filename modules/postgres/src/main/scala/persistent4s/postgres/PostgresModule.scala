@@ -77,6 +77,12 @@ object PostgresModuleError:
   */
 object PostgresModule:
 
+  /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
+  final case class Components[F[_], A <: Event](
+    eventStore: PostgresEventStore[F, A],
+    checkpoint: PostgresProjectionCheckpoint[F],
+  )
+
   private val defaultConfigPath = "persistent4s.postgres"
 
   /** Create a PostgresModule Resource that manages the lifecycle of the database connection and event store.
@@ -86,12 +92,13 @@ object PostgresModule:
     * @param configPath
     *   the path in application.conf where the PostgresConfig is located (default: "persistent4s.postgres")
     * @return
-    *   a Resource containing the PostgresEventStore, or fails with a clear error message
+    *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint, or fails with a clear error
+    *   message
     */
   def make[F[_]: Async: Network: Trace: Console, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
-  ): Resource[F, PostgresEventStore[F, A]] =
+  ): Resource[F, Components[F, A]] =
     for
       logger <- Resource.eval(Slf4jLogger.create[F])
       config <- Resource.eval(loadConfig[F](configPath))
@@ -102,7 +109,10 @@ object PostgresModule:
            )
       pool <- createSessionPool[F](config)
       _    <- Resource.eval(initializeDatabase[F](pool, logger))
-    yield PostgresEventStore[F, A](pool, codec)
+    yield Components(
+      PostgresEventStore[F, A](pool, codec),
+      PostgresProjectionCheckpoint.make[F](pool),
+    )
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
     *
@@ -111,12 +121,12 @@ object PostgresModule:
     * @param codec
     *   the event codec for serializing/deserializing events
     * @return
-    *   a Resource containing the PostgresEventStore
+    *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint
     */
   def makeWithConfig[F[_]: Async: Network: Trace: Console, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
-  ): Resource[F, PostgresEventStore[F, A]] =
+  ): Resource[F, Components[F, A]] =
     for
       logger <- Resource.eval(Slf4jLogger.create[F])
       _      <- Resource.eval(
@@ -126,7 +136,10 @@ object PostgresModule:
            )
       pool <- createSessionPool[F](config)
       _    <- Resource.eval(initializeDatabase[F](pool, logger))
-    yield PostgresEventStore[F, A](pool, codec)
+    yield Components(
+      PostgresEventStore[F, A](pool, codec),
+      PostgresProjectionCheckpoint.make[F](pool),
+    )
 
   private def loadConfig[F[_]: Sync](configPath: String): F[PostgresConfig] =
     Sync[F].delay {
