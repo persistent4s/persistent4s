@@ -53,5 +53,6 @@ object Projector:
   def apply[F[_], A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: ProjectionCheckpoint[F],
+    batchSize: Int = 100,
   )(using cats.effect.Async[F]): Projector[F, A] =
-    DefaultProjector(eventStore, checkpoint)
+    DefaultProjector(eventStore, checkpoint, batchSize)
