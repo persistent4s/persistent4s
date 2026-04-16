@@ -59,7 +59,8 @@ final case class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
     expectedIndex: Long,
     events: List[(Set[Tag], EventTypeName, A)]*,
   ): F[Unit] =
-    store.modify { currentEvents =>
+    if events.forall(_.isEmpty) then Async[F].unit
+    else store.modify { currentEvents =>
       val relevantEvents = currentEvents.filter(env => matchesEventFilter(env, eventFilter))
       val actualIndex = relevantEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
 
