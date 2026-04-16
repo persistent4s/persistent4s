@@ -48,10 +48,13 @@ trait Projection[F[_], A <: Event, K]:
   /** Resolve keys for a given event. This method is used to determine which keys are affected by an event, and
     * therefore which state entries need to be fetched and updated. An event may affect multiple keys.
     *
+    * Returning an empty list means the event is intentionally ignored by this projection: no state is fetched or
+    * persisted, but the event is still acknowledged and the checkpoint advances past it.
+    *
     * @param event
     *   the event for which to resolve the keys
     * @return
-    *   the resolved keys for the given event
+    *   the keys affected by this event, or an empty list to skip the event without blocking the checkpoint
     */
   def resolveKeys(event: EventEnvelope[A]): List[K]
 
