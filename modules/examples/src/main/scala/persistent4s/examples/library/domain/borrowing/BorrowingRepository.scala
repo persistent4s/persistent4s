@@ -35,6 +35,15 @@ final class BorrowingRepository[F[_]: Async] private (
   def find(key: (UUID, UUID)): F[Option[BorrowingState]] =
     pool.use(_.option(findQuery)(key))
 
+  def findAll(keys: List[(UUID, UUID)]): F[Map[(UUID, UUID), Option[BorrowingState]]] =
+    if keys.isEmpty then Map.empty.pure[F]
+    else
+      val (bookIds, memberIds) = keys.unzip
+      pool.use(_.execute(findAllQuery(keys.size))((bookIds, memberIds))).map { states =>
+        val found = states.map(s => (s.bookId, s.memberId) -> s).toMap
+        keys.map(k => k -> found.get(k)).toMap
+      }
+
   def save(key: (UUID, UUID), value: BorrowingState): F[Unit] =
     pool.use(_.execute(upsertCommand)(value)).void
 
@@ -54,6 +63,16 @@ object BorrowingRepository:
 
   private val borrowingStateCodec: Codec[BorrowingState] =
     (uuid *: uuid *: timestamptz *: timestamptz *: timestamptz.opt).to[BorrowingState]
+
+  private def findAllQuery(n: Int): Query[(List[UUID], List[UUID]), BorrowingState] =
+    sql"""
+      SELECT b.book_id, b.member_id, b.borrowed_at, b.due_date, b.returned_at
+      FROM borrowings b
+      JOIN (
+        SELECT unnest(ARRAY[${uuid.list(n)}]) AS book_id,
+               unnest(ARRAY[${uuid.list(n)}]) AS member_id
+      ) k ON b.book_id = k.book_id AND b.member_id = k.member_id
+    """.query(borrowingStateCodec)
 
   private val findQuery: Query[(UUID, UUID), BorrowingState] =
     sql"""

@@ -41,7 +41,8 @@ trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A
 
   override def resolveKeys(event: EventEnvelope[A]): List[Unit] = List(())
 
-  override def fetchState(key: Unit): F[Option[State]] = Applicative[F].pure(None)
+  override def fetchStates(keys: List[Unit]): F[Map[Unit, Option[Unit]]] =
+    Applicative[F].pure(keys.map(_ -> None).toMap)
 
   def handle(event: EventEnvelope[A]): F[Unit]
 

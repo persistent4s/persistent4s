@@ -50,7 +50,8 @@ final class BorrowingProjection[F[_]: Async] private (
     case BookReturned(bookId, memberId, _)    => List((bookId, memberId))
     case _                                    => Nil
 
-  override def fetchState(key: (UUID, UUID)): F[Option[BorrowingState]] = repository.find(key)
+  override def fetchStates(keys: List[(UUID, UUID)]): F[Map[(UUID, UUID), Option[BorrowingState]]] =
+    repository.findAll(keys)
 
   override def handle(state: Option[BorrowingState], event: EventEnvelope[LibraryEvent]): F[Option[BorrowingState]] =
     (state, event.payload) match

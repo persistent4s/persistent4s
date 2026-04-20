@@ -35,6 +35,14 @@ final class MemberRepository[F[_]: Async] private (
   def find(key: UUID): F[Option[MemberState]] =
     pool.use(_.option(findQuery)(key))
 
+  def findAll(keys: List[UUID]): F[Map[UUID, Option[MemberState]]] =
+    if keys.isEmpty then Map.empty.pure[F]
+    else
+      pool.use(_.execute(findAllQuery(keys.size))(keys)).map { states =>
+        val found = states.map(s => s.memberId -> s).toMap
+        keys.map(k => k -> found.get(k)).toMap
+      }
+
   def save(key: UUID, value: MemberState): F[Unit] =
     pool.use(_.execute(upsertCommand)(value)).void
 
@@ -48,6 +56,13 @@ object MemberRepository:
 
   private val memberStateCodec: Codec[MemberState] =
     (uuid *: text *: text *: int4).to[MemberState]
+
+  private def findAllQuery(n: Int): Query[List[UUID], MemberState] =
+    sql"""
+      SELECT member_id, name, email, borrowed_books
+      FROM members
+      WHERE member_id = ANY(ARRAY[${uuid.list(n)}])
+    """.query(memberStateCodec)
 
   private val findQuery: Query[UUID, MemberState] =
     sql"""

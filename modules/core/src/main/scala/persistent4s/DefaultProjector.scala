@@ -96,7 +96,7 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
         val keys = batch.flatMap(event => projection.resolveKeys(event)).toSet
 
         for {
-          initialStates <- keys.toList.traverse(key => projection.fetchState(key).tupleLeft(key)).map(_.toMap)
+          initialStates <- projection.fetchStates(keys.toList)
 
           progress0 = BatchProgress[K, projection.State](
                         stateCache = initialStates,

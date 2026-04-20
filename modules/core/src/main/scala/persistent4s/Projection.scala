@@ -58,16 +58,15 @@ trait Projection[F[_], A <: Event, K]:
     */
   def resolveKeys(event: EventEnvelope[A]): List[K]
 
-  /** Fetch the current state for a given key. This method will be called before processing an event to get the current
-    * state that should be updated based on the event. The implementation can choose how to store and retrieve state,
-    * such as using a database or an in-memory cache.
+  /** Fetch the current state for multiple keys. This method will be called before processing a batch of events to get
+    * the current state for all relevant keys.
     *
-    * @param key
-    *   the key for which to fetch the state
+    * @param keys
+    *   the keys for which to fetch the state
     * @return
-    *   the current state associated with the given key
+    *   a map of keys to their corresponding state, or `None` if no state exists for a key
     */
-  def fetchState(key: K): F[Option[State]]
+  def fetchStates(keys: List[K]): F[Map[K, Option[State]]]
 
   /** Handle an incoming event. This method will be called for each event that matches the projection's filter. The
     * projection should perform any necessary processing of the event, such as updating a read model.
