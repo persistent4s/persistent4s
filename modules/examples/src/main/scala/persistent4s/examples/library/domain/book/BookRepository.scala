@@ -49,6 +49,17 @@ final class BookRepository[F[_]: Async] private (
   def delete(key: UUID): F[Unit] =
     pool.use(_.execute(deleteCommand)(key)).void
 
+  def persistMany(states: Map[UUID, Option[BookState]]): F[Unit] =
+    val toUpsert = states.collect { case (_, Some(v)) => v }.toList
+    val toDelete = states.collect { case (k, None) => k }.toList
+    val upsertEffect =
+      if toUpsert.isEmpty then Async[F].unit
+      else pool.use(_.execute(upsertManyCommand(toUpsert.size))(toUpsert)).void
+    val deleteEffect =
+      if toDelete.isEmpty then Async[F].unit
+      else pool.use(_.execute(deleteManyCommand(toDelete.size))(toDelete)).void
+    upsertEffect >> deleteEffect
+
   def getBooks: F[List[BookState]] =
     pool.use(_.execute(getBooksQuery))
 
@@ -84,6 +95,20 @@ object BookRepository:
 
   private val deleteCommand: Command[UUID] =
     sql"DELETE FROM books WHERE book_id = $uuid".command
+
+  private def upsertManyCommand(n: Int): Command[List[BookState]] =
+    sql"""
+      INSERT INTO books (book_id, title, author, total_copies, available_copies)
+      VALUES ${bookStateCodec.list(n)}
+      ON CONFLICT (book_id) DO UPDATE SET
+        title            = EXCLUDED.title,
+        author           = EXCLUDED.author,
+        total_copies     = EXCLUDED.total_copies,
+        available_copies = EXCLUDED.available_copies
+    """.command
+
+  private def deleteManyCommand(n: Int): Command[List[UUID]] =
+    sql"DELETE FROM books WHERE book_id = ANY(ARRAY[${uuid.list(n)}])".command
 
   private val getBooksQuery: Query[Void, BookState] =
     sql"SELECT book_id, title, author, total_copies, available_copies FROM books".query(bookStateCodec)

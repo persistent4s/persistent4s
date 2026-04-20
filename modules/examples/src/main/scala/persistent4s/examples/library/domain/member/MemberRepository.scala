@@ -49,6 +49,17 @@ final class MemberRepository[F[_]: Async] private (
   def delete(key: UUID): F[Unit] =
     pool.use(_.execute(deleteCommand)(key)).void
 
+  def persistMany(states: Map[UUID, Option[MemberState]]): F[Unit] =
+    val toUpsert = states.collect { case (_, Some(v)) => v }.toList
+    val toDelete = states.collect { case (k, None) => k }.toList
+    val upsertEffect =
+      if toUpsert.isEmpty then Async[F].unit
+      else pool.use(_.execute(upsertManyCommand(toUpsert.size))(toUpsert)).void
+    val deleteEffect =
+      if toDelete.isEmpty then Async[F].unit
+      else pool.use(_.execute(deleteManyCommand(toDelete.size))(toDelete)).void
+    upsertEffect >> deleteEffect
+
   def getMembers: F[List[MemberState]] =
     pool.use(_.execute(getMembersQuery))
 
@@ -83,6 +94,19 @@ object MemberRepository:
 
   private val deleteCommand: Command[UUID] =
     sql"DELETE FROM members WHERE member_id = $uuid".command
+
+  private def upsertManyCommand(n: Int): Command[List[MemberState]] =
+    sql"""
+      INSERT INTO members (member_id, name, email, borrowed_books)
+      VALUES ${memberStateCodec.list(n)}
+      ON CONFLICT (member_id) DO UPDATE SET
+        name           = EXCLUDED.name,
+        email          = EXCLUDED.email,
+        borrowed_books = EXCLUDED.borrowed_books
+    """.command
+
+  private def deleteManyCommand(n: Int): Command[List[UUID]] =
+    sql"DELETE FROM members WHERE member_id = ANY(ARRAY[${uuid.list(n)}])".command
 
   private val getMembersQuery: Query[Void, MemberState] =
     sql"""

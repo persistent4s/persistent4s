@@ -49,6 +49,6 @@ trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A
   final def handle(state: Option[Unit], event: EventEnvelope[A]): F[Option[Unit]] =
     handle(event).as(state)
 
-  override def persist(key: Unit, state: Option[Unit]): F[Unit] = Applicative[F].unit
+  override def persistStates(states: Map[Unit, Option[Unit]]): F[Unit] = Applicative[F].unit
 
 }

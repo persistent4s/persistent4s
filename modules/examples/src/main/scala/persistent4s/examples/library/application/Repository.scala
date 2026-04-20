@@ -25,3 +25,5 @@ trait Repository[F[_], K, V]:
   def save(key: K, value: V): F[Unit]
 
   def delete(key: K): F[Unit]
+
+  def persistMany(states: Map[K, Option[V]]): F[Unit]

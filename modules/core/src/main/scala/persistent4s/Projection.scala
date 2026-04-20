@@ -92,11 +92,9 @@ trait Projection[F[_], A <: Event, K]:
     * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
     * cache. Passing None indicates that the state should be removed for that key.
     *
-    * @param key
-    *   the key for which to persist the state
-    * @param state
-    *   the state to persist, if it exists
+    * @param states
+    *   a map of keys to their corresponding state, or `None` if the state should be deleted for a key
     * @return
     *   a F[Unit] that completes when the state has been persisted
     */
-  def persist(key: K, state: Option[State]): F[Unit]
+  def persistStates(states: Map[K, Option[State]]): F[Unit]

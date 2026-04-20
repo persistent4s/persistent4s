@@ -61,9 +61,8 @@ final class MemberProjection[F[_]: Async] private (
         Some(s.copy(borrowedBooks = s.borrowedBooks - 1)).pure[F]
       case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
 
-  override def persist(key: UUID, state: Option[MemberState]): F[Unit] = state match
-    case Some(memberState) => repository.save(key, memberState)
-    case None              => repository.delete(key)
+  override def persistStates(states: Map[UUID, Option[MemberState]]): F[Unit] =
+    repository.persistMany(states)
 
 object MemberProjection:
 

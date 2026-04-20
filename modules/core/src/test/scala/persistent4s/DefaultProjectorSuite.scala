@@ -158,6 +158,9 @@ object DefaultProjectorSuite extends SimpleIOSuite:
           case Some(v) => states.update(_.updated(key, v))
           case None    => states.update(_ - key)
 
+      def persistStates(states: Map[String, Option[Int]]): IO[Unit] =
+        states.toList.traverse_ { case (key, state) => persist(key, state) }
+
   // ---------------------------------------------------------------------------
   // Tests
   // ---------------------------------------------------------------------------
@@ -269,6 +272,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                        state match
                          case Some(v) => states.update(_.updated(key, v))
                          case None    => states.update(_ - key)
+                     def persistStates(states: Map[String, Option[Int]]): IO[Unit] =
+                       states.toList.traverse_ { case (key, state) => persist(key, state) }
       _ <- seed(
              store,
              (Set(entityTag("a")), TestEvent.Created("a")),

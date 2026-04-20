@@ -66,9 +66,12 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
   override def run[K](projection: Projection[F, A, K]): Stream[F, Unit] = {
 
     def persistProgress(progress: BatchProgress[K, projection.State]): F[Unit] =
-      progress.dirtyKeys.toList.traverse_ { key =>
-        projection.persist(key, progress.stateCache.getOrElse(key, None))
-      } *> progress.lastProcessedPosition.traverse_(checkpoint.save(projection.name, _)).void
+      val statesToPersist = progress.dirtyKeys.map { key =>
+        key -> progress.stateCache.getOrElse(key, None)
+      }.toMap
+      projection.persistStates(statesToPersist) *> progress.lastProcessedPosition
+        .traverse_(checkpoint.save(projection.name, _))
+        .void
 
     def processEvent(
       progress: BatchProgress[K, projection.State],

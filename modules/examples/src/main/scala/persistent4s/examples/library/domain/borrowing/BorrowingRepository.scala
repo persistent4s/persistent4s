@@ -50,6 +50,19 @@ final class BorrowingRepository[F[_]: Async] private (
   def delete(key: (UUID, UUID)): F[Unit] =
     pool.use(_.execute(deleteCommand)(key)).void
 
+  def persistMany(states: Map[(UUID, UUID), Option[BorrowingState]]): F[Unit] =
+    val toUpsert = states.collect { case (_, Some(v)) => v }.toList
+    val toDelete = states.collect { case (k, None) => k }.toList
+    val upsertEffect =
+      if toUpsert.isEmpty then Async[F].unit
+      else pool.use(_.execute(upsertManyCommand(toUpsert.size))(toUpsert)).void
+    val deleteEffect =
+      if toDelete.isEmpty then Async[F].unit
+      else
+        val (bookIds, memberIds) = toDelete.unzip
+        pool.use(_.execute(deleteManyCommand(toDelete.size))((bookIds, memberIds))).void
+    upsertEffect >> deleteEffect
+
   def getBorrowings: F[List[BorrowingState]] =
     pool.use(_.execute(getBorrowingsQuery))
 
@@ -93,6 +106,24 @@ object BorrowingRepository:
 
   private val deleteCommand: Command[(UUID, UUID)] =
     sql"DELETE FROM borrowings WHERE book_id = $uuid AND member_id = $uuid".command
+
+  private def upsertManyCommand(n: Int): Command[List[BorrowingState]] =
+    sql"""
+      INSERT INTO borrowings (book_id, member_id, borrowed_at, due_date, returned_at)
+      VALUES ${borrowingStateCodec.list(n)}
+      ON CONFLICT (book_id, member_id) DO UPDATE SET
+        borrowed_at = EXCLUDED.borrowed_at,
+        due_date    = EXCLUDED.due_date,
+        returned_at = EXCLUDED.returned_at
+    """.command
+
+  private def deleteManyCommand(n: Int): Command[(List[UUID], List[UUID])] =
+    sql"""
+      DELETE FROM borrowings
+      WHERE (book_id, member_id) IN (
+        SELECT unnest(ARRAY[${uuid.list(n)}]), unnest(ARRAY[${uuid.list(n)}])
+      )
+    """.command
 
   private val getBorrowingsQuery: Query[Void, BorrowingState] =
     sql"SELECT book_id, member_id, borrowed_at, due_date, returned_at FROM borrowings".query(borrowingStateCodec)

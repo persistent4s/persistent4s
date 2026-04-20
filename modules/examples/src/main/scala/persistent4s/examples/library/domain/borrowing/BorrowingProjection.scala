@@ -65,10 +65,8 @@ final class BorrowingProjection[F[_]: Async] private (
           .pure[F]
       case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
 
-  override def persist(key: (UUID, UUID), state: Option[BorrowingState]): F[Unit] =
-    state match
-      case Some(borrowingState) => repository.save(key, borrowingState)
-      case None                 => repository.delete(key)
+  override def persistStates(states: Map[(UUID, UUID), Option[BorrowingState]]): F[Unit] =
+    repository.persistMany(states)
 
 object BorrowingProjection:
 
