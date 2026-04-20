@@ -53,15 +53,25 @@ final class BorrowingRepository[F[_]: Async] private (
   def persistMany(states: Map[(UUID, UUID), Option[BorrowingState]]): F[Unit] =
     val toUpsert = states.collect { case (_, Some(v)) => v }.toList
     val toDelete = states.collect { case (k, None) => k }.toList
-    val upsertEffect =
-      if toUpsert.isEmpty then Async[F].unit
-      else pool.use(_.execute(upsertManyCommand(toUpsert.size))(toUpsert)).void
-    val deleteEffect =
-      if toDelete.isEmpty then Async[F].unit
-      else
-        val (bookIds, memberIds) = toDelete.unzip
-        pool.use(_.execute(deleteManyCommand(toDelete.size))((bookIds, memberIds))).void
-    upsertEffect >> deleteEffect
+    if toUpsert.isEmpty && toDelete.isEmpty then Async[F].unit
+    else
+      pool.use { session =>
+        session.transaction.use { _ =>
+          val upsertEffect =
+            if toUpsert.isEmpty then Async[F].unit
+            else
+              toUpsert
+                .grouped(MaxUpsertChunkSize)
+                .toList
+                .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk).void)
+          val deleteEffect =
+            if toDelete.isEmpty then Async[F].unit
+            else
+              val (bookIds, memberIds) = toDelete.unzip
+              session.execute(deleteManyCommand(toDelete.size))((bookIds, memberIds)).void
+          upsertEffect >> deleteEffect
+        }
+      }
 
   def getBorrowings: F[List[BorrowingState]] =
     pool.use(_.execute(getBorrowingsQuery))
@@ -73,6 +83,8 @@ final class BorrowingRepository[F[_]: Async] private (
     pool.use(_.execute(getMemberBorrowingsQuery)(memberId))
 
 object BorrowingRepository:
+
+  private val MaxUpsertChunkSize = 500
 
   private val borrowingStateCodec: Codec[BorrowingState] =
     (uuid *: uuid *: timestamptz *: timestamptz *: timestamptz.opt).to[BorrowingState]
@@ -110,7 +122,7 @@ object BorrowingRepository:
   private def upsertManyCommand(n: Int): Command[List[BorrowingState]] =
     sql"""
       INSERT INTO borrowings (book_id, member_id, borrowed_at, due_date, returned_at)
-      VALUES ${borrowingStateCodec.list(n)}
+      VALUES ${borrowingStateCodec.values.list(n)}
       ON CONFLICT (book_id, member_id) DO UPDATE SET
         borrowed_at = EXCLUDED.borrowed_at,
         due_date    = EXCLUDED.due_date,

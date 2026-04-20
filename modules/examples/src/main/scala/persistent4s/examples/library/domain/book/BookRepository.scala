@@ -52,18 +52,30 @@ final class BookRepository[F[_]: Async] private (
   def persistMany(states: Map[UUID, Option[BookState]]): F[Unit] =
     val toUpsert = states.collect { case (_, Some(v)) => v }.toList
     val toDelete = states.collect { case (k, None) => k }.toList
-    val upsertEffect =
-      if toUpsert.isEmpty then Async[F].unit
-      else pool.use(_.execute(upsertManyCommand(toUpsert.size))(toUpsert)).void
-    val deleteEffect =
-      if toDelete.isEmpty then Async[F].unit
-      else pool.use(_.execute(deleteManyCommand(toDelete.size))(toDelete)).void
-    upsertEffect >> deleteEffect
+    if toUpsert.isEmpty && toDelete.isEmpty then Async[F].unit
+    else
+      pool.use { session =>
+        session.transaction.use { _ =>
+          val upsertEffect =
+            if toUpsert.isEmpty then Async[F].unit
+            else
+              toUpsert
+                .grouped(MaxUpsertChunkSize)
+                .toList
+                .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk).void)
+          val deleteEffect =
+            if toDelete.isEmpty then Async[F].unit
+            else session.execute(deleteManyCommand(toDelete.size))(toDelete).void
+          upsertEffect >> deleteEffect
+        }
+      }
 
   def getBooks: F[List[BookState]] =
     pool.use(_.execute(getBooksQuery))
 
 object BookRepository:
+
+  private val MaxUpsertChunkSize = 500
 
   private val bookStateCodec: Codec[BookState] =
     (uuid *: text *: text *: int4 *: int4).to[BookState]
@@ -99,7 +111,7 @@ object BookRepository:
   private def upsertManyCommand(n: Int): Command[List[BookState]] =
     sql"""
       INSERT INTO books (book_id, title, author, total_copies, available_copies)
-      VALUES ${bookStateCodec.list(n)}
+      VALUES ${bookStateCodec.values.list(n)}
       ON CONFLICT (book_id) DO UPDATE SET
         title            = EXCLUDED.title,
         author           = EXCLUDED.author,

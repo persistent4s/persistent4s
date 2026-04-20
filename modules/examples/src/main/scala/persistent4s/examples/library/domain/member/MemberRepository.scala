@@ -52,18 +52,30 @@ final class MemberRepository[F[_]: Async] private (
   def persistMany(states: Map[UUID, Option[MemberState]]): F[Unit] =
     val toUpsert = states.collect { case (_, Some(v)) => v }.toList
     val toDelete = states.collect { case (k, None) => k }.toList
-    val upsertEffect =
-      if toUpsert.isEmpty then Async[F].unit
-      else pool.use(_.execute(upsertManyCommand(toUpsert.size))(toUpsert)).void
-    val deleteEffect =
-      if toDelete.isEmpty then Async[F].unit
-      else pool.use(_.execute(deleteManyCommand(toDelete.size))(toDelete)).void
-    upsertEffect >> deleteEffect
+    if toUpsert.isEmpty && toDelete.isEmpty then Async[F].unit
+    else
+      pool.use { session =>
+        session.transaction.use { _ =>
+          val upsertEffect =
+            if toUpsert.isEmpty then Async[F].unit
+            else
+              toUpsert
+                .grouped(MaxUpsertChunkSize)
+                .toList
+                .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk).void)
+          val deleteEffect =
+            if toDelete.isEmpty then Async[F].unit
+            else session.execute(deleteManyCommand(toDelete.size))(toDelete).void
+          upsertEffect >> deleteEffect
+        }
+      }
 
   def getMembers: F[List[MemberState]] =
     pool.use(_.execute(getMembersQuery))
 
 object MemberRepository:
+
+  private val MaxUpsertChunkSize = 500
 
   private val memberStateCodec: Codec[MemberState] =
     (uuid *: text *: text *: int4).to[MemberState]
@@ -98,7 +110,7 @@ object MemberRepository:
   private def upsertManyCommand(n: Int): Command[List[MemberState]] =
     sql"""
       INSERT INTO members (member_id, name, email, borrowed_books)
-      VALUES ${memberStateCodec.list(n)}
+      VALUES ${memberStateCodec.values.list(n)}
       ON CONFLICT (member_id) DO UPDATE SET
         name           = EXCLUDED.name,
         email          = EXCLUDED.email,
