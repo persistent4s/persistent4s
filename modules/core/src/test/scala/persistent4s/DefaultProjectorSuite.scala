@@ -142,7 +142,9 @@ object DefaultProjectorSuite extends SimpleIOSuite:
 
       def resolveKeys(event: EventEnvelope[TestEvent]): List[String] = resolveKeysF(event)
 
-      def fetchState(key: String): IO[Option[Int]] = states.get.map(_.get(key))
+      def fetchStates(keys: List[String]): IO[Map[String, Option[Int]]] = states.get.map { current =>
+        keys.map(k => k -> current.get(k)).toMap
+      }
 
       def handle(state: Option[Int], event: EventEnvelope[TestEvent]): IO[Option[Int]] =
         failOnPosition match
@@ -257,8 +259,10 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                        event.payload match
                          case TestEvent.Created(id) => List(id)
                          case TestEvent.Deleted(id) => List(id)
-                     def fetchState(key: String): IO[Option[Int]] =
-                       fetchCount.update(_ + 1) *> states.get.map(_.get(key))
+                     def fetchStates(keys: List[String]): IO[Map[String, Option[Int]]] =
+                       fetchCount.update(_ + keys.size) *> states.get.map { current =>
+                         keys.map(k => k -> current.get(k)).toMap
+                       }
                      def handle(state: Option[Int], event: EventEnvelope[TestEvent]): IO[Option[Int]] =
                        handled.update(_ :+ event).as(Some(state.getOrElse(0) + 1))
                      def persist(key: String, state: Option[Int]): IO[Unit] =
