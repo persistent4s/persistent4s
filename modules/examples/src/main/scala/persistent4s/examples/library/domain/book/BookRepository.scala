@@ -35,10 +35,10 @@ final class BookRepository[F[_]: Async] private (
   def find(key: UUID): F[Option[BookState]] =
     pool.use(_.option(findQuery)(key))
 
-  def findAll(keys: List[UUID]): F[Map[UUID, Option[BookState]]] =
+  def findMany(keys: List[UUID]): F[Map[UUID, Option[BookState]]] =
     if keys.isEmpty then Map.empty.pure[F]
     else
-      pool.use(_.execute(findAllQuery(keys.size))(keys)).map { states =>
+      pool.use(_.execute(findManyQuery(keys.size))(keys)).map { states =>
         val found = states.map(s => s.bookId -> s).toMap
         keys.map(k => k -> found.get(k)).toMap
       }
@@ -57,7 +57,7 @@ object BookRepository:
   private val bookStateCodec: Codec[BookState] =
     (uuid *: text *: text *: int4 *: int4).to[BookState]
 
-  private def findAllQuery(n: Int): Query[List[UUID], BookState] =
+  private def findManyQuery(n: Int): Query[List[UUID], BookState] =
     sql"""
       SELECT book_id, title, author, total_copies, available_copies
       FROM books

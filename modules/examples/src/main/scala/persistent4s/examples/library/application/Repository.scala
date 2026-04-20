@@ -20,7 +20,7 @@ trait Repository[F[_], K, V]:
 
   def find(key: K): F[Option[V]]
 
-  def findAll(keys: List[K]): F[Map[K, Option[V]]]
+  def findMany(keys: List[K]): F[Map[K, Option[V]]]
 
   def save(key: K, value: V): F[Unit]
 
