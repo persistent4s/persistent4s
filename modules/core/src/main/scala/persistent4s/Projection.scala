@@ -29,8 +29,12 @@ package persistent4s
   */
 trait Projection[F[_], A <: Event, K, S]:
 
-  /** The name of the projection, used for checkpointing. Each projection should have a unique name to avoid conflicts
-    * with other projections.
+  /** The name of the projection, used for checkpointing.
+    *
+    * ⚠️ **STABLE IDENTIFIER** — Changing this name will orphan the checkpoint stored for this projection. Once set in
+    * production, changing it requires manual migration of the checkpoint record.
+    *
+    * Each projection should have a unique name to avoid conflicts with other projections.
     *
     * @return
     *   the name of the projection
