@@ -98,7 +98,6 @@ lazy val kafka = (project in file("modules/kafka"))
   )
 
 lazy val testkit = (project in file("modules/testkit"))
-  .dependsOn(core)
   .settings(
     name                 := "persistent4s-testkit",
     libraryDependencies ++= List(
