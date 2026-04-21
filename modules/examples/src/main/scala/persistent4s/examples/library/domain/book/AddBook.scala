@@ -16,9 +16,6 @@
 
 package persistent4s.examples.library.domain.book
 
-import cats.MonadThrow
-import cats.syntax.all.*
-
 import persistent4s.{CommandHandler, Tag}
 import persistent4s.examples.library.domain.{BookAdded, LibraryEvent}
 import java.util.UUID
@@ -45,8 +42,8 @@ object AddBookHandler extends CommandHandler[AddBook, AddBookState, LibraryEvent
       case _: BookAdded => state.copy(exists = true)
       case _            => state
 
-  def validate[F[_]: MonadThrow](state: AddBookState, command: AddBook): F[Unit] =
-    MonadThrow[F].raiseError(new Exception("Book already exists")).whenA(state.exists)
+  def validate(state: AddBookState, command: AddBook): Either[Throwable, Unit] =
+    if (state.exists) Left(new Exception("Book already exists")) else Right(())
 
   def decide(state: AddBookState, command: AddBook): List[(Set[Tag], LibraryEvent)] =
     List(

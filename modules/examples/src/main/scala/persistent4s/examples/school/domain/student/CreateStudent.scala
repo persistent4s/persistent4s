@@ -16,9 +16,6 @@
 
 package persistent4s.examples.school.domain.student
 
-import cats.MonadThrow
-import cats.syntax.all.*
-
 import persistent4s.{CommandHandler, Tag}
 import persistent4s.examples.school.domain.SchoolEvent
 
@@ -37,10 +34,11 @@ object CreateStudentHandler extends CommandHandler[CreateStudent, CreateStudentS
   def evolve(command: CreateStudent, state: CreateStudentState, event: SchoolEvent): CreateStudentState =
     event match
       case _: StudentCreated => state.copy(exists = true)
+      case _: StudentDeleted => state.copy(exists = false)
       case _                 => state
 
-  def validate[F[_]: MonadThrow](state: CreateStudentState, command: CreateStudent): F[Unit] =
-    MonadThrow[F].raiseError(new Exception("Student already exists")).whenA(state.exists)
+  def validate(state: CreateStudentState, command: CreateStudent): Either[Throwable, Unit] =
+    if (state.exists) Left(new Exception("Student already exists")) else Right(())
 
   def decide(state: CreateStudentState, command: CreateStudent): List[(Set[Tag], SchoolEvent)] =
     List(

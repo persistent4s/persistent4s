@@ -16,9 +16,6 @@
 
 package persistent4s.examples.library.domain.borrowing
 
-import cats.MonadThrow
-import cats.syntax.all.*
-
 import persistent4s.{CommandHandler, EventTypeName, Tag}
 import persistent4s.examples.library.domain.*
 import java.time.OffsetDateTime
@@ -53,9 +50,10 @@ object ReturnBookHandler extends CommandHandler[ReturnBook, ReturnBookState, Lib
         state.copy(alreadyReturned = true)
       case _ => state
 
-  def validate[F[_]: MonadThrow](state: ReturnBookState, command: ReturnBook): F[Unit] =
-    MonadThrow[F].raiseError(new Exception("Borrowing not found")).whenA(!state.hasBorrowing) *>
-      MonadThrow[F].raiseError(new Exception("Book already returned")).whenA(state.alreadyReturned)
+  def validate(state: ReturnBookState, command: ReturnBook): Either[Throwable, Unit] =
+    if (!state.hasBorrowing) Left(new Exception("Borrowing not found"))
+    else if (state.alreadyReturned) Left(new Exception("Book already returned"))
+    else Right(())
 
   def decide(state: ReturnBookState, command: ReturnBook): List[(Set[Tag], LibraryEvent)] =
     List(

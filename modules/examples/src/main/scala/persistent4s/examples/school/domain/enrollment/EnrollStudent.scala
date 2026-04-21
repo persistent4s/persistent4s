@@ -16,9 +16,6 @@
 
 package persistent4s.examples.school.domain.enrollment
 
-import cats.MonadThrow
-import cats.syntax.all.*
-
 import persistent4s.{CommandHandler, EventTypeName, Tag}
 import persistent4s.examples.school.domain.SchoolEvent
 import persistent4s.examples.school.domain.course.CourseCreated
@@ -51,15 +48,12 @@ object EnrollStudentHandler extends CommandHandler[EnrollStudent, EnrollStudentS
       case StudentEnrolled(studentId, _) => state.copy(enrolledStudents = state.enrolledStudents + studentId)
       case _                             => state
 
-  def validate[F[_]: MonadThrow](state: EnrollStudentState, command: EnrollStudent): F[Unit] =
-    MonadThrow[F].raiseError(new Exception("Student not found")).whenA(!state.studentExists) *>
-      MonadThrow[F].raiseError(new Exception("Course not found")).whenA(!state.courseExists) *>
-      MonadThrow[F]
-        .raiseError(new Exception("Course is full"))
-        .whenA(state.enrolledStudents.size >= state.courseCapacity) *>
-      MonadThrow[F]
-        .raiseError(new Exception("Already enrolled"))
-        .whenA(state.enrolledStudents.contains(command.studentId))
+  def validate(state: EnrollStudentState, command: EnrollStudent): Either[Throwable, Unit] =
+    if (!state.studentExists) Left(new Exception("Student not found"))
+    else if (!state.courseExists) Left(new Exception("Course not found"))
+    else if (state.enrolledStudents.size >= state.courseCapacity) Left(new Exception("Course is full"))
+    else if (state.enrolledStudents.contains(command.studentId)) Left(new Exception("Already enrolled"))
+    else Right(())
 
   def decide(state: EnrollStudentState, command: EnrollStudent): List[(Set[Tag], SchoolEvent)] =
     List(
