@@ -34,9 +34,7 @@ final case class BookState(
 
 final class BookProjection[F[_]: Async] private (
   repository: Repository[F, UUID, BookState],
-) extends Projection[F, LibraryEvent, UUID]:
-
-  type State = BookState
+) extends Projection[F, LibraryEvent, UUID, BookState]:
 
   override val name: String = "book-projection"
 

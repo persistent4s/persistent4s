@@ -24,10 +24,10 @@ package persistent4s
   *   the event type, which must extend the Event trait
   * @tparam K
   *   the key type for fetching and persisting state
+  * @tparam S
+  *   the state type for the projection
   */
-trait Projection[F[_], A <: Event, K]:
-
-  type State
+trait Projection[F[_], A <: Event, K, S]:
 
   /** The name of the projection, used for checkpointing. Each projection should have a unique name to avoid conflicts
     * with other projections.
@@ -67,7 +67,7 @@ trait Projection[F[_], A <: Event, K]:
     * @return
     *   the current state associated with the given key
     */
-  def fetchState(key: K): F[Option[State]]
+  def fetchState(key: K): F[Option[S]]
 
   /** Handle an incoming event. This method will be called for each event that matches the projection's filter. The
     * projection should perform any necessary processing of the event, such as updating a read model.
@@ -87,7 +87,7 @@ trait Projection[F[_], A <: Event, K]:
     * @return
     *   the updated state, or `None` to request deletion of the state for this key
     */
-  def handle(state: Option[State], event: EventEnvelope[A]): F[Option[State]]
+  def handle(state: Option[S], event: EventEnvelope[A]): F[Option[S]]
 
   /** Persist the current state for a given key. This method will be called after processing an event to save the
     * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
@@ -100,4 +100,4 @@ trait Projection[F[_], A <: Event, K]:
     * @return
     *   a F[Unit] that completes when the state has been persisted
     */
-  def persist(key: K, state: Option[State]): F[Unit]
+  def persist(key: K, state: Option[S]): F[Unit]

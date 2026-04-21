@@ -35,9 +35,7 @@ final case class BorrowingState(
 
 final class BorrowingProjection[F[_]: Async] private (
   repository: Repository[F, (UUID, UUID), BorrowingState],
-) extends Projection[F, LibraryEvent, (UUID, UUID)]:
-
-  type State = BorrowingState
+) extends Projection[F, LibraryEvent, (UUID, UUID), BorrowingState]:
 
   override val name: String = "borrowing-projection"
 
