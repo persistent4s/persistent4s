@@ -16,9 +16,6 @@
 
 package persistent4s.examples.library.domain.borrowing
 
-import cats.MonadThrow
-import cats.syntax.all.*
-
 import java.time.temporal.ChronoUnit
 
 import persistent4s.{CommandHandler, EventTypeName, Tag}
@@ -85,15 +82,12 @@ object BorrowBookHandler extends CommandHandler[BorrowBook, BorrowBookState, Lib
 
       case _ => state
 
-  def validate[F[_]: MonadThrow](state: BorrowBookState, command: BorrowBook): F[Unit] =
-    MonadThrow[F].raiseError(new Exception("Book not found")).whenA(!state.bookExists) *>
-      MonadThrow[F].raiseError(new Exception("Member not found")).whenA(!state.memberExists) *>
-      MonadThrow[F]
-        .raiseError(new Exception("No copies available"))
-        .whenA(state.borrowedCopies >= state.totalCopies) *>
-      MonadThrow[F]
-        .raiseError(new Exception("Member already has this book"))
-        .whenA(state.memberHasBook)
+  def validate(state: BorrowBookState, command: BorrowBook): Either[Throwable, Unit] =
+    if (!state.bookExists) Left(new Exception("Book not found"))
+    else if (!state.memberExists) Left(new Exception("Member not found"))
+    else if (state.borrowedCopies >= state.totalCopies) Left(new Exception("No copies available"))
+    else if (state.memberHasBook) Left(new Exception("Member already has this book"))
+    else Right(())
 
   def decide(state: BorrowBookState, command: BorrowBook): List[(Set[Tag], LibraryEvent)] =
     val now = OffsetDateTime.now()

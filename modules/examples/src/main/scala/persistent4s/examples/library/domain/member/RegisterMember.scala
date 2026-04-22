@@ -16,9 +16,6 @@
 
 package persistent4s.examples.library.domain.member
 
-import cats.MonadThrow
-import cats.syntax.all.*
-
 import persistent4s.{CommandHandler, Tag}
 import persistent4s.examples.library.domain.{LibraryEvent, MemberRegistered}
 import java.util.UUID
@@ -44,8 +41,8 @@ object RegisterMemberHandler extends CommandHandler[RegisterMember, RegisterMemb
       case _: MemberRegistered => state.copy(exists = true)
       case _                   => state
 
-  def validate[F[_]: MonadThrow](state: RegisterMemberState, command: RegisterMember): F[Unit] =
-    MonadThrow[F].raiseError(new Exception("Member already registered")).whenA(state.exists)
+  def validate(state: RegisterMemberState, command: RegisterMember): Either[Throwable, Unit] =
+    if (state.exists) Left(new Exception("Member already registered")) else Right(())
 
   def decide(state: RegisterMemberState, command: RegisterMember): List[(Set[Tag], LibraryEvent)] =
     List(

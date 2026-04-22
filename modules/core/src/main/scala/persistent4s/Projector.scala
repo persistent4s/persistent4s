@@ -46,7 +46,7 @@ trait Projector[F[_], A <: Event]:
     * @param projection
     *   the projection to run
     */
-  def run[K](projection: Projection[F, A, K]): Stream[F, Unit]
+  def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit]
 
 object Projector:
 

@@ -33,9 +33,7 @@ final case class MemberState(
 
 final class MemberProjection[F[_]: Async] private (
   repository: Repository[F, UUID, MemberState],
-) extends Projection[F, LibraryEvent, UUID]:
-
-  type State = MemberState
+) extends Projection[F, LibraryEvent, UUID, MemberState]:
 
   override val name: String = "member-projection"
 

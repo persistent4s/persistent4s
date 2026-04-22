@@ -132,9 +132,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
         case TestEvent.Created(id) => List(id)
         case TestEvent.Deleted(id) => List(id),
     failOnPosition: Option[Long] = None,
-  ): Projection[IO, TestEvent, String] =
-    new Projection[IO, TestEvent, String]:
-      type State = Int
+  ): Projection[IO, TestEvent, String, Int] =
+    new Projection[IO, TestEvent, String, Int]:
 
       def name: String = "tracking"
 
@@ -254,8 +253,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
       states     <- Ref.of[IO, Map[String, Int]](Map.empty)
       fetchCount <- Ref.of[IO, Int](0)
-      projection  = new Projection[IO, TestEvent, String]:
-                     type State = Int
+      projection  = new Projection[IO, TestEvent, String, Int]:
                      def name: String = "tracking"
                      def filter: EventFilter = EventFilter()
                      def resolveKeys(event: EventEnvelope[TestEvent]): List[String] =

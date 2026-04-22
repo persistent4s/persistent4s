@@ -35,9 +35,7 @@ import cats.syntax.all.*
   * @tparam A
   *   the event type, which must extend the Event trait
   */
-trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A, scala.Unit] {
-
-  type State = scala.Unit
+trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A, scala.Unit, scala.Unit] {
 
   override def resolveKeys(event: EventEnvelope[A]): List[Unit] = List(())
 
