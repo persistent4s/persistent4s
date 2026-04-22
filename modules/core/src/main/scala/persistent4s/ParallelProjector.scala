@@ -42,9 +42,9 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
   )
 
   // TODO How should we handle failure? What do we do if the process dies?
-  override def run[K](projection: Projection[F, A, K]): Stream[F, Unit] = {
+  override def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit] = {
 
-    def persistProgress(progress: BatchProgress[K, projection.State]): F[Unit] =
+    def persistProgress(progress: BatchProgress[K, S]): F[Unit] =
       val statesToPersist = progress.dirtyKeys.map { key =>
         key -> progress.stateCache.getOrElse(key, None)
       }.toMap
@@ -53,9 +53,9 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         .void
 
     def processEvent(
-      progress: BatchProgress[K, projection.State],
+      progress: BatchProgress[K, S],
       event: EventEnvelope[A],
-    ): F[BatchProgress[K, projection.State]] =
+    ): F[BatchProgress[K, S]] =
       val eventKeys = projection.resolveKeys(event)
 
       eventKeys
@@ -99,7 +99,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
                      checkpoint.save(projection.name, batch.last.metadata.globalPosition)
 
                  case Left(_) =>
-                   val progress0 = BatchProgress[K, projection.State](
+                   val progress0 = BatchProgress[K, S](
                      stateCache = initialStates,
                      dirtyKeys = Set.empty,
                      lastProcessedPosition = None,
