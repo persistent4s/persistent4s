@@ -18,7 +18,6 @@ package persistent4s
 
 import cats.effect.Concurrent
 import cats.syntax.all.*
-import cats.MonadThrow
 
 /** A CommandHandler defines how a command is processed in an event-sourced system. It reads events from the store to
   * build the current state, validates the command against that state, and decides which new events to produce.
@@ -47,7 +46,7 @@ trait CommandHandler[C, S, E <: Event]:
   def evolve(command: C, state: S, event: E): S
 
   /** Validate the command against the current state. Should raise an error if the command is invalid. */
-  def validate[F[_]: MonadThrow](state: S, command: C): F[Unit]
+  def validate(state: S, command: C): Either[Throwable, Unit]
 
   /** Produce the events that result from applying the command, each with its own set of tags. Only called after
     * validation passes.
@@ -85,8 +84,10 @@ trait CommandHandler[C, S, E <: Event]:
       envelopes <- eventStore.readFrom(0L, filter).compile.toList
       state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
       index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-      _         <- validate(state, command)
-      decided    = decide(state, command)
-      events     = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
-      _         <- eventStore.append(filter, index, events)
+      _         <- validate(state, command) match
+             case Left(e)  => Concurrent[F].raiseError(e)
+             case Right(_) => Concurrent[F].unit
+      decided = decide(state, command)
+      events  = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
+      _      <- eventStore.append(filter, index, events)
     yield ()

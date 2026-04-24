@@ -23,13 +23,16 @@ package persistent4s
   */
 trait ProjectionCheckpoint[F[_]]:
 
-  /** Load the last checkpoint for the specified projection. This should return the global position of the last
-    * processed event.
+  /** Load the last checkpoint for the specified projection.
+    *
+    * Returns the global position of the last successfully processed event, so the projector can resume from that point
+    * rather than reprocessing the entire event store. Returning `None` signals that no checkpoint exists yet, which
+    * causes the projector to start from the very beginning of the event store.
     *
     * @param projectionName
     *   the name of the projection to load the checkpoint for
     * @return
-    *   the global position of the last processed event, if available
+    *   the global position of the last processed event, or `None` to start from the beginning
     */
   def load(projectionName: String): F[Option[Long]]
 

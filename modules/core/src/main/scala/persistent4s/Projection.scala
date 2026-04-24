@@ -16,11 +16,25 @@
 
 package persistent4s
 
-/** A Projection defines how to process events from the event store. */
-trait Projection[F[_], A <: Event]:
+/** A Projection defines how to process events from the event store.
+  *
+  * @tparam F
+  *   the effect type, such as IO
+  * @tparam A
+  *   the event type, which must extend the Event trait
+  * @tparam K
+  *   the key type for fetching and persisting state
+  * @tparam S
+  *   the state type for the projection
+  */
+trait Projection[F[_], A <: Event, K, S]:
 
-  /** The name of the projection, used for checkpointing. Each projection should have a unique name to avoid conflicts
-    * with other projections.
+  /** The name of the projection, used for checkpointing.
+    *
+    * ⚠️ **STABLE IDENTIFIER** — Changing this name will orphan the checkpoint stored for this projection. Once set in
+    * production, changing it requires manual migration of the checkpoint record.
+    *
+    * Each projection should have a unique name to avoid conflicts with other projections.
     *
     * @return
     *   the name of the projection
@@ -35,6 +49,29 @@ trait Projection[F[_], A <: Event]:
     */
   def filter: EventFilter
 
+  /** Resolve keys for a given event. This method is used to determine which keys are affected by an event, and
+    * therefore which state entries need to be fetched and updated. An event may affect multiple keys.
+    *
+    * Returning an empty list means the event is intentionally ignored by this projection: no state is fetched or
+    * persisted, but the event is still acknowledged and the checkpoint advances past it.
+    *
+    * @param event
+    *   the event for which to resolve the keys
+    * @return
+    *   the keys affected by this event, or an empty list to skip the event without blocking the checkpoint
+    */
+  def resolveKeys(event: EventEnvelope[A]): List[K]
+
+  /** Fetch the current state for multiple keys. This method will be called before processing a batch of events to get
+    * the current state for all relevant keys.
+    *
+    * @param keys
+    *   the keys for which to fetch the state
+    * @return
+    *   a map of keys to their corresponding state, or `None` if no state exists for a key
+    */
+  def fetchStates(keys: List[K]): F[Map[K, Option[S]]]
+
   /** Handle an incoming event. This method will be called for each event that matches the projection's filter. The
     * projection should perform any necessary processing of the event, such as updating a read model.
     *
@@ -42,7 +79,26 @@ trait Projection[F[_], A <: Event]:
     * retries or failures. Therefore, it's crucial to ensure that the handler can safely handle duplicate events without
     * causing inconsistent state or side effects.
     *
+    * Returning `Some(state)` causes the projector to call `persist(key, Some(state))` for that key after the batch
+    * completes. Returning `None` causes the projector to call `persist(key, None)`, signalling that the state for that
+    * key should be deleted. The `persist` implementation is responsible for carrying out the actual deletion.
+    *
+    * @param state
+    *   the current state of the projection before processing the event, or `None` if no state exists yet for the key
     * @param event
     *   the event to handle
+    * @return
+    *   the updated state, or `None` to request deletion of the state for this key
     */
-  def handle(event: EventEnvelope[A]): F[Unit]
+  def handle(state: Option[S], event: EventEnvelope[A]): F[Option[S]]
+
+  /** Persist the current state for a given key. This method will be called after processing an event to save the
+    * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
+    * cache. Passing None indicates that the state should be removed for that key.
+    *
+    * @param states
+    *   a map of keys to their corresponding state, or `None` if the state should be deleted for a key
+    * @return
+    *   a F[Unit] that completes when the state has been persisted
+    */
+  def persistStates(states: Map[K, Option[S]]): F[Unit]
