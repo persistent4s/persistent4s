@@ -22,7 +22,9 @@ import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 
 given Tracer[IO] = Tracer.Implicits.noop
-given Meter[IO]  = Meter.Implicits.noop
+
+given Meter[IO] = Meter.Implicits.noop
+
 import pureconfig.ConfigSource
 import skunk.*
 
@@ -55,12 +57,12 @@ object LibraryModule:
       checkpoint = resources.checkpoint
       config    <- Resource.eval(loadConfig(configPath))
       viewPool  <- Session
-                     .Builder[IO]
-                     .withHost(config.host)
-                     .withPort(config.port)
-                     .withUserAndPassword(config.user, config.password)
-                     .withDatabase(config.database)
-                     .pooled(config.maxConnections)
+                    .Builder[IO]
+                    .withHost(config.host)
+                    .withPort(config.port)
+                    .withUserAndPassword(config.user, config.password)
+                    .withDatabase(config.database)
+                    .pooled(config.maxConnections)
       bookRepo       = BookRepository.make[IO](viewPool)
       memberRepo     = MemberRepository.make[IO](viewPool)
       borrowingRepo  = BorrowingRepository.make[IO](viewPool)

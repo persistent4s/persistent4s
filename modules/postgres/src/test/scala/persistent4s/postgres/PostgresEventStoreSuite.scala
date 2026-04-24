@@ -26,7 +26,9 @@ import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 
 given Tracer[IO] = Tracer.Implicits.noop
-given Meter[IO]  = Meter.Implicits.noop
+
+given Meter[IO] = Meter.Implicits.noop
+
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
 import persistent4s.{EventFilter, IndexConflictException, Tag}
