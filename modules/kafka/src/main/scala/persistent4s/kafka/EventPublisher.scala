@@ -16,8 +16,8 @@
 
 package persistent4s.kafka
 
-import persistent4s.EventEnvelope
+import persistent4s.{Event, EventEnvelope}
 
-trait EventPublisher[F[_], A]:
+trait EventPublisher[F[_], A <: Event]:
 
   def publish(topic: String, event: EventEnvelope[A]): F[Unit]

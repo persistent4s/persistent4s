@@ -29,7 +29,7 @@ import cats.syntax.all.*
   * @tparam E
   *   the event type
   */
-trait CommandHandler[C, S, E]:
+trait CommandHandler[C, S, E <: Event]:
 
   /** Which tags to read from the event store for this command. */
   def tags(command: C): Set[Tag]
@@ -37,7 +37,7 @@ trait CommandHandler[C, S, E]:
   /** The event types that this handler is interested in for building the state. If not specified, all events with the
     * relevant tags will be included.
     */
-  def eventTypes: Option[Set[String]] = None
+  def eventTypes: Option[Set[EventTypeName]] = None
 
   /** The initial state before any events have been applied. */
   def initial: S
@@ -46,7 +46,7 @@ trait CommandHandler[C, S, E]:
   def evolve(command: C, state: S, event: E): S
 
   /** Validate the command against the current state. Should raise an error if the command is invalid. */
-  def validate[F[_]: Concurrent](state: S, command: C): F[Unit]
+  def validate(state: S, command: C): Either[Throwable, Unit]
 
   /** Produce the events that result from applying the command, each with its own set of tags. Only called after
     * validation passes.
@@ -80,11 +80,14 @@ trait CommandHandler[C, S, E]:
   )(using eventStore: EventStore[F, E]): F[Unit] =
     for
       tags      <- Concurrent[F].pure(tags(command))
-      envelopes <- eventStore.read(eventTypes.getOrElse(Set.empty).toList, tags).compile.toList
+      filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
+      envelopes <- eventStore.readFrom(0L, filter).compile.toList
       state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
       index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-      _         <- validate(state, command)
-      decided    = decide(state, command)
-      events     = decided.map((tags, event) => (tags, event.getClass.getSimpleName, event))
-      _         <- eventStore.append(index, events)
+      _         <- validate(state, command) match
+             case Left(e)  => Concurrent[F].raiseError(e)
+             case Right(_) => Concurrent[F].unit
+      decided = decide(state, command)
+      events  = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
+      _      <- eventStore.append(filter, index, events)
     yield ()

@@ -14,11 +14,23 @@
  * limitations under the License.
  */
 
-package persistent4s.kafka
+package persistent4s.examples.library.infrastructure
 
-import fs2.Stream
-import persistent4s.{Event, EventEnvelope}
+import cats.effect.{IO, IOApp}
+import com.comcast.ip4s.*
+import org.http4s.ember.server.EmberServerBuilder
 
-trait EventSubscriber[F[_], A <: Event]:
+object LibraryServer extends IOApp.Simple:
 
-  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, EventEnvelope[A]]
+  def run: IO[Unit] =
+    LibraryModule.make().use { module =>
+      LibraryRoutes.make(module).use { routes =>
+        EmberServerBuilder
+          .default[IO]
+          .withHost(host"0.0.0.0")
+          .withPort(port"8182")
+          .withHttpApp(routes.orNotFound)
+          .build
+          .useForever
+      }
+    }

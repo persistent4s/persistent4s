@@ -14,11 +14,21 @@
  * limitations under the License.
  */
 
-package persistent4s.kafka
+package persistent4s
 
-import fs2.Stream
-import persistent4s.{Event, EventEnvelope}
-
-trait EventSubscriber[F[_], A <: Event]:
-
-  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, EventEnvelope[A]]
+/** A filter for selecting which events a projection should process. A projection will only receive events that match
+  * the specified event types and tags.
+  *
+  * @param eventTypes
+  *   a set of event type names to include. If empty, all event types are included.
+  * @param tags
+  *   a set of tags to include. If empty, all tags are included. An event matches the filter if it has at least one of
+  *   the specified tags.
+  *
+  * @param eventTypes
+  * @param tags
+  */
+final case class EventFilter(
+  eventTypes: Set[EventTypeName] = Set.empty,
+  tags: Set[Tag] = Set.empty,
+)

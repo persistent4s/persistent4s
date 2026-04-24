@@ -14,11 +14,16 @@
  * limitations under the License.
  */
 
-package persistent4s.kafka
+package persistent4s.examples.library.application
 
-import fs2.Stream
-import persistent4s.{Event, EventEnvelope}
+trait Repository[F[_], K, V]:
 
-trait EventSubscriber[F[_], A <: Event]:
+  def find(key: K): F[Option[V]]
 
-  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, EventEnvelope[A]]
+  def findMany(keys: List[K]): F[Map[K, Option[V]]]
+
+  def save(key: K, value: V): F[Unit]
+
+  def delete(key: K): F[Unit]
+
+  def persistMany(states: Map[K, Option[V]]): F[Unit]
