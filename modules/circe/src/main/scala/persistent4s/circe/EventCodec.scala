@@ -68,7 +68,7 @@ object CirceEventCodec:
           case None    => Left(new RuntimeException(s"Unknown event type: ${eventType.value}")),
     )
 
-  private final case class Leaf[A](name: String, encoder: Encoder[A], decoder: Decoder[A])
+  final private case class Leaf[A](name: String, encoder: Encoder[A], decoder: Decoder[A])
 
   private inline def collectLeaves[A, Elems <: Tuple, Labels <: Tuple]: List[Leaf[A]] =
     inline erasedValue[Elems] match
@@ -80,9 +80,9 @@ object CirceEventCodec:
             summonFrom {
               case childMirror: Mirror.SumOf[`t`] =>
                 collectLeaves[A, childMirror.MirroredElemTypes, childMirror.MirroredElemLabels] ++ rest
-              case _                              =>
+              case _ =>
                 val name = constValue[l & String]
-                val enc  = summonInline[Encoder[t]].asInstanceOf[Encoder[A]]
-                val dec  = summonInline[Decoder[t]].asInstanceOf[Decoder[A]]
+                val enc = summonInline[Encoder[t]].asInstanceOf[Encoder[A]]
+                val dec = summonInline[Decoder[t]].asInstanceOf[Decoder[A]]
                 Leaf(name, enc, dec) :: rest
             }
