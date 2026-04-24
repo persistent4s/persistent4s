@@ -10,8 +10,10 @@ ThisBuild / developers             := List(
   tlGitHubDev("antoniojimeneznieto", "Antonio Jimenez"),
   tlGitHubDev("Bjolidon", "Bastien Jolidon"),
 )
-ThisBuild / scalafmtOnCompile := false // recommended in Scala 3
-ThisBuild / testFrameworks    += new TestFramework("weaver.framework.CatsEffect")
+ThisBuild / scalafmtOnCompile        := false // recommended in Scala 3
+ThisBuild / testFrameworks           += new TestFramework("weaver.framework.CatsEffect")
+ThisBuild / Test / logBuffered       := false
+ThisBuild / Test / parallelExecution := false
 
 Global / onChangedBuildSource := ReloadOnSourceChanges
 Global / semanticdbEnabled    := true // for metals

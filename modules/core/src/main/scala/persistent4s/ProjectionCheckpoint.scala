@@ -16,6 +16,13 @@
 
 package persistent4s
 
+final case class ProjectionCheckpointState(
+  projectionName: String,
+  globalPosition: Long,
+  running: Boolean,
+  error: Option[String],
+)
+
 /** A trait for managing projection checkpoints. A checkpoint is a record of the last processed event's global position
   * for a given projection. This allows a projector to resume processing from the correct position after a restart or
   * failure, ensuring that events are not missed or processed multiple times. The checkpoint should be stored in a
@@ -34,14 +41,12 @@ trait ProjectionCheckpoint[F[_]]:
     * @return
     *   the global position of the last processed event, or `None` to start from the beginning
     */
-  def load(projectionName: String): F[Option[Long]]
+  def load(projectionName: String): F[Option[ProjectionCheckpointState]]
 
   /** Save the checkpoint for the specified projection. This should update the global position of the last processed
     * event.
     *
-    * @param projectionName
-    *   the name of the projection to save the checkpoint for
-    * @param globalPosition
-    *   the global position of the last processed event
+    * @param projectionCheckpointState
+    *   the state of the projection checkpoint to save
     */
-  def save(projectionName: String, globalPosition: Long): F[Unit]
+  def save(projectionCheckpointState: ProjectionCheckpointState): F[Unit]

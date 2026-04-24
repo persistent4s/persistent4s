@@ -22,7 +22,7 @@ import fs2.Stream
   * to the store is done with optimistic concurrency control.
   *
   * @tparam F
-  *   the effect type, such as IO
+  *   the effect type, such as `cats.effect.IO`
   * @tparam A
   *   the event type, which must extend the Event trait
   */
@@ -60,7 +60,9 @@ trait EventStore[F[_], A <: Event]:
     *   the position in the event store to start reading from (exclusive)
     * @param eventFilter
     *   the filter to apply to the events
+    * @param maxEvents
+    *   the maximum number of events to read, or None to read all available events
     * @return
     *   a Stream of EventEnvelope[A] containing the matching events
     */
-  def readFrom(fromPosition: Long, eventFilter: EventFilter): Stream[F, EventEnvelope[A]]
+  def readFrom(fromPosition: Long, eventFilter: EventFilter, maxEvents: Option[Int] = None): Stream[F, EventEnvelope[A]]

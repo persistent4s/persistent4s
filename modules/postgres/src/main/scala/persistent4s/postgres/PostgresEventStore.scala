@@ -79,7 +79,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
             _ <- flatEvents.traverse_ { case (tags, eventType, event) =>
                    insertEvent(session, tags, eventType, event).void
                  }
-            _ <- session.channel(channelId).notify("")
+            _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield ()
         }
       }
@@ -87,6 +87,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
   override def readFrom(
     fromPosition: Long,
     eventFilter: EventFilter,
+    maxEvents: Option[Int] = None,
   ): Stream[F, EventEnvelope[A]] =
     val eventTypesList = eventFilter.eventTypes.toList.map(_.value)
     val tagsList = eventFilter.tags.map(_.value).toList
@@ -94,30 +95,54 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     Stream.resource(pool).flatMap { session =>
       Stream.resource(session.transaction).flatMap { _ =>
         val rowStream: Stream[F, EventRow] =
-          (eventTypesList.isEmpty, tagsList.isEmpty) match
-            case (true, true) =>
+          (eventTypesList.isEmpty, tagsList.isEmpty, maxEvents) match
+            case (true, true, None) =>
               Stream
                 .eval(session.prepare(readAllQuery))
                 .flatMap(
                   _.stream(fromPosition, FetchSize),
                 )
-            case (false, true) =>
+            case (true, true, Some(max)) =>
+              Stream
+                .eval(session.prepare(readAllLimitedQuery))
+                .flatMap(
+                  _.stream(fromPosition *: max *: EmptyTuple, FetchSize),
+                )
+            case (false, true, None) =>
               Stream
                 .eval(session.prepare(readByEventTypesQuery(eventTypesList.size)))
                 .flatMap(
                   _.stream(fromPosition *: eventTypesList *: EmptyTuple, FetchSize),
                 )
-            case (true, false) =>
+            case (false, true, Some(max)) =>
+              Stream
+                .eval(session.prepare(readByEventTypesLimitedQuery(eventTypesList.size)))
+                .flatMap(
+                  _.stream(fromPosition *: eventTypesList *: max *: EmptyTuple, FetchSize),
+                )
+            case (true, false, None) =>
               Stream
                 .eval(session.prepare(readByTagsQuery(tagsList.size)))
                 .flatMap(
                   _.stream(fromPosition *: tagsList *: EmptyTuple, FetchSize),
                 )
-            case (false, false) =>
+            case (true, false, Some(max)) =>
+              Stream
+                .eval(session.prepare(readByTagsLimitedQuery(tagsList.size)))
+                .flatMap(
+                  _.stream(fromPosition *: tagsList *: max *: EmptyTuple, FetchSize),
+                )
+            case (false, false, None) =>
               Stream
                 .eval(session.prepare(readByBothQuery(eventTypesList.size, tagsList.size)))
                 .flatMap(
                   _.stream(fromPosition *: eventTypesList *: tagsList *: EmptyTuple, FetchSize),
+                )
+            case (false, false, Some(max)) =>
+              Stream
+                .eval(session.prepare(readByBothLimitedQuery(eventTypesList.size, tagsList.size)))
+                .flatMap(
+                  _.stream(fromPosition *: eventTypesList *: tagsList *: max *: EmptyTuple, FetchSize),
                 )
 
         rowStream.evalMap { case (seqNum, eventType, tags, payload, recordedAt) =>
@@ -137,12 +162,23 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
       }
     }
 
-  /** Returns a stream that emits Unit whenever new events are appended to the store. Uses PostgreSQL NOTIFY/LISTEN for
-    * cross-process notifications, enabling horizontal scaling of projectors across multiple application instances.
+  /** Returns a stream of notifications for new events appended to the store. Notifications are sent via PostgreSQL's
+    * NOTIFY/LISTEN mechanism. Each notification payload is decoded into a EventStoreNotification.
     */
-  override def notification: Stream[F, Unit] =
+  override def notification(projectionName: String): Stream[F, EventStoreNotification] =
     Stream.resource(pool).flatMap { session =>
-      session.channel(channelId).listen(1024).void
+      session
+        .channel(channelId)
+        .listen(1024)
+        .map { notif =>
+          PostgresNotification.decode(notif.value)
+        }
+        .collect {
+          case p @ EventStoreNotification.EventsAppended                                               => p
+          case p @ EventStoreNotification.PauseProjection(proj) if proj == projectionName              => p
+          case p @ EventStoreNotification.ResumeProjection(proj) if proj == projectionName             => p
+          case p @ EventStoreNotification.UpdateCheckpointIndex(proj, index) if proj == projectionName => p
+        }
     }
 
   private def checkForConflicts(
@@ -329,6 +365,15 @@ object PostgresEventStore:
       ORDER BY sequence_number ASC
     """.query(eventDecoder)
 
+  private val readAllLimitedQuery: Query[Long *: Int *: EmptyTuple, EventRow] =
+    sql"""
+      SELECT sequence_number, event_type, tags, payload, recorded_at
+      FROM events
+      WHERE sequence_number > $int8
+      ORDER BY sequence_number ASC
+      LIMIT $int4
+    """.query(eventDecoder)
+
   private def readByEventTypesQuery(
     numEventTypes: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
@@ -340,17 +385,49 @@ object PostgresEventStore:
       ORDER BY sequence_number ASC
     """.query(eventDecoder)
 
+  private def readByEventTypesLimitedQuery(
+    numEventTypes: Int,
+  ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
+    sql"""
+      SELECT sequence_number, event_type, tags, payload, recorded_at
+      FROM events
+      WHERE sequence_number > $int8
+        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+      ORDER BY sequence_number ASC
+      LIMIT $int4
+    """.query(eventDecoder)
+
   private def readByTagsQuery(
     numTags: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT DISTINCT ON (e.sequence_number)
-        e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
-      FROM event_tags et
-      JOIN events e ON e.sequence_number = et.sequence_number
-      WHERE et.sequence_number > $int8
-        AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+      SELECT e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      FROM events e
+      WHERE e.sequence_number > $int8
+        AND EXISTS (
+          SELECT 1
+          FROM event_tags et
+          WHERE et.sequence_number = e.sequence_number
+            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        )
       ORDER BY e.sequence_number ASC
+    """.query(eventDecoder)
+
+  private def readByTagsLimitedQuery(
+    numTags: Int,
+  ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
+    sql"""
+      SELECT e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      FROM events e
+      WHERE e.sequence_number > $int8
+        AND EXISTS (
+          SELECT 1
+          FROM event_tags et
+          WHERE et.sequence_number = e.sequence_number
+            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        )
+      ORDER BY e.sequence_number ASC
+      LIMIT $int4
     """.query(eventDecoder)
 
   private def readByBothQuery(
@@ -358,12 +435,34 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT DISTINCT ON (e.sequence_number)
-        e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
-      FROM event_tags et
-      JOIN events e ON e.sequence_number = et.sequence_number
-      WHERE et.sequence_number > $int8
+      SELECT e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      FROM events e
+      WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-        AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        AND EXISTS (
+          SELECT 1
+          FROM event_tags et
+          WHERE et.sequence_number = e.sequence_number
+            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        )
       ORDER BY e.sequence_number ASC
+    """.query(eventDecoder)
+
+  private def readByBothLimitedQuery(
+    numEventTypes: Int,
+    numTags: Int,
+  ): Query[Long *: List[String] *: List[String] *: Int *: EmptyTuple, EventRow] =
+    sql"""
+      SELECT e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      FROM events e
+      WHERE e.sequence_number > $int8
+        AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+        AND EXISTS (
+          SELECT 1
+          FROM event_tags et
+          WHERE et.sequence_number = e.sequence_number
+            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        )
+      ORDER BY e.sequence_number ASC
+      LIMIT $int4
     """.query(eventDecoder)

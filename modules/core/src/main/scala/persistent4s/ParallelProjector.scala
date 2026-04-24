@@ -23,15 +23,42 @@ import cats.effect.Deferred
 import cats.effect.Ref
 import cats.syntax.all.*
 import fs2.Stream
+import persistent4s.EventStoreNotification.*
 
+/** A [[Projector]] implementation that processes events for distinct keys in parallel within each batch.
+  *
+  * Within a batch, events are grouped by key. Each key's event sequence is folded independently and all keys are
+  * processed concurrently via [[Parallel]]. If every key succeeds the resulting states and checkpoint are persisted in
+  * one shot. If any key fails the batch falls back to the sequential strategy of [[DefaultProjector]]: events are
+  * replayed in order and progress is saved up to the last successfully processed position before the error is
+  * re-raised.
+  *
+  * The notification, pause/resume, and checkpoint-reset mechanics are identical to [[DefaultProjector]].
+  *
+  * @param eventStore
+  *   the event store to read from, which must also implement [[EventNotification]]
+  * @param checkpoint
+  *   durable storage for the last processed position per projection
+  * @param batchSize
+  *   maximum number of events processed in a single batch (default: 100)
+  * @param maxBatchPerPass
+  *   maximum number of batches read in a single wake-up pass (default: 10)
+  */
 final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
   checkpoint: ProjectionCheckpoint[F],
   batchSize: Int = 100,
+  maxBatchPerPass: Int = 10,
 ) extends Projector[F, A]:
+
+  final private case class Work(
+    pendingEvents: Boolean,
+    notif: Option[EventStoreNotification],
+  )
 
   final private case class WakeupState(
     pending: Boolean,
+    processNotif: Option[EventStoreNotification],
     signal: Deferred[F, Unit],
   )
 
@@ -41,16 +68,26 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
     lastProcessedPosition: Option[Long],
   )
 
-  // TODO How should we handle failure? What do we do if the process dies?
   override def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit] = {
 
-    def persistProgress(progress: BatchProgress[K, S]): F[Unit] =
+    def persistProgress(
+      progress: BatchProgress[K, S],
+      projectionState: Ref[F, ProjectionCheckpointState],
+      error: Option[Throwable] = None,
+    ): F[Unit] =
       val statesToPersist = progress.dirtyKeys.map { key =>
         key -> progress.stateCache.getOrElse(key, None)
       }.toMap
-      projection.persistStates(statesToPersist) *> progress.lastProcessedPosition
-        .traverse_(checkpoint.save(projection.name, _))
-        .void
+      for {
+        current <- projectionState.get
+        next     = current.copy(
+                 globalPosition = progress.lastProcessedPosition.getOrElse(current.globalPosition),
+                 error = error.map(formatError),
+               )
+        _ <- projection.persistStates(statesToPersist)
+        _ <- checkpoint.save(next)
+        _ <- projectionState.set(next)
+      } yield ()
 
     def processEvent(
       progress: BatchProgress[K, S],
@@ -72,7 +109,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
           )
         }
 
-    def processBatch(batch: List[EventEnvelope[A]]): F[Unit] =
+    def processBatch(batch: List[EventEnvelope[A]], projectionState: Ref[F, ProjectionCheckpointState]): F[Unit] =
       if (batch.isEmpty) Applicative[F].unit
       else {
         val keyToEvents: Map[K, List[EventEnvelope[A]]] =
@@ -95,8 +132,12 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
 
           _ <- parallelResult match {
                  case Right(keyStatesList) =>
-                   projection.persistStates(keyStatesList.toMap) *>
-                     checkpoint.save(projection.name, batch.last.metadata.globalPosition)
+                   val finalProgress = BatchProgress[K, S](
+                     stateCache = keyStatesList.toMap,
+                     dirtyKeys = keyStatesList.map(_._1).toSet,
+                     lastProcessedPosition = Some(batch.last.metadata.globalPosition),
+                   )
+                   persistProgress(finalProgress, projectionState)
 
                  case Left(_) =>
                    val progress0 = BatchProgress[K, S](
@@ -107,52 +148,135 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
                    batch
                      .foldLeftM(progress0) { (progress, event) =>
                        processEvent(progress, event).handleErrorWith { error =>
-                         persistProgress(progress) *> Async[F].raiseError(error)
+                         persistProgress(progress, projectionState, Some(error)) *> Async[F].raiseError(error)
                        }
                      }
-                     .flatMap(persistProgress)
+                     .flatMap(progress => persistProgress(progress, projectionState))
                }
         } yield ()
       }
 
-    def processEvents: Stream[F, Unit] =
+    def processEvents(projectionState: Ref[F, ProjectionCheckpointState]): Stream[F, Unit] =
       Stream
-        .eval(checkpoint.load(projection.name))
-        .flatMap { lastPosition =>
-          eventStore.readFrom(lastPosition.getOrElse(-1L), projection.filter)
+        .eval(projectionState.get)
+        .flatMap { checkpointState =>
+          eventStore.readFrom(
+            checkpointState.globalPosition,
+            projection.filter,
+            Some(batchSize * maxBatchPerPass),
+          )
         }
         .chunkN(batchSize)
-        .evalMap(chunk => processBatch(chunk.toList))
+        .evalMap(chunk => processBatch(chunk.toList, projectionState))
+
+    def notificationHandler(wakeupState: Ref[F, WakeupState], notification: EventStoreNotification): F[Unit] =
+      notification match {
+        case EventsAppended      => markPending(wakeupState)
+        case UnknownNotification => Applicative[F].unit
+        case other               => markNotification(wakeupState, other)
+      }
+
+    def markNotification(wakeupState: Ref[F, WakeupState], notification: EventStoreNotification): F[Unit] =
+      wakeupState.modify {
+        case WakeupState(false, _, signal) =>
+          WakeupState(
+            pending = false,
+            processNotif = Some(notification),
+            signal = signal,
+          ) -> signal.complete(()).void
+
+        case WakeupState(true, _, signal) =>
+          WakeupState(
+            pending = true,
+            processNotif = Some(notification),
+            signal = signal,
+          ) -> Applicative[F].unit
+      }.flatten
 
     def markPending(wakeupState: Ref[F, WakeupState]): F[Unit] =
       wakeupState.modify {
-        case current @ WakeupState(true, _) =>
+        case current @ WakeupState(true, _, _) =>
           current -> Applicative[F].unit
-        case WakeupState(false, signal) =>
-          WakeupState(pending = true, signal) -> signal.complete(()).void
+        case WakeupState(false, notif, signal) =>
+          WakeupState(pending = true, notif, signal) -> signal.complete(()).void
       }.flatten
 
-    def awaitWork(wakeupState: Ref[F, WakeupState]): F[Unit] =
+    def awaitWork(wakeupState: Ref[F, WakeupState]): F[Work] =
       Deferred[F, Unit].flatMap { nextSignal =>
         wakeupState.modify {
-          case WakeupState(true, _) =>
-            WakeupState(pending = false, nextSignal) -> Applicative[F].unit
-          case current @ WakeupState(false, signal) =>
-            current -> (signal.get *> awaitWork(wakeupState))
+          case WakeupState(false, None, signal) =>
+            WakeupState(false, None, signal) -> (signal.get *> awaitWork(wakeupState))
+
+          case WakeupState(pending, notif, _) =>
+            WakeupState(
+              pending = false,
+              processNotif = None,
+              signal = nextSignal,
+            ) -> Applicative[F].pure(Work(pendingEvents = pending, notif = notif))
         }.flatten
       }
 
-    Stream.eval(Deferred[F, Unit]).flatMap { initialSignal =>
-      Stream.eval(Ref.of[F, WakeupState](WakeupState(pending = true, initialSignal))).flatMap { wakeupState =>
-        val notifications =
-          eventStore.notification.evalMap(_ => markPending(wakeupState)).drain
+    def processNotification(
+      notif: EventStoreNotification,
+      projectionState: Ref[F, ProjectionCheckpointState],
+      wakeupState: Ref[F, WakeupState],
+    ): F[Unit] =
 
-        val projector =
-          Stream
-            .repeatEval(awaitWork(wakeupState))
-            .flatMap(_ => processEvents)
+      def saveState(update: ProjectionCheckpointState => ProjectionCheckpointState): F[Unit] =
+        for {
+          current <- projectionState.get
+          next     = update(current)
+          _       <- checkpoint.save(next)
+          _       <- projectionState.set(next)
+        } yield ()
 
-        projector.concurrently(notifications)
+      notif match {
+        case PauseProjection(_)              => saveState(_.copy(running = false))
+        case ResumeProjection(_)             => saveState(_.copy(running = true, error = None)) *> markPending(wakeupState)
+        case UpdateCheckpointIndex(_, index) =>
+          saveState(_.copy(globalPosition = index, error = None)) *> markPending(wakeupState)
+        case _ => Applicative[F].unit
       }
+
+    def formatError(e: Throwable): String =
+      s"${e.getClass.getSimpleName}: ${e.getMessage}\n${e.getStackTrace.mkString("\n")}"
+
+    Stream.eval {
+      for {
+        maybeState      <- checkpoint.load(projection.name)
+        initialState     = maybeState.getOrElse(ProjectionCheckpointState(projection.name, -1L, true, None))
+        projectionState <- Ref.of[F, ProjectionCheckpointState](initialState)
+        initialSignal   <- Deferred[F, Unit]
+        wakeupState     <- Ref.of[F, WakeupState](
+                         WakeupState(
+                           pending = true,
+                           processNotif = None,
+                           signal = initialSignal,
+                         ),
+                       )
+      } yield (projectionState, wakeupState)
+    }.flatMap { case (projectionState, wakeupState) =>
+      val notifications =
+        eventStore
+          .notification(projection.name)
+          .evalMap(notification => notificationHandler(wakeupState, notification))
+          .drain
+
+      val projector =
+        Stream
+          .repeatEval(awaitWork(wakeupState))
+          .evalMap { work =>
+            for {
+              _     <- work.notif.traverse_(notif => processNotification(notif, projectionState, wakeupState))
+              state <- projectionState.get
+              _     <-
+                if (state.running && work.pendingEvents)
+                  processEvents(projectionState).compile.drain
+                else
+                  Applicative[F].unit
+            } yield ()
+          }
+
+      projector.concurrently(notifications)
     }
   }

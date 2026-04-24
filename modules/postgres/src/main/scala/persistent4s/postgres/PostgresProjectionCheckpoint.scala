@@ -22,7 +22,7 @@ import skunk.*
 import skunk.implicits.*
 import skunk.codec.all.*
 
-import persistent4s.ProjectionCheckpoint
+import persistent4s.{ProjectionCheckpoint, ProjectionCheckpointState}
 
 /** A PostgreSQL-backed implementation of ProjectionCheckpoint. Checkpoints are stored in a `projection_checkpoints`
   * table, keyed by projection name. This survives application restarts, allowing projectors to resume from where they
@@ -37,34 +37,44 @@ final class PostgresProjectionCheckpoint[F[_]: Async] private (
 
   import PostgresProjectionCheckpoint.*
 
-  override def load(projectionName: String): F[Option[Long]] =
+  override def load(projectionName: String): F[Option[ProjectionCheckpointState]] =
     pool.use(_.option(loadQuery)(projectionName))
 
-  override def save(projectionName: String, globalPosition: Long): F[Unit] =
-    pool.use(_.execute(upsertCommand)(projectionName *: globalPosition *: EmptyTuple)).void
+  override def save(state: ProjectionCheckpointState): F[Unit] =
+    pool
+      .use(
+        _.execute(upsertCommand)(
+          state.projectionName *: state.globalPosition *: state.running *: state.error *: EmptyTuple,
+        ),
+      )
+      .void
 
 object PostgresProjectionCheckpoint:
 
-  private val loadQuery: Query[String, Long] =
+  private val loadQuery: Query[String, ProjectionCheckpointState] =
     sql"""
-      SELECT global_position
+      SELECT projection_name, global_position, running, error
       FROM projection_checkpoints
       WHERE projection_name = $text
-    """.query(int8)
+    """.query(text *: int8 *: bool *: text.opt).to[ProjectionCheckpointState]
 
-  private val upsertCommand: Command[String *: Long *: EmptyTuple] =
+  private val upsertCommand: Command[String *: Long *: Boolean *: Option[String] *: EmptyTuple] =
     sql"""
-      INSERT INTO projection_checkpoints (projection_name, global_position)
-      VALUES ($text, $int8)
+      INSERT INTO projection_checkpoints (projection_name, global_position, running, error)
+      VALUES ($text, $int8, $bool, ${text.opt})
       ON CONFLICT (projection_name) DO UPDATE SET
-        global_position = EXCLUDED.global_position
+        global_position = EXCLUDED.global_position,
+        running = EXCLUDED.running,
+        error = EXCLUDED.error
     """.command
 
   val createTableCommand: Command[Void] =
     sql"""
       CREATE TABLE IF NOT EXISTS projection_checkpoints (
         projection_name TEXT   PRIMARY KEY,
-        global_position BIGINT NOT NULL
+        global_position BIGINT NOT NULL,
+        running BOOLEAN NOT NULL,
+        error TEXT
       )
     """.command
 

@@ -1,0 +1,21 @@
+<configuration>
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <root level="WARN">
+    <appender-ref ref="STDOUT" />
+  </root>
+
+  <!-- Testcontainers: keep container lifecycle messages visible -->
+  <logger name="org.testcontainers" level="INFO" />
+  <logger name="tc" level="INFO" />
+
+  <!-- docker-java and its shaded Apache HTTP client wire/header logs -->
+  <logger name="com.github.dockerjava" level="WARN" />
+
+  <!-- Skunk connection-level debug -->
+  <logger name="skunk" level="WARN" />
+</configuration>
