@@ -21,7 +21,7 @@ val CatsEffectV = "3.7.0"
 
 val Fs2V = "3.13.0"
 
-val SkunkV = "0.6.5"
+val SkunkV = "1.0.0"
 
 val CirceV = "0.14.15"
 
