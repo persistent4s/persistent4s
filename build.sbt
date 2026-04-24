@@ -66,6 +66,7 @@ lazy val postgres = (project in file("modules/postgres"))
     libraryDependencies ++= List(
       "org.tpolecat"          %% "skunk-core"      % SkunkV,
       "org.tpolecat"          %% "skunk-circe"     % SkunkV,
+      "org.tpolecat"          %% "natchez-core"    % "0.3.7",
       "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
       "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
       "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
