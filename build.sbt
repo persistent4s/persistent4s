@@ -21,7 +21,7 @@ val CatsEffectV = "3.7.0"
 
 val Fs2V = "3.13.0"
 
-val SkunkV = "0.6.5"
+val SkunkV = "1.0.0"
 
 val CirceV = "0.14.15"
 
@@ -66,7 +66,7 @@ lazy val postgres = (project in file("modules/postgres"))
     libraryDependencies ++= List(
       "org.tpolecat"          %% "skunk-core"      % SkunkV,
       "org.tpolecat"          %% "skunk-circe"     % SkunkV,
-      "org.tpolecat"          %% "natchez-core"    % "0.3.7",
+      "org.typelevel"         %% "otel4s-core"     % Otel4sV,
       "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
       "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
       "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
