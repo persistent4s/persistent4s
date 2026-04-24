@@ -16,13 +16,12 @@
 
 package persistent4s.examples.library.domain
 
-import io.circe.*
-import io.circe.syntax.*
+import io.circe.{Decoder, Encoder}
 
 import java.time.OffsetDateTime
+import java.util.UUID
 
 import persistent4s.Event
-import java.util.UUID
 
 sealed trait LibraryEvent extends Event
 
@@ -60,20 +59,3 @@ final case class BookReturned(
   memberId: UUID,
   returnedAt: OffsetDateTime,
 ) extends BorrowingEvent derives Encoder, Decoder
-
-object LibraryEvent:
-
-  def encoder(event: LibraryEvent): Json =
-    event match
-      case e: BookAdded        => e.asJson
-      case e: MemberRegistered => e.asJson
-      case e: BookBorrowed     => e.asJson
-      case e: BookReturned     => e.asJson
-
-  def decoder(eventType: String, json: Json): Either[DecodingFailure, LibraryEvent] =
-    eventType match
-      case "BookAdded"        => json.as[BookAdded]
-      case "MemberRegistered" => json.as[MemberRegistered]
-      case "BookBorrowed"     => json.as[BookBorrowed]
-      case "BookReturned"     => json.as[BookReturned]
-      case other              => Left(DecodingFailure(s"Unknown event type: $other", Nil))

@@ -42,14 +42,11 @@ final class LibraryModule private (
 
 object LibraryModule:
 
-  val eventCodec: EventCodec[LibraryEvent] = CirceEventCodec.make[LibraryEvent](
-    encodeEvent = LibraryEvent.encoder.apply,
-    decodeEvent = (eventType, json) => LibraryEvent.decoder(eventType.value, json).left.map(e => e: Throwable),
-  )
+  val eventCodec: EventCodec[LibraryEvent] = CirceEventCodec.derived[LibraryEvent]
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
     for
-      resources <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      resources <- PostgresModule.make[IO, LibraryEvent](eventCodec)
       store      = resources.eventStore
       checkpoint = resources.checkpoint
       config    <- Resource.eval(loadConfig(configPath))
