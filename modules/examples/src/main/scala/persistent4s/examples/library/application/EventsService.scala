@@ -21,7 +21,7 @@ import cats.effect.IO
 import persistent4s.EventFilter
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.infrastructure.LibraryModule
-import smithy4s.Timestamp
+import smithy4s.time.Timestamp
 
 class EventsServiceImpl(module: LibraryModule) extends EventsService[IO]:
 
