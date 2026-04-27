@@ -181,6 +181,14 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
         }
     }
 
+  /** Sends a notification to all listeners on the PostgreSQL channel.
+    *
+    * @param n
+    *   the notification to send
+    */
+  def notify(n: EventStoreNotification): F[Unit] =
+    pool.use(_.channel(channelId).notify(PostgresNotification.encode(n)))
+
   private def checkForConflicts(
     session: Session[F],
     tags: Set[Tag],

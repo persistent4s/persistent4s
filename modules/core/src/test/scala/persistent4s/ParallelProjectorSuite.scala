@@ -111,6 +111,8 @@ object ParallelProjectorSuite extends SimpleIOSuite:
     def save(projectionCheckpointState: ProjectionCheckpointState): IO[Unit] =
       state.update(_.updated(projectionCheckpointState.projectionName, projectionCheckpointState))
 
+    def loadAll(): IO[List[ProjectionCheckpointState]] = state.get.map(_.values.toList)
+
     def getAll: IO[Map[String, ProjectionCheckpointState]] = state.get
 
   object InMemoryCheckpoint:

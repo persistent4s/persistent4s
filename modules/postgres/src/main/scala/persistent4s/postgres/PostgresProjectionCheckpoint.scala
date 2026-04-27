@@ -49,6 +49,17 @@ final class PostgresProjectionCheckpoint[F[_]: Async] private (
       )
       .void
 
+  /** Load all checkpoints stored in the database.
+    *
+    * Returns the current state of every projection that has ever been saved. Useful for monitoring
+    * and admin tooling where a full view across all projections is needed.
+    *
+    * @return
+    *   a list of all stored [[persistent4s.ProjectionCheckpointState]] values
+    */
+  override def loadAll(): F[List[ProjectionCheckpointState]] =
+    pool.use(_.execute(loadAllQuery))
+
 object PostgresProjectionCheckpoint:
 
   private val loadQuery: Query[String, ProjectionCheckpointState] =
@@ -56,6 +67,13 @@ object PostgresProjectionCheckpoint:
       SELECT projection_name, global_position, running, error
       FROM projection_checkpoints
       WHERE projection_name = $text
+    """.query(text *: int8 *: bool *: text.opt).to[ProjectionCheckpointState]
+
+  private val loadAllQuery: Query[Void, ProjectionCheckpointState] =
+    sql"""
+      SELECT projection_name, global_position, running, error
+      FROM projection_checkpoints
+      ORDER BY projection_name ASC
     """.query(text *: int8 *: bool *: text.opt).to[ProjectionCheckpointState]
 
   private val upsertCommand: Command[String *: Long *: Boolean *: Option[String] *: EmptyTuple] =

@@ -50,3 +50,13 @@ trait ProjectionCheckpoint[F[_]]:
     *   the state of the projection checkpoint to save
     */
   def save(projectionCheckpointState: ProjectionCheckpointState): F[Unit]
+
+  /** Load all checkpoints stored in the backend.
+    *
+    * Returns the current state of every projection that has ever been saved. Useful for monitoring
+    * and admin tooling where a full view across all projections is needed.
+    *
+    * @return
+    *   a list of all stored [[ProjectionCheckpointState]] values
+    */
+  def loadAll(): F[List[ProjectionCheckpointState]]

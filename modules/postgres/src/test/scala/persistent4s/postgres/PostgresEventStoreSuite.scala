@@ -31,7 +31,7 @@ given Meter[IO] = Meter.Implicits.noop
 
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
-import persistent4s.{EventFilter, IndexConflictException, Tag}
+import persistent4s.{EventFilter, EventStoreNotification, IndexConflictException, Tag}
 import weaver.IOSuite
 import persistent4s.EventTypeName
 import persistent4s.Event
@@ -235,4 +235,8 @@ object PostgresEventStoreSuite extends IOSuite:
                   )
                   .attempt
     yield expect(isConflict(result))
+  }
+
+  test("notify completes without error") { eventStore =>
+    eventStore.notify(EventStoreNotification.PauseProjection("test-proj")).as(success)
   }
