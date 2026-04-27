@@ -47,7 +47,7 @@ val PureconfigV = "0.17.8"
 
 lazy val root = (project in file("."))
   .enablePlugins(NoPublishPlugin)
-  .aggregate(core, postgres, circe, kafka, testkit, tests, examples)
+  .aggregate(core, postgres, circe, kafka, testkit, tests, examples, monitoring)
 
 lazy val core = (project in file("modules/core"))
   .settings(
@@ -122,7 +122,7 @@ lazy val tests = (project in file("modules/tests"))
   )
 
 lazy val examples = (project in file("modules/examples"))
-  .dependsOn(core, testkit, postgres, circe)
+  .dependsOn(core, testkit, postgres, circe, monitoring)
   .enablePlugins(NoPublishPlugin, Smithy4sCodegenPlugin)
   .settings(
     name                 := "persistent4s-examples",
@@ -131,6 +131,21 @@ lazy val examples = (project in file("modules/examples"))
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s-swagger" % Smithy4sV,
       "org.http4s"                   %% "http4s-ember-server"     % Http4sV,
       "ch.qos.logback"                % "logback-classic"         % LogbackV,
+    ),
+  )
+
+lazy val monitoring = (project in file("modules/monitoring"))
+  .dependsOn(core, postgres % Test)
+  .settings(
+    name                 := "persistent4s-monitoring",
+    libraryDependencies ++= List(
+      "org.http4s"        %% "http4s-ember-server" % Http4sV,
+      "org.http4s"        %% "http4s-dsl"          % Http4sV,
+      "org.typelevel"     %% "weaver-cats"         % WeaverV         % Test,
+      "ch.qos.logback"     % "logback-classic"     % LogbackV        % Test,
+      "org.testcontainers" % "postgresql"          % TestcontainersV % Test,
+      "org.http4s"        %% "http4s-ember-client" % Http4sV         % Test,
+      "org.typelevel"     %% "otel4s-core"         % Otel4sV,
     ),
   )
 
