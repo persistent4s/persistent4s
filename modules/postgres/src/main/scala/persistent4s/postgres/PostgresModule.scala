@@ -20,7 +20,8 @@ import cats.effect.*
 import cats.effect.std.Console
 import cats.syntax.all.*
 import fs2.io.net.Network
-import natchez.Trace
+import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.ConfigSource
@@ -95,7 +96,7 @@ object PostgresModule:
     *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint, or fails with a clear error
     *   message
     */
-  def make[F[_]: Async: Network: Trace: Console, A <: Event](
+  def make[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
   ): Resource[F, Components[F, A]] =
@@ -123,7 +124,7 @@ object PostgresModule:
     * @return
     *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint
     */
-  def makeWithConfig[F[_]: Async: Network: Trace: Console, A <: Event](
+  def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
   ): Resource[F, Components[F, A]] =
@@ -152,14 +153,16 @@ object PostgresModule:
         )
     }
 
-  private def createSessionPool[F[_]: Async: Network: Trace: Console](
+  private def createSessionPool[F[_]: Async: Network: Tracer: Meter: Console](
     config: PostgresConfig,
   ): Resource[F, Resource[F, Session[F]]] =
     Session
-      .pooled[F](
-        host = config.host, port = config.port, user = config.user, password = Some(config.password),
-        database = config.database, max = config.maxConnections,
-      )
+      .Builder[F]
+      .withHost(config.host)
+      .withPort(config.port)
+      .withUserAndPassword(config.user, config.password)
+      .withDatabase(config.database)
+      .pooled(config.maxConnections)
       .adaptError { case e => PostgresModuleError.ConnectionFailed(e) }
 
   private def initializeDatabase[F[_]: Async](

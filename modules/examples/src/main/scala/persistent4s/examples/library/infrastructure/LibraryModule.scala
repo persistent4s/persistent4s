@@ -18,7 +18,13 @@ package persistent4s.examples.library.infrastructure
 
 import cats.effect.*
 import fs2.io.net.Network
-import natchez.Trace.Implicits.noop
+import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.otel4s.trace.Tracer
+
+given Tracer[IO] = Tracer.Implicits.noop
+
+given Meter[IO] = Meter.Implicits.noop
+
 import pureconfig.ConfigSource
 import skunk.*
 
@@ -42,21 +48,21 @@ final class LibraryModule private (
 
 object LibraryModule:
 
-  val eventCodec: EventCodec[LibraryEvent] = CirceEventCodec.make[LibraryEvent](
-    encodeEvent = LibraryEvent.encoder.apply,
-    decodeEvent = (eventType, json) => LibraryEvent.decoder(eventType.value, json).left.map(e => e: Throwable),
-  )
+  val eventCodec: EventCodec[LibraryEvent] = CirceEventCodec.derived[LibraryEvent]
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
     for
-      resources <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      resources <- PostgresModule.make[IO, LibraryEvent](eventCodec)
       store      = resources.eventStore
       checkpoint = resources.checkpoint
       config    <- Resource.eval(loadConfig(configPath))
-      viewPool  <- Session.pooled[IO](
-                    host = config.host, port = config.port, user = config.user, password = Some(config.password),
-                    database = config.database, max = config.maxConnections,
-                  )
+      viewPool  <- Session
+                    .Builder[IO]
+                    .withHost(config.host)
+                    .withPort(config.port)
+                    .withUserAndPassword(config.user, config.password)
+                    .withDatabase(config.database)
+                    .pooled(config.maxConnections)
       bookRepo       = BookRepository.make[IO](viewPool)
       memberRepo     = MemberRepository.make[IO](viewPool)
       borrowingRepo  = BorrowingRepository.make[IO](viewPool)

@@ -22,9 +22,9 @@ import persistent4s.EventStore
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.borrowing.*
-import smithy4s.Timestamp
 
 import java.util.UUID
+import smithy4s.time.Timestamp
 
 class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore[IO, LibraryEvent])
     extends BorrowingService[IO]:
