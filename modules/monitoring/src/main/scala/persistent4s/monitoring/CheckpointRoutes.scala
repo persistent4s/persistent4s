@@ -33,22 +33,26 @@ final class CheckpointRoutes[F[_]: Async](
   val routes: HttpRoutes[F] = HttpRoutes.of[F] {
 
     case GET -> Root =>
+      loadAll.flatMap { states =>
+        Ok(HtmlRenderer.render(states))
+          .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`)))
+      }.handleErrorWith { e =>
+        ServiceUnavailable(HtmlRenderer.renderError(e.getMessage))
+          .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`)))
+      }
+
+    case GET -> Root / "checkpoints" / "data" =>
       loadAll
-        .flatMap { states =>
-          Ok(HtmlRenderer.render(states))
-            .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`)))
-        }
-        .handleErrorWith { e =>
-          ServiceUnavailable(HtmlRenderer.renderError(e.getMessage))
-            .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`)))
-        }
+        .flatMap(states => Ok(HtmlRenderer.renderJson(states)))
+        .map(_.withContentType(`Content-Type`(MediaType.application.json, Charset.`UTF-8`)))
+        .handleErrorWith(_ => Ok("[]"))
 
     case POST -> Root / "checkpoints" / name / "pause" =>
       sendNotification(EventStoreNotification.PauseProjection(name))
         .flatMap(_ => SeeOther(Location(uri"/")))
         .handleErrorWith(_ =>
           ServiceUnavailable(HtmlRenderer.renderError("Failed to send notification"))
-            .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`)))
+            .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`))),
         )
 
     case POST -> Root / "checkpoints" / name / "resume" =>
@@ -56,7 +60,7 @@ final class CheckpointRoutes[F[_]: Async](
         .flatMap(_ => SeeOther(Location(uri"/")))
         .handleErrorWith(_ =>
           ServiceUnavailable(HtmlRenderer.renderError("Failed to send notification"))
-            .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`)))
+            .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`))),
         )
 
     case req @ POST -> Root / "checkpoints" / name / "index" =>
@@ -68,7 +72,7 @@ final class CheckpointRoutes[F[_]: Async](
               .flatMap(_ => SeeOther(Location(uri"/")))
               .handleErrorWith(_ =>
                 ServiceUnavailable(HtmlRenderer.renderError("Failed to send notification"))
-                  .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`)))
+                  .map(_.withContentType(`Content-Type`(MediaType.text.html, Charset.`UTF-8`))),
               )
       }
   }

@@ -22,16 +22,19 @@ import fs2.io.net.Network
 import org.http4s.ember.server.EmberServerBuilder
 import persistent4s.{EventStoreNotification, ProjectionCheckpoint}
 
+import scala.concurrent.duration.*
+
 object MonitoringServer:
 
   /** Start a developer-facing HTTP monitoring server for projection checkpoints.
     *
     * Serves a single HTML page at `GET /` showing the state of all projections. Provides
-    * `POST /checkpoints/{name}/pause`, `POST /checkpoints/{name}/resume`, and
-    * `POST /checkpoints/{name}/index` endpoints that send Postgres NOTIFY control messages.
+    * `POST /checkpoints/{name}/pause`, `POST /checkpoints/{name}/resume`, and `POST /checkpoints/{name}/index`
+    * endpoints that send Postgres NOTIFY control messages.
     *
-    * @note This server has no authentication. It binds to `0.0.0.0` by default — do not expose
-    *       it outside a local development environment without adding a reverse proxy or firewall rule.
+    * @note
+    *   This server has no authentication. It binds to `0.0.0.0` by default — do not expose it outside a local
+    *   development environment without adding a reverse proxy or firewall rule.
     *
     * @param checkpoint
     *   the Postgres checkpoint store used to load all projection states
@@ -50,6 +53,7 @@ object MonitoringServer:
       .default[F]
       .withHost(host"0.0.0.0")
       .withPort(port)
+      .withShutdownTimeout(2.seconds)
       .withHttpApp(routes.orNotFound)
       .build
       .map(_ => ())
