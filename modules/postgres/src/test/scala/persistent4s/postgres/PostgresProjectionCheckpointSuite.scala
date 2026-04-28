@@ -19,7 +19,6 @@ package persistent4s.postgres
 import java.util.UUID
 
 import cats.effect.{IO, Resource}
-import natchez.Trace.Implicits.noop
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.ProjectionCheckpointState
 import skunk.Session
@@ -35,10 +34,12 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
     postgresContainerResource.flatMap { container =>
       val cfg = postgresConfig(container)
       Session
-        .pooled[IO](
-          host = cfg.host, port = cfg.port, user = cfg.user, password = Some(cfg.password), database = cfg.database,
-          max = 4,
-        )
+        .Builder[IO]
+        .withHost(cfg.host)
+        .withPort(cfg.port)
+        .withUserAndPassword(cfg.user, cfg.password)
+        .withDatabase(cfg.database)
+        .pooled(cfg.maxConnections)
         .flatMap { pool =>
           for _ <- Resource.eval(pool.use(_.execute(PostgresProjectionCheckpoint.createTableCommand).void))
           yield PostgresProjectionCheckpoint.make[IO](pool)
@@ -149,5 +150,20 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
     yield expect.all(
       loadedA == Some(stateA),
       loadedB == Some(stateB),
+    )
+  }
+
+  test("loadAll returns all saved checkpoints including recently saved ones") { checkpoint =>
+    for
+      nameA <- freshName("projA")
+      nameB <- freshName("projB")
+      stateA = ProjectionCheckpointState(nameA, 10L, true, None)
+      stateB = ProjectionCheckpointState(nameB, 20L, false, Some("err"))
+      _     <- checkpoint.save(stateA)
+      _     <- checkpoint.save(stateB)
+      all   <- checkpoint.loadAll()
+    yield expect.all(
+      all.exists(_ == stateA),
+      all.exists(_ == stateB),
     )
   }

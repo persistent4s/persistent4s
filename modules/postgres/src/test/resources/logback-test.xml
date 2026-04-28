@@ -9,9 +9,8 @@
     <appender-ref ref="STDOUT" />
   </root>
 
-  <!-- Testcontainers: keep container lifecycle messages visible -->
-  <logger name="org.testcontainers" level="INFO" />
-  <logger name="tc" level="INFO" />
+  <logger name="org.testcontainers" level="WARN" />
+  <logger name="tc" level="WARN" />
 
   <!-- docker-java and its shaded Apache HTTP client wire/header logs -->
   <logger name="com.github.dockerjava" level="WARN" />
