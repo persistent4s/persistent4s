@@ -92,6 +92,7 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
         current <- projectionState.get
         next     = current.copy(
                  globalPosition = progress.lastProcessedPosition.getOrElse(current.globalPosition),
+                 running = if (error.isEmpty) current.running else false,
                  error = error.map(formatError),
                )
         _ <- projection.persistStates(statesToPersist)
@@ -236,6 +237,14 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
     def formatError(e: Throwable): String =
       s"${e.getClass.getSimpleName}: ${e.getMessage}\n${e.getStackTrace.mkString("\n")}"
 
+    def pauseWithError(projectionState: Ref[F, ProjectionCheckpointState])(error: Throwable): F[Unit] =
+      for {
+        current <- projectionState.get
+        next     = current.copy(running = false, error = Some(formatError(error)))
+        _       <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
+        _       <- projectionState.set(next)
+      } yield ()
+
     Stream.eval {
       for {
         maybeState      <- checkpoint.load(projection.name)
@@ -263,7 +272,7 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
         Stream
           .repeatEval(awaitWork(wakeupState))
           .evalMap { work =>
-            for {
+            (for {
               _         <- work.notif.traverse_(notif => processNotification(notif, projectionState, wakeupState))
               state     <- projectionState.get
               processed <- if (state.running && work.pendingEvents)
@@ -273,7 +282,7 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
               _ <-
                 if processed == passLimit then markPending(wakeupState)
                 else Applicative[F].unit
-            } yield ()
+            } yield ()).handleErrorWith(pauseWithError(projectionState))
           }
 
       projector.concurrently(notifications)
