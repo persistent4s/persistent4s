@@ -20,6 +20,8 @@ import cats.effect.{IO, IOApp}
 import com.comcast.ip4s.*
 import org.http4s.ember.server.EmberServerBuilder
 
+import scala.concurrent.duration.*
+
 object LibraryServer extends IOApp.Simple:
 
   def run: IO[Unit] =
@@ -29,6 +31,7 @@ object LibraryServer extends IOApp.Simple:
           .default[IO]
           .withHost(host"0.0.0.0")
           .withPort(port"8182")
+          .withShutdownTimeout(2.seconds)
           .withHttpApp(routes.orNotFound)
           .build
           .useForever
