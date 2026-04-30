@@ -23,7 +23,8 @@ import weaver.SimpleIOSuite
 object HtmlRendererSuite extends SimpleIOSuite:
 
   private val running = ProjectionCheckpointState("books", 42L, true, None)
-  private val paused  = ProjectionCheckpointState("members", 7L, false, Some("RuntimeException: boom"))
+
+  private val paused = ProjectionCheckpointState("members", 7L, false, Some("RuntimeException: boom"))
 
   test("render includes projection names") {
     val html = HtmlRenderer.render(List(running, paused))
@@ -60,10 +61,12 @@ object HtmlRendererSuite extends SimpleIOSuite:
 
   test("render set-index input has name=index and pre-filled value") {
     val html = HtmlRenderer.render(List(running))
-    IO.pure(expect.all(
-      html.contains("""name="index""""),
-      html.contains("""value="42""""),
-    ))
+    IO.pure(
+      expect.all(
+        html.contains("""name="index""""),
+        html.contains("""value="42""""),
+      ),
+    )
   }
 
   test("render with empty list contains no Running or Paused text") {

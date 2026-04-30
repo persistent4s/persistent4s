@@ -109,43 +109,43 @@ object CheckpointRoutesSuite extends SimpleIOSuite:
 
   test("GET / returns 503 when loadAll fails") {
     for
-      ref  <- Ref.of[IO, List[EventStoreNotification]](Nil)
-      app   = new CheckpointRoutes[IO](
-                IO.raiseError(new RuntimeException("DB down")),
-                n => ref.update(_ :+ n),
-              ).routes.orNotFound
+      ref <- Ref.of[IO, List[EventStoreNotification]](Nil)
+      app  = new CheckpointRoutes[IO](
+              IO.raiseError(new RuntimeException("DB down")),
+              n => ref.update(_ :+ n),
+            ).routes.orNotFound
       resp <- app.run(Request[IO](Method.GET, uri"/"))
     yield expect(resp.status == Status.ServiceUnavailable)
   }
 
   test("POST /checkpoints/{name}/pause returns 503 when sendNotification fails") {
     for
-      app  = new CheckpointRoutes[IO](
-               IO.pure(Nil),
-               _ => IO.raiseError(new RuntimeException("notify failed")),
-             ).routes.orNotFound
+      app = new CheckpointRoutes[IO](
+              IO.pure(Nil),
+              _ => IO.raiseError(new RuntimeException("notify failed")),
+            ).routes.orNotFound
       resp <- app.run(Request[IO](Method.POST, uri"/checkpoints/books/pause"))
     yield expect(resp.status == Status.ServiceUnavailable)
   }
 
   test("POST /checkpoints/{name}/resume returns 503 when sendNotification fails") {
     for
-      app  = new CheckpointRoutes[IO](
-               IO.pure(Nil),
-               _ => IO.raiseError(new RuntimeException("notify failed")),
-             ).routes.orNotFound
+      app = new CheckpointRoutes[IO](
+              IO.pure(Nil),
+              _ => IO.raiseError(new RuntimeException("notify failed")),
+            ).routes.orNotFound
       resp <- app.run(Request[IO](Method.POST, uri"/checkpoints/books/resume"))
     yield expect(resp.status == Status.ServiceUnavailable)
   }
 
   test("POST /checkpoints/{name}/index returns 503 when sendNotification fails") {
     for
-      body  = UrlForm("index" -> "1")
-      req   = Request[IO](Method.POST, uri"/checkpoints/books/index").withEntity(body)
-      app   = new CheckpointRoutes[IO](
-                IO.pure(Nil),
-                _ => IO.raiseError(new RuntimeException("notify failed")),
-              ).routes.orNotFound
+      body = UrlForm("index" -> "1")
+      req  = Request[IO](Method.POST, uri"/checkpoints/books/index").withEntity(body)
+      app  = new CheckpointRoutes[IO](
+              IO.pure(Nil),
+              _ => IO.raiseError(new RuntimeException("notify failed")),
+            ).routes.orNotFound
       resp <- app.run(req)
     yield expect(resp.status == Status.ServiceUnavailable)
   }

@@ -53,8 +53,8 @@ trait ProjectionCheckpoint[F[_]]:
 
   /** Load all checkpoints stored in the backend.
     *
-    * Returns the current state of every projection that has ever been saved. Useful for monitoring
-    * and admin tooling where a full view across all projections is needed.
+    * Returns the current state of every projection that has ever been saved. Useful for monitoring and admin tooling
+    * where a full view across all projections is needed.
     *
     * @return
     *   a list of all stored [[ProjectionCheckpointState]] values

@@ -89,7 +89,9 @@ object PostgresNotificationSuite extends SimpleIOSuite:
   }
 
   test("decode 'update_checkpoint_index:proj:99' produces UpdateCheckpointIndex") {
-    IO.pure(expect(PostgresNotification.decode("update_checkpoint_index:proj:99") == UpdateCheckpointIndex("proj", 99L)))
+    IO.pure(
+      expect(PostgresNotification.decode("update_checkpoint_index:proj:99") == UpdateCheckpointIndex("proj", 99L)),
+    )
   }
 
   test("decode an unrecognised string produces UnknownNotification") {
