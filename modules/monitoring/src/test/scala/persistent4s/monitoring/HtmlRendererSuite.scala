@@ -69,9 +69,9 @@ object HtmlRendererSuite extends SimpleIOSuite:
     )
   }
 
-  test("render with empty list contains no Running or Paused text") {
+  test("render with empty list contains no status cells") {
     val html = HtmlRenderer.render(Nil)
-    IO.pure(expect.all(!html.contains("Running"), !html.contains("Paused")))
+    IO.pure(expect.all(!html.contains("class=\"running\""), !html.contains("class=\"paused\"")))
   }
 
   test("renderError includes the error message") {
@@ -85,5 +85,5 @@ object HtmlRendererSuite extends SimpleIOSuite:
 
   test("render escapes HTML special characters in projection name") {
     val state = ProjectionCheckpointState("<script>", 0L, true, None)
-    IO.pure(expect(!HtmlRenderer.render(List(state)).contains("<script>")))
+    IO.pure(expect(HtmlRenderer.render(List(state)).contains("&lt;script&gt;")))
   }
