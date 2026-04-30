@@ -137,7 +137,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
 
       def name: String = "tracking"
 
-      def filter: EventFilter = eventFilter
+      def filter: Set[EventTypeName] = eventFilter.eventTypes
 
       def resolveKeys(event: EventEnvelope[TestEvent]): List[String] = resolveKeysF(event)
 
@@ -255,7 +255,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       fetchCount <- Ref.of[IO, Int](0)
       projection  = new Projection[IO, TestEvent, String, Int]:
                      def name: String = "tracking"
-                     def filter: EventFilter = EventFilter()
+                     def filter: Set[EventTypeName] = Set.empty
                      def resolveKeys(event: EventEnvelope[TestEvent]): List[String] =
                        event.payload match
                          case TestEvent.Created(id) => List(id)
@@ -363,7 +363,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       processed  <- Deferred[IO, EventEnvelope[TestEvent]]
       projection  = new StatelessProjection[IO, TestEvent]:
                      def name: String = "notif-test"
-                     def filter: EventFilter = EventFilter()
+                     def filter: Set[EventTypeName] = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        processed.complete(ev).void
       projector = DefaultProjector(store, checkpoint)
