@@ -33,7 +33,7 @@ import org.typelevel.otel4s.trace.Tracer
   *   - histogram `persistent4s.append.duration` (ms)
   *   - counter `persistent4s.conflicts` on [[IndexConflictException]]
   */
-final class InstrumentedEventStore[F[_]: Async: Tracer: Meter, A <: Event] private (
+final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
   inner: EventStore[F, A],
   eventsAppended: Counter[F, Long],
   eventsRead: Counter[F, Long],
@@ -58,7 +58,7 @@ final class InstrumentedEventStore[F[_]: Async: Tracer: Meter, A <: Event] priva
           start  <- Async[F].monotonic
           result <- inner.append(eventFilter, expectedIndex, events*).attempt
           end    <- Async[F].monotonic
-          _      <- appendDuration.record((end - start).toMillis.toDouble, filterAttrs*)
+          _      <- appendDuration.record((end - start).toNanos.toDouble / 1e6, filterAttrs*)
           _      <- result match
                       case Right(_) =>
                         eventsAppended.add(eventCount, filterAttrs*)
