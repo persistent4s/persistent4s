@@ -33,19 +33,34 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
     final case class Created(id: String) extends TestEvent
 
   final class FakeStore(ref: Ref[IO, Vector[EventEnvelope[TestEvent]]]) extends EventStore[IO, TestEvent]:
+
+    private def matches(env: EventEnvelope[TestEvent], f: EventFilter): Boolean =
+      (f.eventTypes.isEmpty || f.eventTypes.contains(env.metadata.eventType)) &&
+        (f.tags.isEmpty || env.metadata.tags.exists(f.tags.contains))
+
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
       evts: List[(Set[Tag], EventTypeName, TestEvent)]*,
     ): IO[Unit] =
-      ref.update { current =>
-        val last = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-        current ++ evts.flatten.zipWithIndex.map { case ((tags, et, ev), i) =>
-          EventEnvelope(EventMetadata(last + i.toLong + 1L, tags, et, java.time.Instant.now()), ev)
-        }
-      }
+      ref.modify { current =>
+        val relevant  = current.filter(matches(_, eventFilter))
+        val actualIdx = relevant.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
+        if actualIdx != expectedIndex then
+          (current, Left(IndexConflictException(expectedIndex, actualIdx)))
+        else
+          val last    = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
+          val newEvts = evts.flatten.zipWithIndex.map { case ((tags, et, ev), i) =>
+            EventEnvelope(EventMetadata(last + i.toLong + 1L, tags, et, java.time.Instant.now()), ev)
+          }
+          (current ++ newEvts, Right(()))
+      }.flatMap(_.fold(IO.raiseError, IO.pure))
+
     def readFrom(fromPosition: Long, eventFilter: EventFilter): Stream[IO, EventEnvelope[TestEvent]] =
-      Stream.eval(ref.get).flatMap(Stream.emits).filter(_.metadata.globalPosition > fromPosition)
+      Stream
+        .eval(ref.get)
+        .flatMap(Stream.emits)
+        .filter(env => matches(env, eventFilter) && env.metadata.globalPosition > fromPosition)
 
   final class ConflictingStore extends EventStore[IO, TestEvent]:
     def append(
@@ -94,7 +109,7 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
                         List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("a"))),
                       )
       events <- instrumented.readFrom(0L, EventFilter()).compile.toList
-    yield expect(events.size == 1)
+    yield expect(events.size == 1 && events.head.payload == TestEvent.Created("a"))
   }
 
   test("readFrom with fromPosition filters earlier events") {
