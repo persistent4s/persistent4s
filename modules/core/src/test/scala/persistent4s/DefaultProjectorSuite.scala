@@ -26,6 +26,12 @@ import scala.concurrent.duration.*
 
 object DefaultProjectorSuite extends SimpleIOSuite:
 
+  import org.typelevel.otel4s.metrics.Meter
+  import org.typelevel.otel4s.trace.Tracer
+
+  given Tracer[IO] = Tracer.Implicits.noop
+  given Meter[IO]  = Meter.Implicits.noop
+
   // ---------------------------------------------------------------------------
   // Test domain
   // ---------------------------------------------------------------------------
