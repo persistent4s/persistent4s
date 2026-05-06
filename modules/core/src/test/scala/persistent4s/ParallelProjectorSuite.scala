@@ -496,7 +496,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
     )
   }
 
-  test("parallel failure: falls back to sequential and persists partial progress up to the failed event") {
+  test("parallel failure: falls back to sequential and persists partial progress up to the failed event, pauses the projector with an error") {
     for
       store      <- InMemoryStore.make[TestEvent]
       checkpoint <- InMemoryCheckpoint.make
@@ -509,20 +509,22 @@ object ParallelProjectorSuite extends SimpleIOSuite:
              (Set(entityTag("b")), TestEvent.Created("b")), // pos 2 — fails; triggers fallback
              (Set(entityTag("c")), TestEvent.Created("c")), // pos 3 — never reached
            )
-      result    <- ParallelProjector(store, checkpoint).run(projection).compile.drain.attempt
-      persisted <- states.get
-      saved     <- checkpoint.getAll
+      result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+                  waitUntil(checkpoint.load("tracking").map(_.exists(_.error.isDefined))).timeout(2.seconds) *>
+                    (states.get, checkpoint.getAll).tupled
+                }
+      (persisted, saved) = result
     yield expect.all(
-      result.isLeft,
       persisted.contains("a"),                                               // state for pos 1 saved
       !persisted.contains("b"),                                              // state for pos 2 not saved (failed)
       !persisted.contains("c"),                                              // pos 3 never processed
       saved.get("tracking").map(_.globalPosition) == Some(1L),               // checkpoint at pos 1
+      saved.get("tracking").exists(!_.running),                              // projector is paused
       saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")), // error recorded
     )
   }
 
-  test("parallel failure on first event: no state persisted, checkpoint saved with error at initial position") {
+  test("parallel failure on first event: no state persisted, checkpoint saved with error at initial position, projector paused") {
     for
       store      <- InMemoryStore.make[TestEvent]
       checkpoint <- InMemoryCheckpoint.make
@@ -534,13 +536,15 @@ object ParallelProjectorSuite extends SimpleIOSuite:
              (Set(entityTag("a")), TestEvent.Created("a")), // pos 1 — fails immediately
              (Set(entityTag("b")), TestEvent.Created("b")), // pos 2 — never reached
            )
-      result    <- ParallelProjector(store, checkpoint).run(projection).compile.drain.attempt
-      persisted <- states.get
-      saved     <- checkpoint.getAll
+      result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+                  waitUntil(checkpoint.load("tracking").map(_.exists(_.error.isDefined))).timeout(2.seconds) *>
+                    (states.get, checkpoint.getAll).tupled
+                }
+      (persisted, saved) = result
     yield expect.all(
-      result.isLeft,
       persisted.isEmpty,
       saved.get("tracking").map(_.globalPosition) == Some(-1L),
+      saved.get("tracking").exists(!_.running), // projector is paused
       saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")),
     )
   }

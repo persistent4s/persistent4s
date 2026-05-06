@@ -82,6 +82,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         current <- projectionState.get
         next     = current.copy(
                  globalPosition = progress.lastProcessedPosition.getOrElse(current.globalPosition),
+                 running = if (error.isEmpty) current.running else false,
                  error = error.map(formatError),
                )
         _ <- projection.persistStates(statesToPersist)
@@ -156,18 +157,21 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         } yield ()
       }
 
-    def processEvents(projectionState: Ref[F, ProjectionCheckpointState]): Stream[F, Unit] =
-      Stream
-        .eval(projectionState.get)
-        .flatMap { checkpointState =>
-          eventStore.readFrom(
-            checkpointState.globalPosition,
-            projection.filter,
-            Some(batchSize * maxBatchPerPass),
-          )
-        }
-        .chunkN(batchSize)
-        .evalMap(chunk => processBatch(chunk.toList, projectionState))
+    def processEvents(projectionState: Ref[F, ProjectionCheckpointState]): F[Int] =
+      val passLimit = batchSize * maxBatchPerPass
+
+      for {
+        state  <- projectionState.get
+        events <- eventStore
+                    .readFrom(
+                      state.globalPosition,
+                      projection.filter,
+                      Some(passLimit),
+                    )
+                    .compile
+                    .toList
+        _ <- events.grouped(batchSize).toList.traverse_(batch => processBatch(batch, projectionState))
+      } yield events.size
 
     def notificationHandler(wakeupState: Ref[F, WakeupState], notification: EventStoreNotification): F[Unit] =
       notification match {
@@ -241,6 +245,14 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
     def formatError(e: Throwable): String =
       s"${e.getClass.getSimpleName}: ${e.getMessage}\n${e.getStackTrace.mkString("\n")}"
 
+    def pauseWithError(projectionState: Ref[F, ProjectionCheckpointState])(error: Throwable): F[Unit] =
+      for {
+        current <- projectionState.get
+        next     = current.copy(running = false, error = Some(formatError(error)))
+        _       <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
+        _       <- projectionState.set(next)
+      } yield ()
+
     Stream.eval {
       for {
         maybeState      <- checkpoint.load(projection.name)
@@ -262,19 +274,23 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
           .evalMap(notification => notificationHandler(wakeupState, notification))
           .drain
 
+      val passLimit = batchSize * maxBatchPerPass
+
       val projector =
         Stream
           .repeatEval(awaitWork(wakeupState))
           .evalMap { work =>
-            for {
-              _     <- work.notif.traverse_(notif => processNotification(notif, projectionState, wakeupState))
-              state <- projectionState.get
-              _     <-
-                if (state.running && work.pendingEvents)
-                  processEvents(projectionState).compile.drain
-                else
-                  Applicative[F].unit
-            } yield ()
+            (for {
+              _         <- work.notif.traverse_(notif => processNotification(notif, projectionState, wakeupState))
+              state     <- projectionState.get
+              processed <- if (state.running && work.pendingEvents)
+                             processEvents(projectionState)
+                           else
+                             Applicative[F].pure(0)
+              _ <-
+                if processed == passLimit then markPending(wakeupState)
+                else Applicative[F].unit
+            } yield ()).handleErrorWith(pauseWithError(projectionState))
           }
 
       projector.concurrently(notifications)
