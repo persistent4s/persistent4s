@@ -16,6 +16,9 @@
 
 package persistent4s
 
+import cats.Applicative
+import cats.syntax.all.*
+
 /** A Projection defines how to process events from the event store.
   *
   * @tparam F
@@ -27,7 +30,13 @@ package persistent4s
   * @tparam S
   *   the state type for the projection
   */
-trait Projection[F[_], A <: Event, K, S]:
+trait Projection[F[_]: Applicative, A <: Event, K, S]:
+
+  /** Repository for fetching and persisting projection state. The projector will call `fetchStates` to get the current
+    * state for relevant keys before processing a batch of events, and will call `upsertMany` and `deleteMany` after
+    * processing a batch to save the updated state.
+    */
+  protected val repository: Repository[F, K, S]
 
   /** The name of the projection, used for checkpointing.
     *
@@ -62,16 +71,6 @@ trait Projection[F[_], A <: Event, K, S]:
     */
   def resolveKeys(event: EventEnvelope[A]): List[K]
 
-  /** Fetch the current state for multiple keys. This method will be called before processing a batch of events to get
-    * the current state for all relevant keys.
-    *
-    * @param keys
-    *   the keys for which to fetch the state
-    * @return
-    *   a map of keys to their corresponding state, or `None` if no state exists for a key
-    */
-  def fetchStates(keys: List[K]): F[Map[K, Option[S]]]
-
   /** Handle an incoming event. This method will be called for each event that matches the projection's filter. The
     * projection should perform any necessary processing of the event, such as updating a read model.
     *
@@ -92,6 +91,17 @@ trait Projection[F[_], A <: Event, K, S]:
     */
   def handle(state: Option[S], event: EventEnvelope[A]): F[Option[S]]
 
+  /** Fetch the current state for multiple keys. This method will be called before processing a batch of events to get
+    * the current state for all relevant keys.
+    *
+    * @param keys
+    *   the keys for which to fetch the state
+    * @return
+    *   a map of keys to their corresponding state, or `None` if no state exists for a key
+    */
+  final def fetchStates(keys: List[K]): F[Map[K, Option[S]]] =
+    repository.findMany(keys)
+
   /** Persist the current state for a given key. This method will be called after processing an event to save the
     * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
     * cache. Passing None indicates that the state should be removed for that key.
@@ -101,4 +111,9 @@ trait Projection[F[_], A <: Event, K, S]:
     * @return
     *   a F[Unit] that completes when the state has been persisted
     */
-  def persistStates(states: Map[K, Option[S]]): F[Unit]
+  final def persistStates(states: Map[K, Option[S]]): F[Unit] =
+    val toDelete = states.collect { case (key, None) => key }.toList
+    val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
+    val deleteF = if (toDelete.nonEmpty) repository.deleteMany(toDelete) else Applicative[F].unit
+    val upsertF = if (toUpsert.nonEmpty) repository.upsertMany(toUpsert) else Applicative[F].unit
+    deleteF *> upsertF
