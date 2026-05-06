@@ -17,6 +17,9 @@
 package persistent4s
 
 import fs2.Stream
+import cats.effect.Async
+import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.Meter
 
 /** A Projector is responsible for running a Projection. It manages the lifecycle of the projection, including loading
   * the last checkpoint, subscribing to event notifications, and ensuring that events are processed in the correct
@@ -60,7 +63,7 @@ object Projector:
     *   maximum number of events processed in a single batch (default: 100). A larger value reduces checkpoint overhead
     *   but increases memory usage and the reprocessing window after a failure.
     */
-  def apply[F[_]: cats.effect.Async: org.typelevel.otel4s.trace.Tracer: org.typelevel.otel4s.metrics.Meter, A <: Event](
+  def apply[F[_]: Async: Tracer: Meter, A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: ProjectionCheckpoint[F],
     batchSize: Int = 100,
