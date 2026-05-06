@@ -26,10 +26,13 @@ import weaver.SimpleIOSuite
 object InstrumentedEventStoreSuite extends SimpleIOSuite:
 
   given Tracer[IO] = Tracer.Implicits.noop
-  given Meter[IO]  = Meter.Implicits.noop
+
+  given Meter[IO] = Meter.Implicits.noop
 
   sealed trait TestEvent extends Event
+
   object TestEvent:
+
     final case class Created(id: String) extends TestEvent
 
   final class FakeStore(ref: Ref[IO, Vector[EventEnvelope[TestEvent]]]) extends EventStore[IO, TestEvent]:
@@ -44,12 +47,11 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       evts: List[(Set[Tag], EventTypeName, TestEvent)]*,
     ): IO[Unit] =
       ref.modify { current =>
-        val relevant  = current.filter(matches(_, eventFilter))
+        val relevant = current.filter(matches(_, eventFilter))
         val actualIdx = relevant.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-        if actualIdx != expectedIndex then
-          (current, Left(IndexConflictException(expectedIndex, actualIdx)))
+        if actualIdx != expectedIndex then (current, Left(IndexConflictException(expectedIndex, actualIdx)))
         else
-          val last    = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
+          val last = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
           val newEvts = evts.flatten.zipWithIndex.map { case ((tags, et, ev), i) =>
             EventEnvelope(EventMetadata(last + i.toLong + 1L, tags, et, java.time.Instant.now()), ev)
           }
@@ -63,11 +65,13 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
         .filter(env => matches(env, eventFilter) && env.metadata.globalPosition > fromPosition)
 
   final class ConflictingStore extends EventStore[IO, TestEvent]:
+
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
       evts: List[(Set[Tag], EventTypeName, TestEvent)]*,
     ): IO[Unit] = IO.raiseError(IndexConflictException(0L, 1L))
+
     def readFrom(fromPosition: Long, eventFilter: EventFilter): Stream[IO, EventEnvelope[TestEvent]] =
       Stream.empty
 
@@ -77,10 +81,10 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       inner         = FakeStore(ref)
       instrumented <- InstrumentedEventStore.make[IO, TestEvent](inner)
       _            <- instrumented.append(
-                        EventFilter(),
-                        0L,
-                        List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("x"))),
-                      )
+             EventFilter(),
+             0L,
+             List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("x"))),
+           )
       stored <- ref.get
     yield expect(stored.size == 1)
   }
@@ -89,12 +93,12 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
     for
       instrumented <- InstrumentedEventStore.make[IO, TestEvent](new ConflictingStore)
       result       <- instrumented
-                        .append(
-                          EventFilter(),
-                          0L,
-                          List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("x"))),
-                        )
-                        .attempt
+                  .append(
+                    EventFilter(),
+                    0L,
+                    List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("x"))),
+                  )
+                  .attempt
     yield expect(result.left.exists(_.isInstanceOf[IndexConflictException]))
   }
 
@@ -104,10 +108,10 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       inner         = FakeStore(ref)
       instrumented <- InstrumentedEventStore.make[IO, TestEvent](inner)
       _            <- inner.append(
-                        EventFilter(),
-                        0L,
-                        List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("a"))),
-                      )
+             EventFilter(),
+             0L,
+             List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("a"))),
+           )
       events <- instrumented.readFrom(0L, EventFilter()).compile.toList
     yield expect(events.size == 1 && events.head.payload == TestEvent.Created("a"))
   }
@@ -117,8 +121,10 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       ref          <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
       inner         = FakeStore(ref)
       instrumented <- InstrumentedEventStore.make[IO, TestEvent](inner)
-      _            <- inner.append(EventFilter(), 0L, List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("a"))))
-      _            <- inner.append(EventFilter(), 1L, List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("b"))))
-      events       <- instrumented.readFrom(1L, EventFilter()).compile.toList
+      _            <-
+        inner.append(EventFilter(), 0L, List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("a"))))
+      _ <-
+        inner.append(EventFilter(), 1L, List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("b"))))
+      events <- instrumented.readFrom(1L, EventFilter()).compile.toList
     yield expect(events.size == 1 && events.head.payload == TestEvent.Created("b"))
   }

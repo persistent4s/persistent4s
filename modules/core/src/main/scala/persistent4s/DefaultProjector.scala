@@ -139,7 +139,7 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
                   _      <- batchSizeHist.record(batchSz, projAttr)
                   _      <- batchDurationHist.record((end - start).toNanos.toDouble / 1e6, projAttr)
                   _      <- result.fold(Async[F].raiseError, Async[F].pure)
-                yield ()
+                yield (),
               )
           }
 
@@ -171,17 +171,16 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
           }
 
         Stream.eval(Deferred[F, Unit]).flatMap { initialSignal =>
-          Stream.eval(Ref.of[F, WakeupState](WakeupState(pending = true, initialSignal))).flatMap {
-            wakeupState =>
-              val notifications =
-                eventStore.notification.evalMap(_ => markPending(wakeupState)).drain
+          Stream.eval(Ref.of[F, WakeupState](WakeupState(pending = true, initialSignal))).flatMap { wakeupState =>
+            val notifications =
+              eventStore.notification.evalMap(_ => markPending(wakeupState)).drain
 
-              val projector =
-                Stream
-                  .repeatEval(awaitWork(wakeupState))
-                  .flatMap(_ => processEvents)
+            val projector =
+              Stream
+                .repeatEval(awaitWork(wakeupState))
+                .flatMap(_ => processEvents)
 
-              projector.concurrently(notifications)
+            projector.concurrently(notifications)
           }
         }
       }

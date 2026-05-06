@@ -73,7 +73,7 @@ trait CommandHandler[C, S, E <: Event]:
                           .withUnit("{retries}")
                           .create
       cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
-      _ <- Tracer[F]
+      _      <- Tracer[F]
              .spanBuilder("persistent4s.commandhandler.handle")
              .addAttribute(cmdAttr)
              .build

@@ -46,7 +46,7 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
     expectedIndex: Long,
     events: List[(Set[Tag], EventTypeName, A)]*,
   ): F[Unit] =
-    val eventCount  = events.flatten.size.toLong
+    val eventCount = events.flatten.size.toLong
     val filterAttrs = filterAttributes(eventFilter)
     Tracer[F]
       .spanBuilder("persistent4s.eventstore.append")
@@ -60,13 +60,13 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
           end    <- Async[F].monotonic
           _      <- appendDuration.record((end - start).toNanos.toDouble / 1e6, filterAttrs*)
           _      <- result match
-                      case Right(_) =>
-                        eventsAppended.add(eventCount, filterAttrs*)
-                      case Left(e: IndexConflictException) =>
-                        conflicts.add(1L, filterAttrs*) *> Async[F].raiseError(e)
-                      case Left(e) =>
-                        Async[F].raiseError(e)
-        yield ()
+                 case Right(_) =>
+                   eventsAppended.add(eventCount, filterAttrs*)
+                 case Left(e: IndexConflictException) =>
+                   conflicts.add(1L, filterAttrs*) *> Async[F].raiseError(e)
+                 case Left(e) =>
+                   Async[F].raiseError(e)
+        yield (),
       )
 
   override def readFrom(
@@ -102,21 +102,21 @@ object InstrumentedEventStore:
                           .withDescription("Number of events written to the event store")
                           .withUnit("{events}")
                           .create
-      eventsRead     <- Meter[F]
-                          .counter[Long]("persistent4s.events.read")
-                          .withDescription("Number of events emitted by readFrom streams")
-                          .withUnit("{events}")
-                          .create
+      eventsRead <- Meter[F]
+                      .counter[Long]("persistent4s.events.read")
+                      .withDescription("Number of events emitted by readFrom streams")
+                      .withUnit("{events}")
+                      .create
       appendDuration <- Meter[F]
                           .histogram[Double]("persistent4s.append.duration")
                           .withDescription("End-to-end append latency")
                           .withUnit("ms")
                           .create
-      conflicts      <- Meter[F]
-                          .counter[Long]("persistent4s.conflicts")
-                          .withDescription("Number of optimistic concurrency conflicts")
-                          .withUnit("{conflicts}")
-                          .create
+      conflicts <- Meter[F]
+                     .counter[Long]("persistent4s.conflicts")
+                     .withDescription("Number of optimistic concurrency conflicts")
+                     .withUnit("{conflicts}")
+                     .create
     yield new InstrumentedEventStore(inner, eventsAppended, eventsRead, appendDuration, conflicts)
 
   /** Like [[make]], but preserves [[EventNotification]] from the inner store. */

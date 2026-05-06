@@ -28,8 +28,11 @@ import persistent4s.examples.library.domain.borrowing.*
 import java.util.UUID
 import smithy4s.time.Timestamp
 
-class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore[IO, LibraryEvent], Tracer[IO], Meter[IO])
-    extends BorrowingService[IO]:
+class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using
+  EventStore[IO, LibraryEvent],
+  Tracer[IO],
+  Meter[IO],
+) extends BorrowingService[IO]:
 
   def borrowBook(bookId: String, memberId: String): IO[Unit] =
     BorrowBookHandler

@@ -26,29 +26,39 @@ import weaver.SimpleIOSuite
 object CommandHandlerSuite extends SimpleIOSuite:
 
   given Tracer[IO] = Tracer.Implicits.noop
-  given Meter[IO]  = Meter.Implicits.noop
+
+  given Meter[IO] = Meter.Implicits.noop
 
   // ---------------------------------------------------------------------------
   // Test domain
   // ---------------------------------------------------------------------------
 
   sealed trait TestCmd
-  final case class CreateItem(id: String)                   extends TestCmd
-  final case class RenameItem(id: String, newName: String)  extends TestCmd
+
+  final case class CreateItem(id: String) extends TestCmd
+
+  final case class RenameItem(id: String, newName: String) extends TestCmd
 
   sealed trait TestEvent extends Event
-  final case class ItemCreated(id: String)               extends TestEvent
+
+  final case class ItemCreated(id: String) extends TestEvent
+
   final case class ItemRenamed(id: String, name: String) extends TestEvent
 
   object TestHandler extends CommandHandler[TestCmd, Option[String], TestEvent]:
+
     def tags(cmd: TestCmd): Set[Tag] = cmd match
-      case CreateItem(id)     => Set(Tag("item", id))
-      case RenameItem(id, _)  => Set(Tag("item", id))
+      case CreateItem(id)    => Set(Tag("item", id))
+      case RenameItem(id, _) => Set(Tag("item", id))
+
     def initial: Option[String] = None
+
     def evolve(cmd: TestCmd, state: Option[String], event: TestEvent): Option[String] = event match
       case ItemCreated(id)      => Some(id)
       case ItemRenamed(_, name) => Some(name)
+
     def validate(state: Option[String], cmd: TestCmd): Either[Throwable, Unit] = Right(())
+
     def decide(state: Option[String], cmd: TestCmd): List[(Set[Tag], TestEvent)] = cmd match
       case CreateItem(id)       => List((Set(Tag("item", id)), ItemCreated(id)))
       case RenameItem(id, name) => List((Set(Tag("item", id)), ItemRenamed(id, name)))
@@ -58,6 +68,7 @@ object CommandHandlerSuite extends SimpleIOSuite:
   // ---------------------------------------------------------------------------
 
   final class InMemoryStore[A <: Event](ref: Ref[IO, Vector[EventEnvelope[A]]]) extends EventStore[IO, A]:
+
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
@@ -71,7 +82,7 @@ object CommandHandlerSuite extends SimpleIOSuite:
         val actualIdx = relevant.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
         if actualIdx != expectedIndex then (current, Left(IndexConflictException(expectedIndex, actualIdx)))
         else
-          val last   = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
+          val last = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
           val newEvt = evts.flatten.zipWithIndex.map { case ((tags, et, ev), i) =>
             EventEnvelope(EventMetadata(last + i.toLong + 1L, tags, et, java.time.Instant.now()), ev)
           }
@@ -91,27 +102,27 @@ object CommandHandlerSuite extends SimpleIOSuite:
 
   test("run appends the decided events") {
     for
-      ref  <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
+      ref                            <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
       given EventStore[IO, TestEvent] = InMemoryStore(ref)
-      _      <- TestHandler.run[IO](CreateItem("x"))
-      stored <- ref.get
+      _                              <- TestHandler.run[IO](CreateItem("x"))
+      stored                         <- ref.get
     yield expect(stored.size == 1 && stored.head.payload == ItemCreated("x"))
   }
 
   test("run reads current state before deciding") {
     for
-      ref  <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
+      ref                            <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
       given EventStore[IO, TestEvent] = InMemoryStore(ref)
-      _      <- TestHandler.run[IO](CreateItem("x"))
-      _      <- TestHandler.run[IO](RenameItem("x", "renamed"))
-      stored <- ref.get
+      _                              <- TestHandler.run[IO](CreateItem("x"))
+      _                              <- TestHandler.run[IO](RenameItem("x", "renamed"))
+      stored                         <- ref.get
     yield expect(stored.size == 2 && stored.last.payload == ItemRenamed("x", "renamed"))
   }
 
   test("run retries on IndexConflictException up to maxRetries") {
     for
-      attemptsRef <- Ref.of[IO, Int](0)
-      storeRef    <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
+      attemptsRef  <- Ref.of[IO, Int](0)
+      storeRef     <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
       conflictStore = new EventStore[IO, TestEvent]:
                         def append(
                           ef: EventFilter,
@@ -122,13 +133,13 @@ object CommandHandlerSuite extends SimpleIOSuite:
                         def readFrom(fp: Long, ef: EventFilter): Stream[IO, EventEnvelope[TestEvent]] =
                           Stream.eval(storeRef.get).flatMap(Stream.emits)
       given EventStore[IO, TestEvent] = conflictStore
-      retryHandler = new CommandHandler[TestCmd, Option[String], TestEvent]:
-                       def tags(cmd: TestCmd)                                         = Set(Tag("item", "x"))
-                       def initial                                                    = None
+      retryHandler                    = new CommandHandler[TestCmd, Option[String], TestEvent]:
+                       def tags(cmd: TestCmd) = Set(Tag("item", "x"))
+                       def initial = None
                        def evolve(cmd: TestCmd, state: Option[String], ev: TestEvent) = state
-                       def validate(state: Option[String], cmd: TestCmd)              = Right(())
-                       def decide(state: Option[String], cmd: TestCmd)                = List((Set.empty, ItemCreated("x")))
-                       override def maxRetries                                        = 2
+                       def validate(state: Option[String], cmd: TestCmd) = Right(())
+                       def decide(state: Option[String], cmd: TestCmd) = List((Set.empty, ItemCreated("x")))
+                       override def maxRetries = 2
       result   <- retryHandler.run[IO](CreateItem("x")).attempt
       attempts <- attemptsRef.get
     yield expect(result.isLeft && attempts == 3) // 1 initial + 2 retries
