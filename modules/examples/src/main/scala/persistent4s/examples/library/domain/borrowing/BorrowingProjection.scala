@@ -21,7 +21,6 @@ import cats.syntax.all.*
 
 import persistent4s.*
 import persistent4s.examples.library.domain.{BookBorrowed, BookReturned, LibraryEvent}
-import persistent4s.examples.library.application.Repository
 import java.time.OffsetDateTime
 import java.util.UUID
 
@@ -34,7 +33,7 @@ final case class BorrowingState(
 )
 
 final class BorrowingProjection[F[_]: Async] private (
-  repository: Repository[F, (UUID, UUID), BorrowingState],
+  protected val repository: Repository[F, (UUID, UUID), BorrowingState],
 ) extends Projection[F, LibraryEvent, (UUID, UUID), BorrowingState]:
 
   override val name: String = "borrowing-projection"
@@ -48,9 +47,6 @@ final class BorrowingProjection[F[_]: Async] private (
     case BookReturned(bookId, memberId, _)    => List((bookId, memberId))
     case _                                    => Nil
 
-  override def fetchStates(keys: List[(UUID, UUID)]): F[Map[(UUID, UUID), Option[BorrowingState]]] =
-    repository.findMany(keys)
-
   override def handle(state: Option[BorrowingState], event: EventEnvelope[LibraryEvent]): F[Option[BorrowingState]] =
     (state, event.payload) match
       case (None, BookBorrowed(bookId, memberId, borrowedAt, dueDate)) =>
@@ -62,9 +58,6 @@ final class BorrowingProjection[F[_]: Async] private (
         BorrowingState(bookId, memberId, borrowingState.borrowedAt, borrowingState.dueDate, Some(returnedAt)).some
           .pure[F]
       case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
-
-  override def persistStates(states: Map[(UUID, UUID), Option[BorrowingState]]): F[Unit] =
-    repository.persistMany(states)
 
 object BorrowingProjection:
 
