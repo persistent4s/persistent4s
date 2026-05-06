@@ -31,6 +31,9 @@ import skunk.codec.all.*
 
 import persistent4s.EventCodec
 import persistent4s.Event
+import persistent4s.EventNotification
+import persistent4s.EventStore
+import persistent4s.InstrumentedEventStore
 
 sealed trait PostgresModuleError extends Throwable
 
@@ -80,7 +83,7 @@ object PostgresModule:
 
   /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
   final case class Components[F[_], A <: Event](
-    eventStore: PostgresEventStore[F, A],
+    eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: PostgresProjectionCheckpoint[F],
   )
 
@@ -108,10 +111,13 @@ object PostgresModule:
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
-      pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger))
+      pool  <- createSessionPool[F](config)
+      _     <- Resource.eval(initializeDatabase[F](pool, logger))
+      store <- Resource.eval(
+                 InstrumentedEventStore.makeWithNotification[F, A](PostgresEventStore[F, A](pool, codec)),
+               )
     yield Components(
-      PostgresEventStore[F, A](pool, codec),
+      store,
       PostgresProjectionCheckpoint.make[F](pool),
     )
 
@@ -135,10 +141,13 @@ object PostgresModule:
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
-      pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger))
+      pool  <- createSessionPool[F](config)
+      _     <- Resource.eval(initializeDatabase[F](pool, logger))
+      store <- Resource.eval(
+                 InstrumentedEventStore.makeWithNotification[F, A](PostgresEventStore[F, A](pool, codec)),
+               )
     yield Components(
-      PostgresEventStore[F, A](pool, codec),
+      store,
       PostgresProjectionCheckpoint.make[F](pool),
     )
 

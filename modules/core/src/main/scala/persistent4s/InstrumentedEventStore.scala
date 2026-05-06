@@ -118,3 +118,13 @@ object InstrumentedEventStore:
                           .withUnit("{conflicts}")
                           .create
     yield new InstrumentedEventStore(inner, eventsAppended, eventsRead, appendDuration, conflicts)
+
+  /** Like [[make]], but preserves [[EventNotification]] from the inner store. */
+  def makeWithNotification[F[_]: Async: Tracer: Meter, A <: Event](
+    inner: EventStore[F, A] & EventNotification[F],
+  ): F[EventStore[F, A] & EventNotification[F]] =
+    make(inner).map { instrumented =>
+      new EventStore[F, A] with EventNotification[F]:
+        export instrumented.{append, readFrom}
+        def notification: fs2.Stream[F, Unit] = inner.notification
+    }

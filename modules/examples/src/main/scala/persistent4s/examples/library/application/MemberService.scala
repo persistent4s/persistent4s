@@ -19,13 +19,16 @@ package persistent4s.examples.library.application
 import java.util.UUID
 
 import cats.effect.IO
+import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.Meter
 
 import persistent4s.EventStore
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.member.*
 
-class MemberServiceImpl(repository: MemberRepository[IO])(using EventStore[IO, LibraryEvent]) extends MemberService[IO]:
+class MemberServiceImpl(repository: MemberRepository[IO])(using EventStore[IO, LibraryEvent], Tracer[IO], Meter[IO])
+    extends MemberService[IO]:
 
   def registerMember(name: String, email: String): IO[RegisterMemberOutput] =
     (for

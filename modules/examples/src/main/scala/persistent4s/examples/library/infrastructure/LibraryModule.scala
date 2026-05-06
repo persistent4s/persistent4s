@@ -34,10 +34,11 @@ import persistent4s.examples.library.domain.*
 import persistent4s.examples.library.domain.book.{BookProjection, BookRepository}
 import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, BorrowingRepository}
 import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
-import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule}
+import persistent4s.EventNotification
+import persistent4s.postgres.{PostgresConfig, PostgresModule}
 
 final class LibraryModule private (
-  val store: PostgresEventStore[IO, LibraryEvent],
+  val store: EventStore[IO, LibraryEvent] & EventNotification[IO],
   val bookProjection: BookProjection[IO],
   val memberProjection: MemberProjection[IO],
   val borrowingProjection: BorrowingProjection[IO],

@@ -19,13 +19,16 @@ package persistent4s.examples.library.application
 import java.util.UUID
 
 import cats.effect.IO
+import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.Meter
 
 import persistent4s.EventStore
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
 
-class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, LibraryEvent]) extends BookService[IO]:
+class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, LibraryEvent], Tracer[IO], Meter[IO])
+    extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
     (for
