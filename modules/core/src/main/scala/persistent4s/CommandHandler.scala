@@ -18,6 +18,9 @@ package persistent4s
 
 import cats.effect.Concurrent
 import cats.syntax.all.*
+import org.typelevel.otel4s.Attribute
+import org.typelevel.otel4s.metrics.{Counter, Meter}
+import org.typelevel.otel4s.trace.Tracer
 
 /** A CommandHandler defines how a command is processed in an event-sourced system. It reads events from the store to
   * build the current state, validates the command against that state, and decides which new events to produce.
@@ -60,17 +63,32 @@ trait CommandHandler[C, S, E <: Event]:
     * (IndexConflictException), the command is automatically retried with fresh state up to maxRetries times. The
     * command is re-validated against the new state and may still succeed.
     */
-  def run[F[_]: Concurrent](command: C)(using
+  def run[F[_]: Concurrent: Tracer: Meter](command: C)(using
     eventStore: EventStore[F, E],
   ): F[Unit] =
-    runWithRetry(command, maxRetries)
+    for
+      retriesCounter <- Meter[F]
+                          .counter[Long]("persistent4s.commandhandler.retries")
+                          .withDescription("Number of command handler retry attempts on conflict")
+                          .withUnit("{retries}")
+                          .create
+      cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
+      _ <- Tracer[F]
+             .spanBuilder("persistent4s.commandhandler.handle")
+             .addAttribute(cmdAttr)
+             .build
+             .surround(runWithRetry(command, maxRetries, retriesCounter, cmdAttr))
+    yield ()
 
-  private def runWithRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
-    eventStore: EventStore[F, E],
-  ): F[Unit] =
+  private def runWithRetry[F[_]: Concurrent](
+    command: C,
+    retriesLeft: Int,
+    retriesCounter: Counter[F, Long],
+    cmdAttr: Attribute[String],
+  )(using eventStore: EventStore[F, E]): F[Unit] =
     attempt(command).handleErrorWith {
       case _: IndexConflictException if retriesLeft > 0 =>
-        runWithRetry(command, retriesLeft - 1)
+        retriesCounter.add(1L, cmdAttr) *> runWithRetry(command, retriesLeft - 1, retriesCounter, cmdAttr)
       case e =>
         Concurrent[F].raiseError(e)
     }
