@@ -37,8 +37,10 @@ final class MemberProjection[F[_]: Async] private (
 
   override val name: String = "member-projection"
 
-  override val filter: EventFilter = EventFilter(
-    eventTypes = Set(EventTypeName.of[MemberRegistered], EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]),
+  override val filter: Set[EventTypeName] = Set(
+    EventTypeName.of[MemberRegistered],
+    EventTypeName.of[BookBorrowed],
+    EventTypeName.of[BookReturned],
   )
 
   override def resolveKeys(event: EventEnvelope[LibraryEvent]): List[UUID] = event.payload match

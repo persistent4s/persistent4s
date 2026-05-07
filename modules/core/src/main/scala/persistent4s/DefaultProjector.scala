@@ -121,7 +121,7 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
       Stream
         .eval(checkpoint.load(projection.name))
         .flatMap { lastPosition =>
-          eventStore.readFrom(lastPosition.getOrElse(-1L), projection.filter)
+          eventStore.readFrom(lastPosition.getOrElse(-1L), EventFilter(projection.filter, Set.empty))
         }
         .chunkN(batchSize)
         .evalMap(chunk => processBatch(chunk.toList))

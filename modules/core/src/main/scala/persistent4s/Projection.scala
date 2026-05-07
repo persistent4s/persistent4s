@@ -41,13 +41,13 @@ trait Projection[F[_], A <: Event, K, S]:
     */
   def name: String
 
-  /** The filter that determines which events this projection will process. Only events that match the filter will be
-    * passed to the `handle` method.
+  /** The event type filter for this projection. Only events whose type name is included in this set will be processed
+    * by the projection.
     *
     * @return
-    *   the event filter for this projection
+    *   the set of event type names that this projection is interested in
     */
-  def filter: EventFilter
+  def filter: Set[EventTypeName]
 
   /** Resolve keys for a given event. This method is used to determine which keys are affected by an event, and
     * therefore which state entries need to be fetched and updated. An event may affect multiple keys.
