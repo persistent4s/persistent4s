@@ -153,7 +153,7 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
         events <- eventStore
                     .readFrom(
                       state.globalPosition,
-                      projection.filter,
+                      EventFilter(projection.filter, Set.empty),
                       Some(passLimit),
                     )
                     .compile

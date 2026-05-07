@@ -165,7 +165,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         events <- eventStore
                     .readFrom(
                       state.globalPosition,
-                      projection.filter,
+                      EventFilter(projection.filter, Set.empty),
                       Some(passLimit),
                     )
                     .compile
