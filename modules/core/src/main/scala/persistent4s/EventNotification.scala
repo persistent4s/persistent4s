@@ -18,8 +18,25 @@ package persistent4s
 
 import fs2.Stream
 
-/** A trait for event stores that can provide a stream of notifications when new events are added. This allows
-  * projectors to react to new events without polling the event store.
+enum EventStoreNotification:
+
+  /** Emitted when new events are appended to the store. */
+  case EventsAppended
+
+  /** Emitted when a projection is paused */
+  case PauseProjection(name: String)
+
+  /** Emitted when a projection is resumed */
+  case ResumeProjection(name: String)
+
+  /** Emitted when a projection's checkpoint is changed */
+  case UpdateCheckpointIndex(name: String, index: Long)
+
+  case UnknownNotification
+
+/** A trait for event stores that can provide a stream of notifications when new events are added or to communicate
+  * other relevant changes such as projection failure or pause. This allows projectors to react to new events without
+  * polling the event store.
   */
 trait EventNotification[F[_]]:
 
@@ -34,4 +51,4 @@ trait EventNotification[F[_]]:
     * @return
     *   an infinite stream of wake-up signals
     */
-  def notification: Stream[F, Unit]
+  def notification(projectionName: String): Stream[F, EventStoreNotification]
