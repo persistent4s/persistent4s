@@ -35,7 +35,7 @@ val LogbackV = "1.5.32"
 
 val TestcontainersV = "1.21.4"
 
-val Fs2KafkaV = "3.9.1"
+val Fs2KafkaV = "4.0.0"
 
 val WeaverV = "0.12.0"
 
@@ -93,7 +93,7 @@ lazy val kafka = (project in file("modules/kafka"))
   .settings(
     name                 := "persistent4s-kafka",
     libraryDependencies ++= List(
-      "com.github.fd4s"   %% "fs2-kafka"       % Fs2KafkaV,
+      "org.typelevel"     %% "fs2-kafka"       % Fs2KafkaV,
       "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
       "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
       "org.testcontainers" % "kafka"           % TestcontainersV % Test,
