@@ -153,15 +153,26 @@ object ParallelProjectorSuite extends SimpleIOSuite:
   ): Projection[IO, TestEvent, String, Int] =
     new Projection[IO, TestEvent, String, Int]:
 
+      protected val repository: Repository[IO, String, Int] = new Repository[IO, String, Int] {
+
+        override def findMany(keys: List[String]): IO[Map[String, Option[Int]]] = states.get.map { current =>
+          keys.map(k => k -> current.get(k)).toMap
+        }
+
+        override def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
+          repoStates.toList.traverse_ { case (key, state) =>
+            states.update(_.updated(key, state))
+          }.void
+
+        override def deleteMany(keys: List[String]): IO[Unit] =
+          keys.traverse_(key => states.update(_ - key))
+
+      }
       def name: String = "tracking"
 
       def filter: Set[EventTypeName] = eventFilter.eventTypes
 
       def resolveKeys(event: EventEnvelope[TestEvent]): List[String] = resolveKeysF(event)
-
-      def fetchStates(keys: List[String]): IO[Map[String, Option[Int]]] = states.get.map { current =>
-        keys.map(k => k -> current.get(k)).toMap
-      }
 
       def handle(state: Option[Int], event: EventEnvelope[TestEvent]): IO[Option[Int]] =
         failOnPosition match
@@ -169,14 +180,6 @@ object ParallelProjectorSuite extends SimpleIOSuite:
             IO.raiseError(new RuntimeException(s"simulated failure at position $pos"))
           case _ =>
             handled.update(_ :+ event).as(Some(state.getOrElse(0) + 1))
-
-      def persist(key: String, state: Option[Int]): IO[Unit] =
-        state match
-          case Some(v) => states.update(_.updated(key, v))
-          case None    => states.update(_ - key)
-
-      def persistStates(states: Map[String, Option[Int]]): IO[Unit] =
-        states.toList.traverse_ { case (key, state) => persist(key, state) }
 
   // ---------------------------------------------------------------------------
   // Basic behaviour tests (same guarantees as DefaultProjector)
@@ -272,24 +275,31 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       states     <- Ref.of[IO, Map[String, Int]](Map.empty)
       fetchCount <- Ref.of[IO, Int](0)
       projection  = new Projection[IO, TestEvent, String, Int]:
+
+                     protected val repository: Repository[IO, String, Int] = new Repository[IO, String, Int] {
+
+                       override def findMany(keys: List[String]): IO[Map[String, Option[Int]]] =
+                         fetchCount.update(_ + keys.size) *> states.get.map { current =>
+                           keys.map(k => k -> current.get(k)).toMap
+                         }
+
+                       override def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
+                         repoStates.toList.traverse_ { case (key, state) =>
+                           states.update(_.updated(key, state))
+                         }.void
+
+                       override def deleteMany(keys: List[String]): IO[Unit] =
+                         keys.traverse_(key => states.update(_ - key))
+
+                     }
                      def name: String = "tracking"
                      def filter: Set[EventTypeName] = Set.empty
                      def resolveKeys(event: EventEnvelope[TestEvent]): List[String] =
                        event.payload match
                          case TestEvent.Created(id) => List(id)
                          case TestEvent.Deleted(id) => List(id)
-                     def fetchStates(keys: List[String]): IO[Map[String, Option[Int]]] =
-                       fetchCount.update(_ + keys.size) *> states.get.map { current =>
-                         keys.map(k => k -> current.get(k)).toMap
-                       }
                      def handle(state: Option[Int], event: EventEnvelope[TestEvent]): IO[Option[Int]] =
                        handled.update(_ :+ event).as(Some(state.getOrElse(0) + 1))
-                     def persist(key: String, state: Option[Int]): IO[Unit] =
-                       state match
-                         case Some(v) => states.update(_.updated(key, v))
-                         case None    => states.update(_ - key)
-                     def persistStates(states: Map[String, Option[Int]]): IO[Unit] =
-                       states.toList.traverse_ { case (key, state) => persist(key, state) }
       _ <- seed(
              store,
              (Set(entityTag("a")), TestEvent.Created("a")),
