@@ -444,7 +444,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       count      <- Ref.of[IO, Int](0)
       projection  = new StatelessProjection[IO, TestEvent]:
                      def name = "pause-test"
-                     def filter = EventFilter()
+                     def filter = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        count.update(_ + 1)
       result <- DefaultProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
@@ -472,7 +472,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       done       <- Deferred[IO, Unit]
       projection  = new StatelessProjection[IO, TestEvent]:
                      def name = "resume-test"
-                     def filter = EventFilter()
+                     def filter = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        count.updateAndGet(_ + 1).flatMap(n => if n == 2 then done.complete(()).void else IO.unit)
       result <- DefaultProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
@@ -507,7 +507,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       allDone       <- Deferred[IO, Unit]
       projection     = new StatelessProjection[IO, TestEvent]:
                      def name = "reindex-test"
-                     def filter = EventFilter()
+                     def filter = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        count.updateAndGet(_ + 1).flatMap {
                          case 2 => firstPassDone.complete(()).void

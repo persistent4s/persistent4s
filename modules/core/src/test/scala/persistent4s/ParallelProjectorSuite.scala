@@ -155,7 +155,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
 
       def name: String = "tracking"
 
-      def filter: EventFilter = eventFilter
+      def filter: Set[EventTypeName] = eventFilter.eventTypes
 
       def resolveKeys(event: EventEnvelope[TestEvent]): List[String] = resolveKeysF(event)
 
@@ -273,7 +273,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       fetchCount <- Ref.of[IO, Int](0)
       projection  = new Projection[IO, TestEvent, String, Int]:
                      def name: String = "tracking"
-                     def filter: EventFilter = EventFilter()
+                     def filter: Set[EventTypeName] = Set.empty
                      def resolveKeys(event: EventEnvelope[TestEvent]): List[String] =
                        event.payload match
                          case TestEvent.Created(id) => List(id)
@@ -360,7 +360,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       processed  <- Deferred[IO, EventEnvelope[TestEvent]]
       projection  = new StatelessProjection[IO, TestEvent]:
                      def name: String = "notif-test"
-                     def filter: EventFilter = EventFilter()
+                     def filter: Set[EventTypeName] = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        processed.complete(ev).void
       ev <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
@@ -384,7 +384,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       count      <- Ref.of[IO, Int](0)
       projection  = new StatelessProjection[IO, TestEvent]:
                      def name = "pause-test"
-                     def filter = EventFilter()
+                     def filter = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        count.update(_ + 1)
       result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
@@ -412,7 +412,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       done       <- Deferred[IO, Unit]
       projection  = new StatelessProjection[IO, TestEvent]:
                      def name = "resume-test"
-                     def filter = EventFilter()
+                     def filter = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        count.updateAndGet(_ + 1).flatMap(n => if n == 2 then done.complete(()).void else IO.unit)
       result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
@@ -447,7 +447,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       allDone       <- Deferred[IO, Unit]
       projection     = new StatelessProjection[IO, TestEvent]:
                      def name = "reindex-test"
-                     def filter = EventFilter()
+                     def filter = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        count.updateAndGet(_ + 1).flatMap {
                          case 2 => firstPassDone.complete(()).void
