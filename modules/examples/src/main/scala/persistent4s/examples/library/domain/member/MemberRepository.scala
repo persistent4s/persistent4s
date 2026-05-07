@@ -22,7 +22,7 @@ import skunk.*
 import skunk.implicits.*
 import skunk.codec.all.*
 
-import persistent4s.examples.library.application.Repository
+import persistent4s.Repository
 import persistent4s.examples.library.domain.member.MemberState
 import java.util.UUID
 
@@ -32,10 +32,7 @@ final class MemberRepository[F[_]: Async] private (
 
   import MemberRepository.*
 
-  def find(key: UUID): F[Option[MemberState]] =
-    pool.use(_.option(findQuery)(key))
-
-  def findMany(keys: List[UUID]): F[Map[UUID, Option[MemberState]]] =
+  override def findMany(keys: List[UUID]): F[Map[UUID, Option[MemberState]]] =
     if keys.isEmpty then Map.empty.pure[F]
     else
       pool.use(_.execute(findManyQuery(keys.size))(keys)).map { states =>
@@ -43,32 +40,20 @@ final class MemberRepository[F[_]: Async] private (
         keys.map(k => k -> found.get(k)).toMap
       }
 
-  def save(key: UUID, value: MemberState): F[Unit] =
-    pool.use(_.execute(upsertCommand)(value)).void
-
-  def delete(key: UUID): F[Unit] =
-    pool.use(_.execute(deleteCommand)(key)).void
-
-  def persistMany(states: Map[UUID, Option[MemberState]]): F[Unit] =
-    val toUpsert = states.collect { case (_, Some(v)) => v }.toList
-    val toDelete = states.collect { case (k, None) => k }.toList
-    if toUpsert.isEmpty && toDelete.isEmpty then Async[F].unit
+  override def upsertMany(states: Map[UUID, MemberState]): F[Unit] =
+    if states.isEmpty then Async[F].unit
     else
-      pool.use { session =>
-        session.transaction.use { _ =>
-          val upsertEffect =
-            if toUpsert.isEmpty then Async[F].unit
-            else
-              toUpsert
-                .grouped(MaxUpsertChunkSize)
-                .toList
-                .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk).void)
-          val deleteEffect =
-            if toDelete.isEmpty then Async[F].unit
-            else session.execute(deleteManyCommand(toDelete.size))(toDelete).void
-          upsertEffect >> deleteEffect
-        }
-      }
+      states.toList
+        .grouped(MaxUpsertChunkSize)
+        .toList
+        .traverse_(chunk => pool.use(_.execute(upsertManyCommand(chunk.size))(chunk.map(_._2))).void)
+
+  override def deleteMany(keys: List[UUID]): F[Unit] =
+    if keys.isEmpty then Async[F].unit
+    else pool.use(_.execute(deleteManyCommand(keys.size))(keys)).void
+
+  def find(key: UUID): F[Option[MemberState]] =
+    pool.use(_.option(findQuery)(key))
 
   def getMembers: F[List[MemberState]] =
     pool.use(_.execute(getMembersQuery))
@@ -93,19 +78,6 @@ object MemberRepository:
       FROM members
       WHERE member_id = $uuid
     """.query(memberStateCodec)
-
-  private val upsertCommand: Command[MemberState] =
-    sql"""
-      INSERT INTO members (member_id, name, email, borrowed_books)
-      VALUES ($memberStateCodec)
-      ON CONFLICT (member_id) DO UPDATE SET
-        name          = EXCLUDED.name,
-        email         = EXCLUDED.email,
-        borrowed_books = EXCLUDED.borrowed_books
-    """.command
-
-  private val deleteCommand: Command[UUID] =
-    sql"DELETE FROM members WHERE member_id = $uuid".command
 
   private def upsertManyCommand(n: Int): Command[List[MemberState]] =
     sql"""
