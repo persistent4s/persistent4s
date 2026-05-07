@@ -28,7 +28,7 @@ import persistent4s.EventStoreNotification.*
 /** A [[Projector]] implementation that processes events for distinct keys in parallel within each batch.
   *
   * Within a batch, events are grouped by key. Each key's event sequence is folded independently and all keys are
-  * processed concurrently via [[Parallel]]. If every key succeeds the resulting states and checkpoint are persisted in
+  * processed concurrently via `Parallel`. If every key succeeds the resulting states and checkpoint are persisted in
   * one shot. If any key fails the batch falls back to the sequential strategy of [[DefaultProjector]]: events are
   * replayed in order and progress is saved up to the last successfully processed position before the error is
   * re-raised.

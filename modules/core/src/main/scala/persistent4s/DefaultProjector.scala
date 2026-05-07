@@ -27,7 +27,7 @@ import persistent4s.EventStoreNotification.*
 /** The default [[Projector]] implementation.
   *
   * Events are read in chunks of up to `batchSize` and processed sequentially within each chunk. For each chunk, all
-  * distinct keys are looked up once via [[Projection.fetchState]], the events are folded in order, and the resulting
+  * distinct keys are looked up once via [[Projection.fetchStates]], the events are folded in order, and the resulting
   * states are persisted together with a single checkpoint advance. This amortizes the I/O cost of checkpointing over
   * many events.
   *
