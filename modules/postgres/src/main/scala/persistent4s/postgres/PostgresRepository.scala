@@ -32,7 +32,6 @@ import skunk.Session
   * @tparam S
   *   the state type for the projection
   */
-
 trait PostgresRepository[F[_]: Async, K, S] extends Repository[F, K, S] {
 
   val pool: Resource[F, Session[F]]
