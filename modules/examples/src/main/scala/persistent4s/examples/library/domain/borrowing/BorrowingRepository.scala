@@ -22,13 +22,13 @@ import skunk.*
 import skunk.implicits.*
 import skunk.codec.all.*
 
-import persistent4s.Repository
+import persistent4s.postgres.PostgresRepository
 import persistent4s.examples.library.domain.borrowing.BorrowingState
 import java.util.UUID
 
 final class BorrowingRepository[F[_]: Async] private (
-  pool: Resource[F, Session[F]],
-) extends Repository[F, (UUID, UUID), BorrowingState]:
+  val pool: Resource[F, Session[F]],
+) extends PostgresRepository[F, (UUID, UUID), BorrowingState]:
 
   import BorrowingRepository.*
 
@@ -41,19 +41,20 @@ final class BorrowingRepository[F[_]: Async] private (
         keys.map(k => k -> found.get(k)).toMap
       }
 
-  override def upsertMany(states: Map[(UUID, UUID), BorrowingState]): F[Unit] =
+  override def upsertMany(session: Session[F], states: Map[(UUID, UUID), BorrowingState]): F[Unit] =
     if states.isEmpty then Async[F].unit
     else
       states.toList
         .grouped(MaxUpsertChunkSize)
         .toList
-        .traverse_(chunk => pool.use(_.execute(upsertManyCommand(chunk.size))(chunk.map(_._2))).void)
+        .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk.map(_._2)))
+        .void
 
-  override def deleteMany(keys: List[(UUID, UUID)]): F[Unit] =
+  override def deleteMany(session: Session[F], keys: List[(UUID, UUID)]): F[Unit] =
     if keys.isEmpty then Async[F].unit
     else
       val (bookIds, memberIds) = keys.unzip
-      pool.use(_.execute(deleteManyCommand(keys.size))((bookIds, memberIds))).void
+      session.execute(deleteManyCommand(keys.size))((bookIds, memberIds)).void
 
   def find(key: (UUID, UUID)): F[Option[BorrowingState]] =
     pool.use(_.option(findQuery)(key))
