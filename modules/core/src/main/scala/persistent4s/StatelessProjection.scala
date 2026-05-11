@@ -35,15 +35,13 @@ import cats.syntax.all.*
   * @tparam A
   *   the event type, which must extend the Event trait
   */
-trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A, scala.Unit, scala.Unit] {
+trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A, Unit, Unit] {
 
   final val repository: Repository[F, Unit, Unit] = new Repository[F, Unit, Unit] {
     override def findMany(keys: List[Unit]): F[Map[Unit, Option[Unit]]] =
       Applicative[F].pure(keys.map(_ -> None).toMap)
 
-    override def upsertMany(states: Map[Unit, Unit]): F[Unit] = Applicative[F].unit
-
-    override def deleteMany(keys: List[Unit]): F[Unit] = Applicative[F].unit
+    override def persistStates(states: Map[Unit, Option[Unit]]): F[Unit] = Applicative[F].unit
   }
 
   override def resolveKeys(event: EventEnvelope[A]): List[Unit] = List(())

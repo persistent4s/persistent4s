@@ -16,9 +16,6 @@
 
 package persistent4s
 
-import cats.Applicative
-import cats.syntax.all.*
-
 /** A Projection defines how to process events from the event store.
   *
   * @tparam F
@@ -30,7 +27,7 @@ import cats.syntax.all.*
   * @tparam S
   *   the state type for the projection
   */
-trait Projection[F[_]: Applicative, A <: Event, K, S]:
+trait Projection[F[_], A <: Event, K, S]:
 
   /** Repository for fetching and persisting projection state. The projector will call `fetchStates` to get the current
     * state for relevant keys before processing a batch of events, and will call `upsertMany` and `deleteMany` after
@@ -112,8 +109,10 @@ trait Projection[F[_]: Applicative, A <: Event, K, S]:
     *   a F[Unit] that completes when the state has been persisted
     */
   final def persistStates(states: Map[K, Option[S]]): F[Unit] =
-    val toDelete = states.collect { case (key, None) => key }.toList
+    repository.persistStates(states)
+
+/*     val toDelete = states.collect { case (key, None) => key }.toList
     val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
     val deleteF = if (toDelete.nonEmpty) repository.deleteMany(toDelete) else Applicative[F].unit
     val upsertF = if (toUpsert.nonEmpty) repository.upsertMany(toUpsert) else Applicative[F].unit
-    deleteF *> upsertF
+    deleteF *> upsertF */

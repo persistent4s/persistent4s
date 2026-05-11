@@ -41,23 +41,13 @@ trait Repository[F[_], K, S]:
     */
   def findMany(keys: List[K]): F[Map[K, Option[S]]]
 
-  /** Persist a batch of updated states. The input is a map from key to value, where each entry represents the new state
-    * for that key. The implementation should upsert these values in durable storage so that they can be retrieved later
-    * by `fetchStates`.
+  /** Persist a batch of updated states. The input is a map from key to an optional value, where Some(value) represents
+    * the new state for that key, and None indicates that the key should be deleted.
     *
     * @param states
-    *   a map from key to value, where each entry represents the new state for that key
+    *   a map from key to an optional value, where Some(value) represents the new state for that key, and None indicates
+    *   that the key should be deleted
     * @return
     *   an effect representing the completion of the operation
     */
-  def upsertMany(states: Map[K, S]): F[Unit]
-
-  /** Delete a batch of keys and their associated state. The implementation should remove these keys from durable
-    * storage so that they are no longer returned by `fetchStates`.
-    *
-    * @param keys
-    *   the list of keys to delete
-    * @return
-    *   an effect representing the completion of the operation
-    */
-  def deleteMany(keys: List[K]): F[Unit]
+  def persistStates(states: Map[K, Option[S]]): F[Unit]
