@@ -79,11 +79,13 @@ object PostgresEventStoreSuite extends IOSuite:
     tags: Set[Tag],
     value: String,
   ): IO[Unit] =
-    store.append(
-      EventFilter(Set.empty, tags),
-      expectedIndex,
-      List((tags, EventTypeName.of[TestEvent], TestEvent(value))),
-    )
+    store
+      .append(
+        EventFilter(Set.empty, tags),
+        expectedIndex,
+        List((tags, EventTypeName.of[TestEvent], TestEvent(value))),
+      )
+      .void
 
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
     result match
@@ -233,6 +235,7 @@ object PostgresEventStoreSuite extends IOSuite:
                     0L,
                     List((Set(secondTag), EventTypeName.of[TestEvent], TestEvent("after"))),
                   )
+                  .void
                   .attempt
     yield expect(isConflict(result))
   }

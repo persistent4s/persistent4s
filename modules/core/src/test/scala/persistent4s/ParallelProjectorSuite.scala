@@ -58,7 +58,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       eventFilter: EventFilter,
       expectedIndex: Long,
       evts: List[(Set[Tag], EventTypeName, A)]*,
-    ): IO[Unit] =
+    ): IO[List[A]] =
       events.modify { current =>
         val relevant = current.filter(matches(_, eventFilter))
         val actualIdx = relevant.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
@@ -71,10 +71,10 @@ object ParallelProjectorSuite extends SimpleIOSuite:
               evt,
             )
           }
-          (current ++ newEvts, Right(()))
+          (current ++ newEvts, Right(evts.flatten.map(_._3)))
       }.flatMap {
-        case Left(e)  => IO.raiseError(e)
-        case Right(_) => queue.offer(EventsAppended)
+        case Left(e)       => IO.raiseError(e)
+        case Right(result) => queue.offer(EventsAppended).as(result.toList)
       }
 
     def readFrom(
