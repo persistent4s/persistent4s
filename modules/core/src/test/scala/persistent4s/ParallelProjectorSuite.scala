@@ -159,12 +159,20 @@ object ParallelProjectorSuite extends SimpleIOSuite:
           keys.map(k => k -> current.get(k)).toMap
         }
 
-        override def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
+        override def persistStates(states: Map[String, Option[Int]]): IO[Unit] =
+          val toDelete = states.collect { case (key, None) => key }.toList
+          val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
+          for {
+            _ <- if (toDelete.nonEmpty) deleteMany(toDelete) else IO.unit
+            _ <- if (toUpsert.nonEmpty) upsertMany(toUpsert) else IO.unit
+          } yield ()
+
+        def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
           repoStates.toList.traverse_ { case (key, state) =>
             states.update(_.updated(key, state))
           }.void
 
-        override def deleteMany(keys: List[String]): IO[Unit] =
+        def deleteMany(keys: List[String]): IO[Unit] =
           keys.traverse_(key => states.update(_ - key))
 
       }
@@ -283,12 +291,20 @@ object ParallelProjectorSuite extends SimpleIOSuite:
                            keys.map(k => k -> current.get(k)).toMap
                          }
 
-                       override def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
+                       override def persistStates(states: Map[String, Option[Int]]): IO[Unit] =
+                         val toDelete = states.collect { case (key, None) => key }.toList
+                         val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
+                         for {
+                           _ <- if (toDelete.nonEmpty) deleteMany(toDelete) else IO.unit
+                           _ <- if (toUpsert.nonEmpty) upsertMany(toUpsert) else IO.unit
+                         } yield ()
+
+                       def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
                          repoStates.toList.traverse_ { case (key, state) =>
                            states.update(_.updated(key, state))
                          }.void
 
-                       override def deleteMany(keys: List[String]): IO[Unit] =
+                       def deleteMany(keys: List[String]): IO[Unit] =
                          keys.traverse_(key => states.update(_ - key))
 
                      }

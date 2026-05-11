@@ -160,6 +160,14 @@ object DefaultProjectorSuite extends SimpleIOSuite:
           keys.map(k => k -> current.get(k)).toMap
         }
 
+        def persistStates(states: Map[String, Option[Int]]): IO[Unit] =
+          val toDelete = states.collect { case (key, None) => key }.toList
+          val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
+          for {
+            _ <- if (toDelete.nonEmpty) deleteMany(toDelete) else IO.unit
+            _ <- if (toUpsert.nonEmpty) upsertMany(toUpsert) else IO.unit
+          } yield ()
+
         def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
           repoStates.toList.traverse_ { case (key, state) =>
             states.update(_.updated(key, state))
@@ -282,6 +290,14 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                          fetchCount.update(_ + keys.size) *> states.get.map { current =>
                            keys.map(k => k -> current.get(k)).toMap
                          }
+
+                       def persistStates(states: Map[String, Option[Int]]): IO[Unit] =
+                         val toDelete = states.collect { case (key, None) => key }.toList
+                         val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
+                         for {
+                           _ <- if (toDelete.nonEmpty) deleteMany(toDelete) else IO.unit
+                           _ <- if (toUpsert.nonEmpty) upsertMany(toUpsert) else IO.unit
+                         } yield ()
 
                        def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
                          repoStates.toList.traverse_ { case (key, state) =>
