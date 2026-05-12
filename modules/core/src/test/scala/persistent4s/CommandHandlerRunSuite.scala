@@ -17,10 +17,13 @@
 package persistent4s
 
 import cats.Monad
-import cats.effect.{Async, Concurrent, Deferred, IO, Ref}
+import cats.effect.{Async, Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
 import weaver.SimpleIOSuite
+import persistent4s.CommandHandlerRunSuite.TestEvent.StudentCreated
+import persistent4s.CommandHandlerRunSuite.TestEvent.StudentDeleted
+import persistent4s.CommandHandlerRunSuite.CounterEvent.Incremented
 
 object CommandHandlerRunSuite extends SimpleIOSuite:
 
@@ -28,13 +31,17 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
   // Minimal in-memory EventStore for testing — no testkit dependency needed
   // ---------------------------------------------------------------------------
 
-  final class InMemoryEventStore[F[_]: Monad: Async, A] private (
+  final class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
     store: Ref[F, Vector[EventEnvelope[A]]],
   ) extends EventStore[F, A]:
 
     def getEvents: F[Vector[EventEnvelope[A]]] = store.get
 
-    override def append(expectedIndex: Long, events: List[(Set[Tag], String, A)]*): F[Unit] =
+    override def append(
+      filter: EventFilter,
+      expectedIndex: Long,
+      events: List[(Set[Tag], EventTypeName, A)]*,
+    ): F[Unit] =
       store.modify { currentEvents =>
         val incomingTags = events.flatten.map(_._1).flatten.toSet
         val relevantEvents = currentEvents.filter(env => env.metadata.tags.exists(incomingTags.contains))
@@ -60,19 +67,23 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
         case Right(_)    => Async[F].unit
       }
 
-    override def read(eventTypes: List[String], tags: Set[Tag]*): Stream[F, EventEnvelope[A]] =
+    override def readFrom(
+      fromPosition: Long,
+      eventFilter: EventFilter,
+      maxEvents: Option[Int],
+    ): Stream[F, EventEnvelope[A]] =
       Stream
         .eval(store.get)
         .flatMap(Stream.emits)
         .filter { env =>
-          val matchesTags = env.metadata.tags.exists(tags.flatten.toSet.contains)
-          val matchesTypes = eventTypes.isEmpty || eventTypes.contains(env.metadata.eventType)
+          val matchesTags = env.metadata.tags.exists(eventFilter.tags.contains)
+          val matchesTypes = eventFilter.eventTypes.isEmpty || eventFilter.eventTypes.contains(env.metadata.eventType)
           matchesTags && matchesTypes
         }
 
   object InMemoryEventStore:
 
-    def make[F[_]: Async, A]: F[InMemoryEventStore[F, A]] =
+    def make[F[_]: Async, A <: Event]: F[InMemoryEventStore[F, A]] =
       Ref.of[F, Vector[EventEnvelope[A]]](Vector.empty).map(new InMemoryEventStore(_))
 
   // ---------------------------------------------------------------------------
@@ -87,7 +98,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
 
   final case class StudentState(exists: Boolean)
 
-  sealed trait TestEvent
+  sealed trait TestEvent extends Event
 
   object TestEvent:
 
@@ -105,7 +116,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
 
   final case class CounterState(value: Int)
 
-  sealed trait CounterEvent
+  sealed trait CounterEvent extends Event
 
   object CounterEvent:
 
@@ -120,8 +131,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     def evolve(command: IncrementCounter, state: CounterState, event: CounterEvent): CounterState =
       CounterState(state.value + 1)
 
-    def validate[F[_]: Concurrent](state: CounterState, command: IncrementCounter): F[Unit] =
-      Concurrent[F].unit
+    def validate(state: CounterState, command: IncrementCounter): Either[Throwable, Unit] =
+      Right(())
 
     def decide(state: CounterState, command: IncrementCounter): List[(Set[Tag], CounterEvent)] =
       List((Set(Tag("counter", command.counterId)), CounterEvent.Incremented(command.counterId)))
@@ -131,16 +142,20 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       case Left(_: IndexConflictException) => true
       case _                               => false
 
-  private def barrieredStore[A](
+  private def barrieredStore[A <: Event](
     underlying: InMemoryEventStore[IO, A],
     arrivals: Ref[IO, Int],
     gate: Deferred[IO, Unit],
   ): EventStore[IO, A] =
     new EventStore[IO, A]:
-      def append(expectedIndex: Long, events: List[(Set[Tag], String, A)]*): IO[Unit] =
-        underlying.append(expectedIndex, events*)
-      def read(eventTypes: List[String], tags: Set[Tag]*): Stream[IO, EventEnvelope[A]] =
-        underlying.read(eventTypes, tags*).onFinalize {
+      def append(filter: EventFilter, expectedIndex: Long, events: List[(Set[Tag], EventTypeName, A)]*): IO[Unit] =
+        underlying.append(filter, expectedIndex, events*)
+      def readFrom(
+        fromPosition: Long,
+        eventFilter: EventFilter,
+        maxEvents: Option[Int],
+      ): Stream[IO, EventEnvelope[A]] =
+        underlying.readFrom(fromPosition, eventFilter, maxEvents).onFinalize {
           arrivals.updateAndGet(_ + 1).flatMap { count =>
             if count == 2 then gate.complete(()).attempt.void else IO.unit
           } >> gate.get
@@ -159,8 +174,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     def evolve(command: CreateStudent, state: StudentState, event: TestEvent): StudentState =
       CommandHandlerRunSuite.evolve(state, event)
 
-    def validate[F[_]: Concurrent](state: StudentState, command: CreateStudent): F[Unit] =
-      Concurrent[F].raiseError(new RuntimeException("Student already exists")).whenA(state.exists)
+    def validate(state: StudentState, command: CreateStudent): Either[Throwable, Unit] =
+      if (state.exists) Left(new RuntimeException("Student already exists")) else Right(())
 
     def decide(state: StudentState, command: CreateStudent): List[(Set[Tag], TestEvent)] =
       List((Set(studentTag(command.studentId)), TestEvent.StudentCreated(command.studentId)))
@@ -174,8 +189,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     def evolve(command: DeleteStudent, state: StudentState, event: TestEvent): StudentState =
       CommandHandlerRunSuite.evolve(state, event)
 
-    def validate[F[_]: Concurrent](state: StudentState, command: DeleteStudent): F[Unit] =
-      Concurrent[F].raiseError(new RuntimeException("Student does not exist")).unlessA(state.exists)
+    def validate(state: StudentState, command: DeleteStudent): Either[Throwable, Unit] =
+      if (!state.exists) Left(new RuntimeException("Student does not exist")) else Right(())
 
     def decide(state: StudentState, command: DeleteStudent): List[(Set[Tag], TestEvent)] =
       List((Set(studentTag(command.studentId)), TestEvent.StudentDeleted(command.studentId)))
@@ -191,8 +206,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     def evolve(command: CreateStudent, state: StudentState, event: TestEvent): StudentState =
       CommandHandlerRunSuite.evolve(state, event)
 
-    def validate[F[_]: Concurrent](state: StudentState, command: CreateStudent): F[Unit] =
-      Concurrent[F].raiseError(new RuntimeException("Student already exists")).whenA(state.exists)
+    def validate(state: StudentState, command: CreateStudent): Either[Throwable, Unit] =
+      if (state.exists) Left(new RuntimeException("Student already exists")) else Right(())
 
     def decide(state: StudentState, command: CreateStudent): List[(Set[Tag], TestEvent)] =
       List((Set(studentTag(command.studentId)), TestEvent.StudentCreated(command.studentId)))
@@ -212,7 +227,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     yield expect.all(
       events.length == 1,
       events.head.metadata.tags == Set(studentTag("1")),
-      events.head.metadata.eventType == "StudentCreated",
+      events.head.metadata.eventType == EventTypeName.of[StudentCreated],
       events.head.payload == TestEvent.StudentCreated("1"),
     )
   }
@@ -221,8 +236,9 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     for
       store <- InMemoryEventStore.make[IO, TestEvent]
       _     <- store.append(
+             EventFilter(),
              0L,
-             List((Set(studentTag("1")), "StudentCreated", TestEvent.StudentCreated("1"))),
+             List((Set(studentTag("1")), EventTypeName.of[StudentCreated], TestEvent.StudentCreated("1"))),
            )
       _ <- {
         given EventStore[IO, TestEvent] = store
@@ -232,7 +248,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     yield expect.all(
       events.length == 2,
       events.last.metadata.tags == Set(studentTag("1")),
-      events.last.metadata.eventType == "StudentDeleted",
+      events.last.metadata.eventType == EventTypeName.of[StudentDeleted],
       events.last.payload == TestEvent.StudentDeleted("1"),
     )
   }
@@ -274,7 +290,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       failureCount == 1,
       events.length == 1,
       events.head.metadata.tags == Set(studentTag("1")),
-      events.head.metadata.eventType == "StudentCreated",
+      events.head.metadata.eventType == EventTypeName.of[StudentCreated],
       events.head.payload == TestEvent.StudentCreated("1"),
     )
   }
@@ -299,7 +315,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     yield expect.all(
       successCount == 2,
       events.length == 2,
-      events.forall(_.metadata.eventType == "Incremented"),
+      events.forall(_.metadata.eventType == EventTypeName.of[Incremented]),
     )
   }
 
@@ -330,21 +346,22 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
 
   test("run only folds events matching eventTypes override into state") {
     val handlerFilteredToDeletedOnly = new CommandHandler[DeleteStudent, StudentState, TestEvent]:
-      override def eventTypes: Option[Set[String]] = Some(Set("StudentDeleted"))
+      override def eventTypes: Option[Set[EventTypeName]] = Some(Set(EventTypeName.of[StudentDeleted]))
       def tags(command: DeleteStudent): Set[Tag] = Set(studentTag(command.studentId))
       def initial: StudentState = StudentState(exists = false)
       def evolve(command: DeleteStudent, state: StudentState, event: TestEvent): StudentState =
         CommandHandlerRunSuite.evolve(state, event)
-      def validate[F[_]: Concurrent](state: StudentState, command: DeleteStudent): F[Unit] =
-        Concurrent[F].raiseError(new RuntimeException("Student does not exist")).unlessA(state.exists)
+      def validate(state: StudentState, command: DeleteStudent): Either[Throwable, Unit] =
+        if (!state.exists) Left(new RuntimeException("Student does not exist")) else Right(())
       def decide(state: StudentState, command: DeleteStudent): List[(Set[Tag], TestEvent)] =
         List((Set(studentTag(command.studentId)), TestEvent.StudentDeleted(command.studentId)))
 
     for
       store <- InMemoryEventStore.make[IO, TestEvent]
       _     <- store.append(
+             EventFilter(),
              0L,
-             List((Set(studentTag("1")), "StudentCreated", TestEvent.StudentCreated("1"))),
+             List((Set(studentTag("1")), EventTypeName.of[StudentCreated], TestEvent.StudentCreated("1"))),
            )
       result <- {
                   given EventStore[IO, TestEvent] = store
@@ -363,8 +380,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       def initial: StudentState = StudentState(exists = false)
       def evolve(command: CreateStudent, state: StudentState, event: TestEvent): StudentState =
         CommandHandlerRunSuite.evolve(state, event)
-      def validate[F[_]: Concurrent](state: StudentState, command: CreateStudent): F[Unit] =
-        Concurrent[F].raiseError(new RuntimeException("Student already exists")).whenA(state.exists)
+      def validate(state: StudentState, command: CreateStudent): Either[Throwable, Unit] =
+        if (state.exists) Left(new RuntimeException("Student already exists")) else Right(())
       def decide(state: StudentState, command: CreateStudent): List[(Set[Tag], TestEvent)] =
         List(
           (Set(studentTag(command.studentId)), TestEvent.StudentCreated(command.studentId)),
@@ -380,9 +397,9 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       events <- store.getEvents
     yield expect.all(
       events.length == 2,
-      events(0).metadata.eventType == "StudentCreated",
+      events(0).metadata.eventType == EventTypeName.of[StudentCreated],
       events(0).payload == TestEvent.StudentCreated("1"),
-      events(1).metadata.eventType == "StudentDeleted",
+      events(1).metadata.eventType == EventTypeName.of[StudentDeleted],
       events(1).payload == TestEvent.StudentDeleted("1"),
     )
   }
