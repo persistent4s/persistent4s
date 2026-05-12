@@ -24,6 +24,7 @@ import persistent4s.EventStoreNotification.*
 import weaver.SimpleIOSuite
 
 import scala.concurrent.duration.*
+import java.util.UUID
 
 object DefaultProjectorSuite extends SimpleIOSuite:
 
@@ -59,7 +60,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Set[Tag], EventTypeName, A)]*,
+      evts: List[(Option[UUID], Set[Tag], EventTypeName, A)]*,
     ): IO[Unit] =
       events.modify { current =>
         val relevant = current.filter(matches(_, eventFilter))
@@ -67,9 +68,15 @@ object DefaultProjectorSuite extends SimpleIOSuite:
         if actualIdx != expectedIndex then (current, Left(new IndexConflictException(expectedIndex, actualIdx)))
         else
           val lastPos = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvts = evts.flatten.zipWithIndex.map { case ((tags, eventType, evt), i) =>
+          val newEvts = evts.flatten.zipWithIndex.map { case ((maybeId, tags, eventType, evt), i) =>
             EventEnvelope(
-              EventMetadata(lastPos + i.toLong + 1L, tags, eventType, java.time.Instant.now()),
+              EventMetadata(
+                lastPos + i.toLong + 1L,
+                maybeId.getOrElse(UUID.randomUUID()),
+                tags,
+                eventType,
+                java.time.Instant.now(),
+              ),
               evt,
             )
           }
@@ -133,7 +140,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       store.append(
         EventFilter(),
         i.toLong,
-        List((tags, EventTypeName.fromInstance(event), event)),
+        List((None, tags, EventTypeName.fromInstance(event), event)),
       )
     }
 
@@ -409,6 +416,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                   0L,
                   List(
                     (
+                      None,
                       Set(entityTag("1")),
                       EventTypeName.fromString("Created"),
                       TestEvent.Created("1"),
