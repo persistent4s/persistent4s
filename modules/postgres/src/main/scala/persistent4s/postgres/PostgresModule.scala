@@ -201,10 +201,13 @@ object PostgresModule:
     sql"""
       CREATE TABLE IF NOT EXISTS events (
         sequence_number BIGSERIAL PRIMARY KEY,
+        event_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
         event_type      TEXT        NOT NULL,
         tags            JSONB       NOT NULL DEFAULT '[]',
         payload         JSONB       NOT NULL DEFAULT '{}',
-        recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+        recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+        CONSTRAINT unique_event_id UNIQUE (event_id)
       )
     """.command
 

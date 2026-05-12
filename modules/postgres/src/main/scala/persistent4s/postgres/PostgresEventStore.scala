@@ -28,6 +28,8 @@ import skunk.data.Identifier
 import skunk.implicits.*
 
 import persistent4s.*
+import java.util.UUID
+import java.time.OffsetDateTime
 
 /** A PostgreSQL-backed implementation of the EventStore trait. This implementation uses Skunk for database access and
   * implements optimistic concurrency control for event appending.
@@ -64,7 +66,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
   override def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
-    events: List[(Set[Tag], EventTypeName, A)]*,
+    events: List[(Option[UUID], Set[Tag], EventTypeName, A)]*,
   ): F[Unit] =
     val flatEvents = events.flatten.toList
     if flatEvents.isEmpty then Async[F].unit
@@ -76,8 +78,8 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
           for
             _ <- acquireAppendLocks(session, allTags)
             _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
-            _ <- flatEvents.traverse_ { case (tags, eventType, event) =>
-                   insertEvent(session, tags, eventType, event).void
+            _ <- flatEvents.traverse_ { case (eventIdOpt, tags, eventType, event) =>
+                   insertEvent(session, eventIdOpt, tags, eventType, event).void
                  }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield ()
@@ -145,14 +147,12 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
                   _.stream(fromPosition *: eventTypesList *: tagsList *: max *: EmptyTuple, FetchSize),
                 )
 
-        rowStream.evalMap { case (seqNum, eventType, tags, payload, recordedAt) =>
+        rowStream.evalMap { case (seqNum, eventId, eventType, tags, payload, recordedAt) =>
           val eventTypeName = EventTypeName.fromString(eventType)
           parsePayload(eventTypeName, payload).map { event =>
             EventEnvelope(
               EventMetadata(
-                globalPosition = seqNum,
-                tags = tags,
-                eventType = eventTypeName,
+                globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName,
                 timestamp = recordedAt.toInstant,
               ),
               event,
@@ -229,6 +229,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
 
   private def insertEvent(
     session: Session[F],
+    eventIdOpt: Option[UUID],
     tags: Set[Tag],
     eventType: EventTypeName,
     event: A,
@@ -236,9 +237,15 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     val tagsJson = tagsToJson(tags)
     val payloadJson = parseJson(codec.encode(event)).getOrElse(Json.obj())
     for
-      sequenceNumber <- session.unique(insertEventQuery)(
-                          eventType.value *: tagsJson *: payloadJson *: EmptyTuple,
-                        )
+      sequenceNumber <- eventIdOpt match
+                          case Some(eventId) =>
+                            session.unique(insertEventWithIdQuery)(
+                              eventId *: eventType.value *: tagsJson *: payloadJson *: EmptyTuple,
+                            )
+                          case None =>
+                            session.unique(insertEventQuery)(
+                              eventType.value *: tagsJson *: payloadJson *: EmptyTuple,
+                            )
       _ <- insertEventTags(session, sequenceNumber, tags)
     yield sequenceNumber
 
@@ -301,9 +308,9 @@ object PostgresEventStore:
   }(tags => Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*))
 
   private val eventDecoder: Decoder[
-    Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple,
+    Long *: UUID *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple,
   ] =
-    int8 *: text *: tagsCodec *: jsonb *: timestamptz
+    int8 *: uuid *: text *: tagsCodec *: jsonb *: timestamptz
 
   private val acquireTagLockQuery: Query[String, String] =
     sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
@@ -312,6 +319,13 @@ object PostgresEventStore:
     sql"""
       INSERT INTO events (event_type, tags, payload)
       VALUES ($text, $jsonb, $jsonb)
+      RETURNING sequence_number
+    """.query(int8)
+
+  private val insertEventWithIdQuery: Query[UUID *: String *: Json *: Json *: EmptyTuple, Long] =
+    sql"""
+      INSERT INTO events (event_id, event_type, tags, payload)
+      VALUES ($uuid, $text, $jsonb, $jsonb)
       RETURNING sequence_number
     """.query(int8)
 
@@ -363,11 +377,11 @@ object PostgresEventStore:
     """.query(int8)
 
   private type EventRow =
-    Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple
+    Long *: UUID *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple
 
   private val readAllQuery: Query[Long, EventRow] =
     sql"""
-      SELECT sequence_number, event_type, tags, payload, recorded_at
+      SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
       FROM events
       WHERE sequence_number > $int8
       ORDER BY sequence_number ASC
@@ -375,7 +389,7 @@ object PostgresEventStore:
 
   private val readAllLimitedQuery: Query[Long *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_type, tags, payload, recorded_at
+      SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
       FROM events
       WHERE sequence_number > $int8
       ORDER BY sequence_number ASC
@@ -386,7 +400,7 @@ object PostgresEventStore:
     numEventTypes: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_type, tags, payload, recorded_at
+      SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
       FROM events
       WHERE sequence_number > $int8
         AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -397,9 +411,9 @@ object PostgresEventStore:
     numEventTypes: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_type, tags, payload, recorded_at
+      SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
       FROM events
-      WHERE sequence_number > $int8
+      WHERE sequence_number > $int8 
         AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
       ORDER BY sequence_number ASC
       LIMIT $int4
@@ -409,7 +423,7 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND EXISTS (
@@ -425,7 +439,7 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND EXISTS (
@@ -443,7 +457,7 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -461,7 +475,7 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
