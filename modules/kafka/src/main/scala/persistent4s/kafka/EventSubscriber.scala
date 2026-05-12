@@ -17,8 +17,8 @@
 package persistent4s.kafka
 
 import fs2.Stream
-import persistent4s.EventEnvelope
+import persistent4s.{Event, EventEnvelope}
 
-trait EventSubscriber[F[_], A]:
+trait EventSubscriber[F[_], A <: Event]:
 
   def subscribe(topic: String, fromBeginning: Boolean): Stream[F, EventEnvelope[A]]

@@ -22,10 +22,10 @@ package persistent4s
   * @tparam A
   *   the event type
   */
-trait EventCodec[A]:
+trait EventCodec[A <: Event]:
 
   /** Serialize an event to a String representation. */
   def encode(event: A): String
 
   /** Deserialize an event from its type name and String representation. */
-  def decode(eventType: String, payload: String): Either[Throwable, A]
+  def decode(eventType: EventTypeName, payload: String): Either[Throwable, A]

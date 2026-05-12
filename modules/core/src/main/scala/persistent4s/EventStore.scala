@@ -20,32 +20,49 @@ import fs2.Stream
 
 /** An EventStore is a component that allows you to append and read events in an event-sourced system. Appending events
   * to the store is done with optimistic concurrency control.
+  *
+  * @tparam F
+  *   the effect type, such as `cats.effect.IO`
+  * @tparam A
+  *   the event type, which must extend the Event trait
   */
-trait EventStore[F[_], A]:
+trait EventStore[F[_], A <: Event]:
 
-  /** Append events to the event store. The expected index is used for optimistic concurrency control. If the actual
-    * index in the event store does not match the expected index, an IndexConflictException is thrown and none of the
-    * events are appended.
+  /** Append events to the event store using optimistic concurrency control.
     *
+    * The `expectedIndex` must equal the global position of the most recent event that matches `eventFilter`. If another
+    * event matching the filter has been appended concurrently, the actual index will be higher and an
+    * [[IndexConflictException]] is raised with no events written. Pass `expectedIndex = 0` when no prior matching
+    * events are expected (i.e. this is the first append for that filter scope).
+    *
+    * The `events` parameter is variadic so that callers who build events in separate groups can pass multiple lists
+    * without flattening them first. All lists are treated as a single ordered sequence — there is no semantic
+    * difference between one list of N events and N lists of one event each.
+    *
+    * If all lists are empty the call is a no-op: no events are written and no notification is emitted.
+    *
+    * @param eventFilter
+    *   the filter used to determine the concurrency scope (which prior events are checked for conflicts)
     * @param expectedIndex
-    *   the expected index of the event store before appending the events
+    *   the global position of the last known matching event, or 0 if none are expected
     * @param events
-    *   the events to append, each with a set of tags and an event type
+    *   one or more lists of events to append, each event paired with its tags and type name
     * @return
-    *   a F[Unit] that completes when the events have been appended, or fails with an IndexConflictException if the
-    *   expected index does not match the actual index
+    *   a F[Unit] that completes when the events have been written, or fails with [[IndexConflictException]] on conflict
     */
-  def append(expectedIndex: Long, events: List[(Set[Tag], String, A)]*): F[Unit]
+  def append(eventFilter: EventFilter, expectedIndex: Long, events: List[(Set[Tag], EventTypeName, A)]*): F[Unit]
 
-  /** Read events from the event store, filtering by event types and tags. The returned Stream will emit
-    * EventEnvelope[A] instances that match the specified event types and tags. The Stream will complete when there are
-    * no more matching events to read.
+  /** Read events from the event store starting from a specific position, filtering by event types and tags. The
+    * returned Stream will emit EventEnvelope[A] instances that match the specified event types and tags. The Stream
+    * will complete when there are no more matching events to read.
     *
-    * @param eventTypes
-    *   the types of events to read
-    * @param tags
-    *   the tags to filter events by
+    * @param fromPosition
+    *   the position in the event store to start reading from (exclusive)
+    * @param eventFilter
+    *   the filter to apply to the events
+    * @param maxEvents
+    *   the maximum number of events to read, or None to read all available events
     * @return
     *   a Stream of EventEnvelope[A] containing the matching events
     */
-  def read(eventTypes: List[String], tags: Set[Tag]*): Stream[F, EventEnvelope[A]]
+  def readFrom(fromPosition: Long, eventFilter: EventFilter, maxEvents: Option[Int] = None): Stream[F, EventEnvelope[A]]

@@ -1,4 +1,4 @@
-ThisBuild / tlBaseVersion          := "0.1"
+ThisBuild / tlBaseVersion          := "0.2"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
 ThisBuild / scalaVersion           := "3.8.3"
 ThisBuild / tlJdkRelease           := Some(17)
@@ -10,8 +10,10 @@ ThisBuild / developers             := List(
   tlGitHubDev("antoniojimeneznieto", "Antonio Jimenez"),
   tlGitHubDev("Bjolidon", "Bastien Jolidon"),
 )
-ThisBuild / scalafmtOnCompile := false // recommended in Scala 3
-ThisBuild / testFrameworks    += new TestFramework("weaver.framework.CatsEffect")
+ThisBuild / scalafmtOnCompile        := false // recommended in Scala 3
+ThisBuild / testFrameworks           += new TestFramework("weaver.framework.CatsEffect")
+ThisBuild / Test / logBuffered       := false
+ThisBuild / Test / parallelExecution := false
 
 Global / onChangedBuildSource := ReloadOnSourceChanges
 Global / semanticdbEnabled    := true // for metals
@@ -21,7 +23,7 @@ val CatsEffectV = "3.7.0"
 
 val Fs2V = "3.13.0"
 
-val SkunkV = "0.6.5"
+val SkunkV = "1.0.0"
 
 val CirceV = "0.14.15"
 
@@ -33,7 +35,7 @@ val LogbackV = "1.5.32"
 
 val TestcontainersV = "1.21.4"
 
-val Fs2KafkaV = "3.9.1"
+val Fs2KafkaV = "4.0.0"
 
 val WeaverV = "0.12.0"
 
@@ -41,9 +43,11 @@ val Http4sV = "0.23.34"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 
+val PureconfigV = "0.17.10"
+
 lazy val root = (project in file("."))
   .enablePlugins(NoPublishPlugin)
-  .aggregate(core, postgres, circe, kafka, testkit, tests, examples)
+  .aggregate(core, postgres, circe, kafka, testkit, tests, examples, monitoring)
 
 lazy val core = (project in file("modules/core"))
   .settings(
@@ -58,14 +62,17 @@ lazy val core = (project in file("modules/core"))
   )
 
 lazy val postgres = (project in file("modules/postgres"))
-  .dependsOn(core)
+  .dependsOn(core, circe)
   .settings(
     name                 := "persistent4s-postgres",
     libraryDependencies ++= List(
-      "org.tpolecat"      %% "skunk-core"      % SkunkV,
-      "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
-      "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
-      "org.testcontainers" % "postgresql"      % TestcontainersV % Test,
+      "org.tpolecat"          %% "skunk-core"      % SkunkV,
+      "org.tpolecat"          %% "skunk-circe"     % SkunkV,
+      "org.typelevel"         %% "otel4s-core"     % Otel4sV,
+      "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
+      "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
+      "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
+      "org.testcontainers"     % "postgresql"      % TestcontainersV % Test,
     ),
   )
 
@@ -86,7 +93,7 @@ lazy val kafka = (project in file("modules/kafka"))
   .settings(
     name                 := "persistent4s-kafka",
     libraryDependencies ++= List(
-      "com.github.fd4s"   %% "fs2-kafka"       % Fs2KafkaV,
+      "org.typelevel"     %% "fs2-kafka"       % Fs2KafkaV,
       "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
       "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
       "org.testcontainers" % "kafka"           % TestcontainersV % Test,
@@ -94,7 +101,6 @@ lazy val kafka = (project in file("modules/kafka"))
   )
 
 lazy val testkit = (project in file("modules/testkit"))
-  .dependsOn(core)
   .settings(
     name                 := "persistent4s-testkit",
     libraryDependencies ++= List(
@@ -116,7 +122,7 @@ lazy val tests = (project in file("modules/tests"))
   )
 
 lazy val examples = (project in file("modules/examples"))
-  .dependsOn(core, testkit)
+  .dependsOn(core, testkit, postgres, circe, monitoring)
   .enablePlugins(NoPublishPlugin, Smithy4sCodegenPlugin)
   .settings(
     name                 := "persistent4s-examples",
@@ -125,6 +131,21 @@ lazy val examples = (project in file("modules/examples"))
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s-swagger" % Smithy4sV,
       "org.http4s"                   %% "http4s-ember-server"     % Http4sV,
       "ch.qos.logback"                % "logback-classic"         % LogbackV,
+    ),
+  )
+
+lazy val monitoring = (project in file("modules/monitoring"))
+  .dependsOn(core, postgres % Test)
+  .settings(
+    name                 := "persistent4s-monitoring",
+    libraryDependencies ++= List(
+      "org.http4s"        %% "http4s-ember-server" % Http4sV,
+      "org.http4s"        %% "http4s-dsl"          % Http4sV,
+      "org.typelevel"     %% "weaver-cats"         % WeaverV         % Test,
+      "ch.qos.logback"     % "logback-classic"     % LogbackV        % Test,
+      "org.testcontainers" % "postgresql"          % TestcontainersV % Test,
+      "org.http4s"        %% "http4s-ember-client" % Http4sV         % Test,
+      "org.typelevel"     %% "otel4s-core"         % Otel4sV,
     ),
   )
 
