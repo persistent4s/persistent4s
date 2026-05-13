@@ -17,8 +17,41 @@
 package persistent4s.kafka
 
 import fs2.Stream
+import fs2.kafka.CommittableOffset
 import persistent4s.{Event, EventEnvelope}
 
+/** Subscribes to a Kafka topic and decodes records back into [[EventEnvelope]]s.
+  *
+  * Each emitted element is paired with its [[CommittableOffset]] so the consumer decides when offsets are committed.
+  * This keeps end-to-end semantics (at-least-once vs. effectively-once via idempotent downstream writes) in the caller's
+  * hands.
+  *
+  * ==Ordering guarantee==
+  *
+  * Within any single tag scope, events are delivered in the order they were appended (i.e. in ascending
+  * `globalPosition`). This holds because the event store serializes appends that share at least one tag.
+  *
+  * Across disjoint tag scopes, ordering matches the relay's publication order, which is the commit order of the
+  * appending transactions — **not** necessarily ascending `globalPosition`. Two independently-tagged events with
+  * `globalPosition` 5 and 6 may be delivered as `(6, 5)` if the writer of 6 committed first. This is acceptable under
+  * DCB: causally independent events have no defined relative order, and consumers that care about ordering should
+  * filter by tag.
+  *
+  * The ordering guarantee assumes a single [[KafkaRelay]] instance is publishing to the topic; see [[KafkaRelay]] for
+  * the deployment constraint.
+  */
 trait EventSubscriber[F[_], A <: Event]:
 
-  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, EventEnvelope[A]]
+  /** Subscribe to `topic` and stream decoded envelopes paired with their committable offset.
+    *
+    * Each invocation creates an independent consumer using the [[KafkaConsumerConfig]] supplied at construction time
+    * (notably the consumer `groupId`). Calling `subscribe` with different topics from the same `EventSubscriber`
+    * results in independent consumers, each tracking its own offsets per topic.
+    *
+    * @param topic
+    *   the Kafka topic to subscribe to
+    * @param fromBeginning
+    *   if true and no committed offset exists for the consumer group, seek to the earliest offset; otherwise rely on
+    *   the broker's `auto.offset.reset` policy.
+    */
+  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, (EventEnvelope[A], CommittableOffset[F])]
