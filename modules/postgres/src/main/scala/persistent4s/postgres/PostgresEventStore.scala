@@ -236,7 +236,9 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     event: A,
   ): F[Long] =
     val tagsJson = tagsToJson(tags)
-    val payloadJson = parseJson(codec.encode(event)).getOrElse(Json.obj())
+    val payloadJson = parseJson(codec.encode(event)) match
+      case Right(json) => json
+      case Left(error) => throw new RuntimeException(s"Failed to encode event payload to JSON: ${error.getMessage}")
     for
       sequenceNumber <- eventIdOpt match
                           case Some(eventId) =>
@@ -313,13 +315,18 @@ object PostgresEventStore:
   ): PostgresEventStore[F, A] =
     new PostgresEventStore[F, A](pool, codec, channelId, outboxEnabled)
 
-  private val tagsCodec: Codec[Set[Tag]] = jsonb.imap { json =>
-    json.asArray
-      .map(_.flatMap(_.asString).flatMap(Tag.fromString).toSet)
-      .getOrElse(Set.empty)
-  }(tags => Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*))
+  private val tagsCodec: Codec[Set[Tag]] =
+    jsonb.eimap[Set[Tag]] { json =>
+      json.asArray.toRight(s"tags column is not a JSON array: ${json.noSpaces}").flatMap { values =>
+        values.toList.traverse { v =>
+          v.asString
+            .toRight(s"tag element is not a string: ${v.noSpaces}")
+            .flatMap(s => Tag.fromString(s).toRight(s"invalid tag: '$s'"))
+        }.map(_.toSet)
+      }
+    }(tags => Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*))
 
-  private val eventDecoder: Decoder[
+  private[postgres] val eventDecoder: Decoder[
     Long *: UUID *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple,
   ] =
     int8 *: uuid *: text *: tagsCodec *: jsonb *: timestamptz
