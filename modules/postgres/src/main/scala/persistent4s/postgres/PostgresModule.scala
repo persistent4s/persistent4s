@@ -78,8 +78,9 @@ object PostgresModuleError:
   */
 object PostgresModule:
 
-  /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
-  /** @param outbox
+  /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool.
+    *
+    * @param outbox
     *   present only when the module was built with `enableOutbox = true`; otherwise `None` and no outbox table is
     *   created
     */
@@ -197,9 +198,7 @@ object PostgresModule:
 
   private def createSchema[F[_]: Sync](session: Session[F], enableOutbox: Boolean): F[Unit] =
     val outboxDdl =
-      if enableOutbox then
-        session.execute(PostgresOutbox.createTableCommand) *>
-          session.execute(PostgresOutbox.createUnpublishedIndexCommand).void
+      if enableOutbox then session.execute(PostgresOutbox.createTableCommand).void
       else Sync[F].unit
 
     session.execute(createTableCommand) *>
