@@ -94,6 +94,7 @@ lazy val kafka = (project in file("modules/kafka"))
     name                 := "persistent4s-kafka",
     libraryDependencies ++= List(
       "org.typelevel"     %% "fs2-kafka"       % Fs2KafkaV,
+      "io.circe"          %% "circe-core"      % CirceV,
       "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
       "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
       "org.testcontainers" % "kafka"           % TestcontainersV % Test,

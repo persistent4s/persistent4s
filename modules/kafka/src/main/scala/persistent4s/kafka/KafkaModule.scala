@@ -18,6 +18,12 @@ package persistent4s.kafka
 
 import cats.effect.{Async, Resource}
 import persistent4s.{Event, EventCodec, Outbox}
+import fs2.kafka.*
+import persistent4s.EventEnvelope
+import cats.Parallel
+import cats.syntax.all.*
+import fs2.Chunk
+import io.circe.Json
 
 /** Entry point for building the Kafka-side components of the library.
   *
@@ -29,13 +35,51 @@ object KafkaModule:
   /** Build a Kafka [[EventPublisher]] backed by an fs2-kafka producer. The underlying producer is released when the
     * resource is finalized.
     */
-  def publisher[F[_]: Async, A <: Event](
+  def publisher[F[_]: Async: Parallel, A <: Event](
     config: KafkaProducerConfig[A],
     codec: EventCodec[A],
-  ): Resource[F, EventPublisher[F, A]] = ???
+  ): Resource[F, EventPublisher[F, A]] = {
+    val settings: ProducerSettings[F, String, String] =
+      ProducerSettings[F, String, String]
+        .withBootstrapServers(config.bootstrapServers)
+        .withProperties(config.producerProperties)
+        .withEnableIdempotence(true)
+
+    def buildHeaders(envelope: EventEnvelope[A]): Headers =
+      val tagsJson = Json
+        .arr(envelope.metadata.tags.toSeq.sortBy(_.value).map(t => Json.fromString(t.value))*)
+        .noSpaces
+      Headers.empty
+        .append(Header("persistent4s.eventId", envelope.metadata.id.toString))
+        .append(Header("persistent4s.globalPosition", envelope.metadata.globalPosition.toString))
+        .append(Header("persistent4s.eventType", envelope.metadata.eventType.value))
+        .append(Header("persistent4s.tags", tagsJson))
+        .append(Header("persistent4s.timestamp", envelope.metadata.timestamp.toString))
+        .append(Header("persistent4s.metaVersion", "1"))
+
+    def toRecord(topic: String, envelope: EventEnvelope[A]): ProducerRecord[String, String] =
+      val key = config.recordKey(envelope)
+      val value = codec.encode(envelope.payload)
+      val headers = buildHeaders(envelope)
+      ProducerRecord(topic, key, value).withHeaders(headers)
+
+    KafkaProducer.resource(settings).map { producer =>
+      new EventPublisher[F, A] {
+
+        override def publish(topic: String, envelope: EventEnvelope[A]): F[Unit] =
+          producer.produceOne_(toRecord(topic, envelope)).flatten.void
+
+        override def publish(topic: String, envelopes: List[EventEnvelope[A]]): F[Unit] =
+          if envelopes.isEmpty then Async[F].unit
+          else producer.produce(Chunk.from(envelopes.map(toRecord(topic, _)))).flatten.void
+
+      }
+    }
+
+  }
 
   /** Build a Kafka [[EventSubscriber]] backed by an fs2-kafka consumer. */
-  def subscriber[F[_]: Async, A <: Event](
+  def subscriber[F[_]: Async: Parallel, A <: Event](
     config: KafkaConsumerConfig,
     codec: EventCodec[A],
   ): Resource[F, EventSubscriber[F, A]] = ???
@@ -47,7 +91,7 @@ object KafkaModule:
     * '''Deployment constraint:''' run at most one relay per service against the same outbox/topic. See [[KafkaRelay]]
     * for the rationale and the producer-idempotence requirement that backs the ordering guarantee.
     */
-  def relay[F[_]: Async, A <: Event](
+  def relay[F[_]: Async: Parallel, A <: Event](
     outbox: Outbox[F, A],
     config: KafkaProducerConfig[A],
     codec: EventCodec[A],

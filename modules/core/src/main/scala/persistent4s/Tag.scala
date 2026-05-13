@@ -41,3 +41,9 @@ object Tag:
     s.split(":", 2) match
       case Array(category, id) => Some(Tag(category, id))
       case _                   => None
+
+  def setToString(tags: Set[Tag]): String =
+    tags.map(_.value).mkString(",")
+
+  def stringToSet(s: String): Set[Tag] =
+    s.split(",").flatMap(fromString).toSet
