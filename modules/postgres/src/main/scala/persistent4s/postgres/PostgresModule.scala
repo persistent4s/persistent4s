@@ -52,6 +52,7 @@ object PostgresModuleError:
          |  password = "your_password"
          |  database = "eventstore"
          |  max-connections = 10
+         |  ssl = "Disabled"   # Disabled | System | TrustAll
          |}
          |
          |Configuration error details: $details""".stripMargin
@@ -175,8 +176,17 @@ object PostgresModule:
       .withPort(config.port)
       .withUserAndPassword(config.user, config.password)
       .withDatabase(config.database)
+      .withSSL(toSkunkSSL(config.ssl))
       .pooled(config.maxConnections)
       .adaptError { case e => PostgresModuleError.ConnectionFailed(e) }
+
+  private def toSkunkSSL(mode: PostgresSslMode): SSL =
+    mode match
+      case PostgresSslMode.Disabled => SSL.None
+      case PostgresSslMode.System   => SSL.System
+      // Skunk's `SSL.Trusted` actually trusts all certs (uses an insecure TLSContext under the hood); the name is
+      // misleading. We expose it as `TrustAll` so the config is honest about what it does.
+      case PostgresSslMode.TrustAll => SSL.Trusted
 
   private def initializeDatabase[F[_]: Async](
     pool: Resource[F, Session[F]],

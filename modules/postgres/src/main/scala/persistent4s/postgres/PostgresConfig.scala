@@ -18,6 +18,19 @@ package persistent4s.postgres
 
 import pureconfig.ConfigReader
 
+/** SSL/TLS mode for the PostgreSQL connection.
+  *
+  *   - [[Disabled]] — no encryption. The default; suitable for local development.
+  *   - [[System]] — encrypted, validate the server certificate chain against the JVM's default trust store. Honors
+  *     `-Djavax.net.ssl.trustStore` and friends, so production setups that ship a custom trust store via JVM system
+  *     properties work without further configuration. This is the production default.
+  *   - [[TrustAll]] — encrypted, but does '''not''' validate the server certificate (accepts any cert, including
+  *     self-signed). Vulnerable to MITM. Only use for debugging or against self-signed dev servers; never in
+  *     production.
+  */
+enum PostgresSslMode derives ConfigReader:
+  case Disabled, System, TrustAll
+
 /** Configuration for connecting to a PostgreSQL database for the event store.
   *
   * @param host
@@ -32,6 +45,9 @@ import pureconfig.ConfigReader
   *   the database name
   * @param maxConnections
   *   the maximum number of connections in the pool (default: 32)
+  * @param ssl
+  *   SSL/TLS mode (default: [[PostgresSslMode.Disabled]]). For production, set to [[PostgresSslMode.System]]. See
+  *   [[PostgresSslMode]] for the per-mode trade-offs.
   */
 final case class PostgresConfig(
   host: String,
@@ -40,4 +56,5 @@ final case class PostgresConfig(
   password: String,
   database: String,
   maxConnections: Int = 32,
+  ssl: PostgresSslMode = PostgresSslMode.Disabled,
 ) derives ConfigReader
