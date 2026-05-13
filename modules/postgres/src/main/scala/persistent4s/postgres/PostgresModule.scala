@@ -79,9 +79,14 @@ object PostgresModuleError:
 object PostgresModule:
 
   /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
+  /** @param outbox
+    *   present only when the module was built with `enableOutbox = true`; otherwise `None` and no outbox table is
+    *   created
+    */
   final case class Components[F[_], A <: Event](
     eventStore: PostgresEventStore[F, A],
     checkpoint: PostgresProjectionCheckpoint[F],
+    outbox: Option[PostgresOutbox[F, A]],
   )
 
   private val defaultConfigPath = "persistent4s.postgres"
@@ -99,6 +104,7 @@ object PostgresModule:
   def make[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
+    enableOutbox: Boolean = false,
   ): Resource[F, Components[F, A]] =
     for
       logger <- Resource.eval(Slf4jLogger.create[F])
@@ -109,11 +115,8 @@ object PostgresModule:
              ),
            )
       pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger))
-    yield Components(
-      PostgresEventStore[F, A](pool, codec),
-      PostgresProjectionCheckpoint.make[F](pool),
-    )
+      _    <- Resource.eval(initializeDatabase[F](pool, logger, enableOutbox))
+    yield buildComponents[F, A](pool, codec, enableOutbox)
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
     *
@@ -127,6 +130,7 @@ object PostgresModule:
   def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
+    enableOutbox: Boolean = false,
   ): Resource[F, Components[F, A]] =
     for
       logger <- Resource.eval(Slf4jLogger.create[F])
@@ -136,10 +140,18 @@ object PostgresModule:
              ),
            )
       pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger))
-    yield Components(
-      PostgresEventStore[F, A](pool, codec),
+      _    <- Resource.eval(initializeDatabase[F](pool, logger, enableOutbox))
+    yield buildComponents[F, A](pool, codec, enableOutbox)
+
+  private def buildComponents[F[_]: Async, A <: Event](
+    pool: Resource[F, Session[F]],
+    codec: EventCodec[A],
+    enableOutbox: Boolean,
+  ): Components[F, A] =
+    Components(
+      PostgresEventStore[F, A](pool, codec, outboxEnabled = enableOutbox),
       PostgresProjectionCheckpoint.make[F](pool),
+      if enableOutbox then Some(PostgresOutbox[F, A](pool, codec)) else None,
     )
 
   private def loadConfig[F[_]: Sync](configPath: String): F[PostgresConfig] =
@@ -168,6 +180,7 @@ object PostgresModule:
   private def initializeDatabase[F[_]: Async](
     pool: Resource[F, Session[F]],
     logger: Logger[F],
+    enableOutbox: Boolean,
   ): F[Unit] =
     pool.use { session =>
       for
@@ -175,18 +188,25 @@ object PostgresModule:
         _                 <-
           if !eventsTableExists then logger.info("Event store schema not found, creating schema...")
           else logger.info("Event store schema already exists, ensuring required objects are present")
-        _ <- createSchema(session)
+        _ <- createSchema(session, enableOutbox)
       yield ()
     }
 
   private def checkTableExists[F[_]: Sync](session: Session[F], tableName: String): F[Boolean] =
     session.unique(checkTableExistsQuery)(tableName).map(_ > 0)
 
-  private def createSchema[F[_]: Sync](session: Session[F]): F[Unit] =
+  private def createSchema[F[_]: Sync](session: Session[F], enableOutbox: Boolean): F[Unit] =
+    val outboxDdl =
+      if enableOutbox then
+        session.execute(PostgresOutbox.createTableCommand) *>
+          session.execute(PostgresOutbox.createUnpublishedIndexCommand).void
+      else Sync[F].unit
+
     session.execute(createTableCommand) *>
       session.execute(createEventTypeIndexCommand) *>
       session.execute(createEventTagsTableCommand) *>
       session.execute(createEventTagsSequenceIndexCommand) *>
+      outboxDdl *>
       session.execute(PostgresProjectionCheckpoint.createTableCommand).void
 
   private val checkTableExistsQuery: Query[String, Long] =

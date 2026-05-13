@@ -56,6 +56,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
   pool: Resource[F, Session[F]],
   codec: EventCodec[A],
   channelId: Identifier,
+  outboxEnabled: Boolean,
 ) extends EventStore[F, A]
     with EventNotification[F]:
 
@@ -77,7 +78,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
             _ <- acquireAppendLocks(session, allTags)
             _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
             _ <- flatEvents.traverse_ { case (tags, eventType, event) =>
-                   insertEvent(session, tags, eventType, event).void
+                   insertEvent(session, tags, eventType, event).flatMap(enqueueOutbox(session, _))
                  }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield ()
@@ -255,6 +256,13 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
         .void
     }
 
+  /** Insert an outbox row for the given event within the appending transaction, when outbox publishing is enabled.
+    * Running on the same session keeps the outbox row and the event row in the same transaction.
+    */
+  private def enqueueOutbox(session: Session[F], globalPosition: Long): F[Unit] =
+    if outboxEnabled then session.execute(PostgresOutbox.insertCommand)(globalPosition).void
+    else Async[F].unit
+
   private def parsePayload(eventType: EventTypeName, payload: Json): F[A] =
     codec.decode(eventType, payload.noSpaces) match
       case Right(event) => Async[F].pure(event)
@@ -284,6 +292,9 @@ object PostgresEventStore:
     *   the event codec for serializing/deserializing events
     * @param channelId
     *   the PostgreSQL channel identifier for NOTIFY/LISTEN (default: "persistent4s_events")
+    * @param outboxEnabled
+    *   when true, every appended event also enqueues a row in `event_outbox` for later publication; defaults to false
+    *   so callers who don't use the outbox pay no overhead and don't need the table
     * @return
     *   a new PostgresEventStore instance
     */
@@ -291,8 +302,9 @@ object PostgresEventStore:
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
     channelId: Identifier = NotificationChannel,
+    outboxEnabled: Boolean = false,
   ): PostgresEventStore[F, A] =
-    new PostgresEventStore[F, A](pool, codec, channelId)
+    new PostgresEventStore[F, A](pool, codec, channelId, outboxEnabled)
 
   private val tagsCodec: Codec[Set[Tag]] = jsonb.imap { json =>
     json.asArray
@@ -300,7 +312,7 @@ object PostgresEventStore:
       .getOrElse(Set.empty)
   }(tags => Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*))
 
-  private val eventDecoder: Decoder[
+  private[postgres] val eventDecoder: Decoder[
     Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple,
   ] =
     int8 *: text *: tagsCodec *: jsonb *: timestamptz
@@ -362,7 +374,7 @@ object PostgresEventStore:
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
     """.query(int8)
 
-  private type EventRow =
+  private[postgres] type EventRow =
     Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple
 
   private val readAllQuery: Query[Long, EventRow] =
