@@ -57,21 +57,27 @@ object KafkaModule:
         .append(Header("persistent4s.timestamp", envelope.metadata.timestamp.toString))
         .append(Header("persistent4s.metaVersion", "1"))
 
-    def toRecord(topic: String, envelope: EventEnvelope[A]): ProducerRecord[String, String] =
-      val key = config.recordKey(envelope)
-      val value = codec.encode(envelope.payload)
-      val headers = buildHeaders(envelope)
-      ProducerRecord(topic, key, value).withHeaders(headers)
+    def toRecord(topic: String, envelope: EventEnvelope[A]): F[ProducerRecord[String, String]] =
+      codec.encode(envelope.payload) match
+        case Right(value) =>
+          val key = config.recordKey(envelope)
+          val headers = buildHeaders(envelope)
+          Async[F].pure(ProducerRecord(topic, key, value).withHeaders(headers))
+        case Left(error) =>
+          Async[F].raiseError(new RuntimeException(s"EventCodec failed to encode event: ${error.getMessage}", error))
 
     KafkaProducer.resource(settings).map { producer =>
       new EventPublisher[F, A] {
 
         override def publish(topic: String, envelope: EventEnvelope[A]): F[Unit] =
-          producer.produceOne_(toRecord(topic, envelope)).flatten.void
+          toRecord(topic, envelope).flatMap(record => producer.produceOne_(record).flatten.void)
 
         override def publish(topic: String, envelopes: List[EventEnvelope[A]]): F[Unit] =
           if envelopes.isEmpty then Async[F].unit
-          else producer.produce(Chunk.from(envelopes.map(toRecord(topic, _)))).flatten.void
+          else
+            envelopes
+              .traverse(toRecord(topic, _))
+              .flatMap(records => producer.produce(Chunk.from(records)).flatten.void)
 
       }
     }

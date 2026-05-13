@@ -40,8 +40,8 @@ object CirceEventCodec:
     decodeEvent: (EventTypeName, Json) => Either[Throwable, A],
   ): EventCodec[A] =
     new EventCodec[A]:
-      def encode(event: A): String =
-        encodeEvent(event).noSpaces
+      def encode(event: A): Either[Throwable, String] =
+        scala.util.Try(encodeEvent(event).noSpaces).toEither
 
       def decode(eventType: EventTypeName, payload: String): Either[Throwable, A] =
         parser.parse(payload).left.map(e => e: Throwable).flatMap(json => decodeEvent(eventType, json))

@@ -34,7 +34,8 @@ object CirceEventCodecSuite extends SimpleIOSuite:
 
   pureTest("encode and decode form a round-trip") {
     val event = MyEvent("hello")
-    expect(codec.decode(eventType, codec.encode(event)) == Right(event))
+    val roundTrip = codec.encode(event).flatMap(s => codec.decode(eventType, s))
+    expect(roundTrip == Right(event))
   }
 
   pureTest("decode returns Left for invalid JSON") {
@@ -47,6 +48,17 @@ object CirceEventCodecSuite extends SimpleIOSuite:
   }
 
   pureTest("encode produces compact JSON without whitespace") {
-    val encoded = codec.encode(MyEvent("hello"))
-    expect(!encoded.contains(" ") && !encoded.contains("\n"))
+    codec.encode(MyEvent("hello")) match
+      case Right(s) => expect(!s.contains(" ") && !s.contains("\n"))
+      case Left(e)  => failure(s"encode failed: ${e.getMessage}")
+  }
+
+  pureTest("encode returns Left when the underlying encoder throws") {
+    val brokenCodec = CirceEventCodec.make[MyEvent](
+      encodeEvent = _ => throw new RuntimeException("boom"),
+      decodeEvent = (_, json) => json.as[MyEvent].left.map(identity),
+    )
+    brokenCodec.encode(MyEvent("hello")) match
+      case Left(e)  => expect(e.getMessage == "boom")
+      case Right(_) => failure("expected Left from a throwing encoder")
   }

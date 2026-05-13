@@ -24,8 +24,10 @@ package persistent4s
   */
 trait EventCodec[A <: Event]:
 
-  /** Serialize an event to a String representation. */
-  def encode(event: A): String
+  /** Serialize an event to a String representation. Returns `Left` if encoding fails for any reason (e.g. the codec
+    * has no encoder registered for the event's concrete type, or the underlying serializer rejects the value).
+    */
+  def encode(event: A): Either[Throwable, String]
 
   /** Deserialize an event from its type name and String representation. */
   def decode(eventType: EventTypeName, payload: String): Either[Throwable, A]

@@ -236,10 +236,8 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     event: A,
   ): F[Long] =
     val tagsJson = tagsToJson(tags)
-    val payloadJson = parseJson(codec.encode(event)) match
-      case Right(json) => json
-      case Left(error) => throw new RuntimeException(s"Failed to encode event payload to JSON: ${error.getMessage}")
     for
+      payloadJson    <- encodePayload(event)
       sequenceNumber <- eventIdOpt match
                           case Some(eventId) =>
                             session.unique(insertEventWithIdQuery)(
@@ -251,6 +249,21 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
                             )
       _ <- insertEventTags(session, sequenceNumber, tags)
     yield sequenceNumber
+
+  /** Run the codec and parse its String output into circe `Json`. Both stages have explicit failure channels; either
+    * failure is raised into `F` so the surrounding transaction rolls back.
+    */
+  private def encodePayload(event: A): F[Json] =
+    codec.encode(event) match
+      case Left(error) =>
+        Async[F].raiseError(new RuntimeException(s"EventCodec failed to encode event: ${error.getMessage}", error))
+      case Right(encoded) =>
+        parseJson(encoded) match
+          case Right(json) => Async[F].pure(json)
+          case Left(error) =>
+            Async[F].raiseError(
+              new RuntimeException(s"EventCodec produced invalid JSON: ${error.getMessage}", error),
+            )
 
   private def insertEventTags(
     session: Session[F],
