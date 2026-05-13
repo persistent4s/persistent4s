@@ -31,7 +31,7 @@ trait EventPublisher[F[_], A <: Event]:
     */
   def publish(topic: String, envelope: EventEnvelope[A]): F[Unit]
 
-  /** Publish a batch of envelopes to `topic` in order. Implementations may pipeline records but must preserve
-    * per-key ordering.
+  /** Publish a batch of envelopes to `topic` in order. Implementations may pipeline records but must preserve per-key
+    * ordering.
     */
   def publish(topic: String, envelopes: List[EventEnvelope[A]]): F[Unit]

@@ -28,14 +28,14 @@ import persistent4s.{Event, EventEnvelope}
   * @param bootstrapServers
   *   comma-separated `host:port` list
   * @param recordKey
-  *   function deriving the Kafka record key from an envelope, applied uniformly across all topics this publisher
-  *   writes to
+  *   function deriving the Kafka record key from an envelope, applied uniformly across all topics this publisher writes
+  *   to
   * @param producerProperties
   *   raw Kafka producer properties merged on top of fs2-kafka defaults (e.g. `acks`, `linger.ms`).
   *
   * '''Required setting:''' `enable.idempotence=true` must be set (it is the Kafka client default since 3.0). The
-  * [[KafkaRelay]] ordering guarantee assumes the producer will not reorder records within a partition on retries,
-  * which is only true with idempotence enabled.
+  * [[KafkaRelay]] ordering guarantee assumes the producer will not reorder records within a partition on retries, which
+  * is only true with idempotence enabled.
   */
 final case class KafkaProducerConfig[A <: Event](
   bootstrapServers: String,

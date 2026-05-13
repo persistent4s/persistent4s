@@ -23,8 +23,8 @@ import persistent4s.{Event, EventEnvelope}
 /** Subscribes to a Kafka topic and decodes records back into [[EventEnvelope]]s.
   *
   * Each emitted element is paired with its [[CommittableOffset]] so the consumer decides when offsets are committed.
-  * This keeps end-to-end semantics (at-least-once vs. effectively-once via idempotent downstream writes) in the caller's
-  * hands.
+  * This keeps end-to-end semantics (at-least-once vs. effectively-once via idempotent downstream writes) in the
+  * caller's hands.
   *
   * ==Ordering guarantee==
   *

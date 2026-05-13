@@ -432,7 +432,7 @@ object PostgresEventStore:
     sql"""
         SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
         FROM events
-        WHERE sequence_number > $int8 
+        WHERE sequence_number > $int8
           AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
         ORDER BY sequence_number ASC
         LIMIT $int4
