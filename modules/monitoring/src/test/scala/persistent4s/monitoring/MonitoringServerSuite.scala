@@ -31,10 +31,14 @@ import persistent4s.postgres.{PostgresConfig, PostgresModule}
 import weaver.IOSuite
 import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.log4cats.Logger
+import org.typelevel.log4cats.slf4j.Slf4jLogger
 
 given Tracer[IO] = org.typelevel.otel4s.trace.Tracer.Implicits.noop
 
 given Meter[IO] = org.typelevel.otel4s.metrics.Meter.Implicits.noop
+
+given Logger[IO] = Slf4jLogger.getLogger[IO]
 
 object MonitoringServerSuite extends IOSuite:
 

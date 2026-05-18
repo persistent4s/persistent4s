@@ -23,7 +23,6 @@ import fs2.io.net.Network
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.log4cats.Logger
-import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.ConfigSource
 import skunk.*
 import skunk.implicits.*
@@ -103,21 +102,20 @@ object PostgresModule:
     *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint, or fails with a clear error
     *   message
     */
-  def make[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
+  def make[F[_]: Async: Network: Tracer: Meter: Console: Logger, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
     enableOutbox: Boolean = false,
   ): Resource[F, Components[F, A]] =
     for
-      logger <- Resource.eval(Slf4jLogger.create[F])
       config <- Resource.eval(loadConfig[F](configPath))
       _      <- Resource.eval(
-             logger.info(
+             Logger[F].info(
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
       pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger, enableOutbox))
+      _    <- Resource.eval(initializeDatabase[F](pool, enableOutbox))
     yield buildComponents[F, A](pool, codec, enableOutbox)
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
@@ -129,20 +127,19 @@ object PostgresModule:
     * @return
     *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint
     */
-  def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
+  def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console: Logger, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
     enableOutbox: Boolean = false,
   ): Resource[F, Components[F, A]] =
     for
-      logger <- Resource.eval(Slf4jLogger.create[F])
-      _      <- Resource.eval(
-             logger.info(
+      _ <- Resource.eval(
+             Logger[F].info(
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
       pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger, enableOutbox))
+      _    <- Resource.eval(initializeDatabase[F](pool, enableOutbox))
     yield buildComponents[F, A](pool, codec, enableOutbox)
 
   private def buildComponents[F[_]: Async, A <: Event](
@@ -188,17 +185,16 @@ object PostgresModule:
       // misleading. We expose it as `TrustAll` so the config is honest about what it does.
       case PostgresSslMode.TrustAll => SSL.Trusted
 
-  private def initializeDatabase[F[_]: Async](
+  private def initializeDatabase[F[_]: Async: Logger](
     pool: Resource[F, Session[F]],
-    logger: Logger[F],
     enableOutbox: Boolean,
   ): F[Unit] =
     pool.use { session =>
       for
         eventsTableExists <- checkTableExists(session, "events")
         _                 <-
-          if !eventsTableExists then logger.info("Event store schema not found, creating schema...")
-          else logger.info("Event store schema already exists, ensuring required objects are present")
+          if !eventsTableExists then Logger[F].info("Event store schema not found, creating schema...")
+          else Logger[F].info("Event store schema already exists, ensuring required objects are present")
         _ <- createSchema(session, enableOutbox)
       yield ()
     }

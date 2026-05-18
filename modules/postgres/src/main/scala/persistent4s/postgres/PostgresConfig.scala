@@ -29,6 +29,7 @@ import pureconfig.ConfigReader
   *     production.
   */
 enum PostgresSslMode derives ConfigReader:
+
   case Disabled, System, TrustAll
 
 /** Configuration for connecting to a PostgreSQL database for the event store.
