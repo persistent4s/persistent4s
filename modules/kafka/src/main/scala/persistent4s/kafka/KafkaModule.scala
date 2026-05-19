@@ -16,14 +16,22 @@
 
 package persistent4s.kafka
 
-import cats.effect.{Async, Resource}
+import persistent4s.Tag
+import persistent4s.EventTypeName
 import persistent4s.{Event, EventCodec, Outbox}
-import fs2.kafka.*
 import persistent4s.EventEnvelope
+import persistent4s.EventMetadata
+import cats.effect.{Async, Resource}
 import cats.Parallel
 import cats.syntax.all.*
+import fs2.kafka.*
+import fs2.Stream
 import fs2.Chunk
 import io.circe.Json
+import io.circe.parser
+import scala.util.Try
+import java.util.UUID
+import java.time.Instant
 
 /** Entry point for building the Kafka-side components of the library.
   *
@@ -31,6 +39,18 @@ import io.circe.Json
   * The module never imports the postgres module — the relay consumes any [[Outbox]] implementation.
   */
 object KafkaModule:
+
+  val EventIdHeaderName = "persistent4s.eventId"
+
+  val GlobalPositionHeaderName = "persistent4s.globalPosition"
+
+  val EventTypeHeaderName = "persistent4s.eventType"
+
+  val TagsHeaderName = "persistent4s.tags"
+
+  val TimestampHeaderName = "persistent4s.timestamp"
+
+  val MetaVersionHeaderName = "persistent4s.metaVersion"
 
   /** Build a Kafka [[EventPublisher]] backed by an fs2-kafka producer. The underlying producer is released when the
     * resource is finalized.
@@ -50,12 +70,12 @@ object KafkaModule:
         .arr(envelope.metadata.tags.toSeq.sortBy(_.value).map(t => Json.fromString(t.value))*)
         .noSpaces
       Headers.empty
-        .append(Header("persistent4s.eventId", envelope.metadata.id.toString))
-        .append(Header("persistent4s.globalPosition", envelope.metadata.globalPosition.toString))
-        .append(Header("persistent4s.eventType", envelope.metadata.eventType.value))
-        .append(Header("persistent4s.tags", tagsJson))
-        .append(Header("persistent4s.timestamp", envelope.metadata.timestamp.toString))
-        .append(Header("persistent4s.metaVersion", "1"))
+        .append(Header(EventIdHeaderName, envelope.metadata.id.toString))
+        .append(Header(GlobalPositionHeaderName, envelope.metadata.globalPosition.toString))
+        .append(Header(EventTypeHeaderName, envelope.metadata.eventType.value))
+        .append(Header(TagsHeaderName, tagsJson))
+        .append(Header(TimestampHeaderName, envelope.metadata.timestamp.toString))
+        .append(Header(MetaVersionHeaderName, "1"))
 
     def toRecord(topic: String, envelope: EventEnvelope[A]): F[ProducerRecord[String, String]] =
       codec.encode(envelope.payload) match
@@ -85,10 +105,72 @@ object KafkaModule:
   }
 
   /** Build a Kafka [[EventSubscriber]] backed by an fs2-kafka consumer. */
-  def subscriber[F[_]: Async: Parallel, A <: Event](
+  def subscriber[F[_]: Async, A <: Event](
     config: KafkaConsumerConfig,
     codec: EventCodec[A],
-  ): Resource[F, EventSubscriber[F, A]] = ???
+  ): Resource[F, EventSubscriber[F, A]] =
+    val baseSettings: ConsumerSettings[F, String, String] =
+      ConsumerSettings[F, String, String]
+        .withBootstrapServers(config.bootstrapServers)
+        .withGroupId(config.groupId)
+        .withProperties(config.consumerProperties)
+        .withEnableAutoCommit(false)
+
+    def header(name: String, headers: Headers): Either[Throwable, String] = headers(name).map(_.as[String]) match
+      case Some(s) => Right(s)
+      case None    => Left(new RuntimeException(s"missing required header: $name"))
+
+    def envelopeFromRecord(record: ConsumerRecord[String, String]): F[EventEnvelope[A]] =
+      val headers = record.headers
+      val decodedMessage = for
+        metaVersion <- header(MetaVersionHeaderName, headers)
+        _           <-
+          if metaVersion == "1" then Right(()) else Left(new RuntimeException(s"unsupported metaVersion: $metaVersion"))
+        eventIdStr       <- header(EventIdHeaderName, headers)
+        eventId          <- Try(UUID.fromString(eventIdStr)).toEither
+        positionStr      <- header(GlobalPositionHeaderName, headers)
+        position         <- Try(positionStr.toLong).toEither
+        eventTypeNameStr <- header(EventTypeHeaderName, headers)
+        eventTypeName     = EventTypeName.fromString(eventTypeNameStr)
+        tagsStr          <- header(TagsHeaderName, headers)
+        tags             <- parser.parse(tagsStr).left.map(e => e: Throwable).flatMap { json =>
+                  json.asArray.toRight(new RuntimeException(s"tags header is not a JSON array: $tagsStr")).flatMap {
+                    arr =>
+                      arr.toList.traverse { v =>
+                        v.asString
+                          .toRight(new RuntimeException(s"tag is not a string: $v"))
+                          .flatMap(s => Tag.fromString(s).toRight(new RuntimeException(s"invalid tag: $s")))
+                      }.map(_.toSet)
+                  }
+                }
+        timestampStr <- header(TimestampHeaderName, headers)
+        timestamp    <- Try(Instant.parse(timestampStr)).toEither
+        payload      <- codec.decode(eventTypeName, record.value)
+      yield EventEnvelope(EventMetadata(position, eventId, tags, eventTypeName, timestamp), payload)
+      decodedMessage match
+        case Right(envelope) => Async[F].pure(envelope)
+        case Left(error)     =>
+          Async[F].raiseError(
+            new RuntimeException(s"Failed to decode record with key ${record.key}: ${error.getMessage}", error),
+          )
+
+    Resource.pure(new EventSubscriber[F, A]:
+
+      override def subscribe(
+        topic: String,
+        fromBeginning: Boolean,
+      ): Stream[F, (EventEnvelope[A], CommittableOffset[F])] =
+        val settings =
+          if fromBeginning then baseSettings.withAutoOffsetReset(AutoOffsetReset.Earliest)
+          else baseSettings.withAutoOffsetReset(AutoOffsetReset.Latest)
+
+        KafkaConsumer
+          .stream(settings)
+          .subscribeTo(topic)
+          .records
+          .evalMap { committable =>
+            envelopeFromRecord(committable.record).map(envelope => (envelope, committable.offset))
+          })
 
   /** Build a [[KafkaRelay]] that drains the given outbox into the supplied Kafka `topic`.
     *
