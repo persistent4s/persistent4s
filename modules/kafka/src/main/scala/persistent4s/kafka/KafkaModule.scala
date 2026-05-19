@@ -16,22 +16,19 @@
 
 package persistent4s.kafka
 
-import persistent4s.Tag
-import persistent4s.EventTypeName
-import persistent4s.{Event, EventCodec, Outbox}
-import persistent4s.EventEnvelope
-import persistent4s.EventMetadata
-import cats.effect.{Async, Resource}
-import cats.Parallel
-import cats.syntax.all.*
-import fs2.kafka.*
-import fs2.Stream
-import fs2.Chunk
-import io.circe.Json
-import io.circe.parser
-import scala.util.Try
-import java.util.UUID
 import java.time.Instant
+import java.util.UUID
+
+import scala.util.Try
+
+import cats.Parallel
+import cats.effect.{Async, Resource}
+import cats.syntax.all.*
+import fs2.{Chunk, Stream}
+import fs2.kafka.*
+import io.circe.{Json, parser}
+
+import persistent4s.{Event, EventCodec, EventEnvelope, EventMetadata, EventTypeName, Outbox, Tag}
 
 /** Entry point for building the Kafka-side components of the library.
   *
@@ -58,7 +55,7 @@ object KafkaModule:
   def publisher[F[_]: Async: Parallel, A <: Event](
     config: KafkaProducerConfig[A],
     codec: EventCodec[A],
-  ): Resource[F, EventPublisher[F, A]] = {
+  ): Resource[F, EventPublisher[F, A]] =
     val settings: ProducerSettings[F, String, String] =
       ProducerSettings[F, String, String]
         .withBootstrapServers(config.bootstrapServers)
@@ -101,8 +98,6 @@ object KafkaModule:
 
       }
     }
-
-  }
 
   /** Build a Kafka [[EventSubscriber]] backed by an fs2-kafka consumer. */
   def subscriber[F[_]: Async, A <: Event](
