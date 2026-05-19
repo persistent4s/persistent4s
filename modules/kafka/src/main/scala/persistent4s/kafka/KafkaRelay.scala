@@ -17,6 +17,7 @@
 package persistent4s.kafka
 
 import cats.effect.Async
+import cats.syntax.all.*
 import persistent4s.{Event, Outbox}
 
 /** Drains an [[Outbox]] into Kafka via an [[EventPublisher]] and acknowledges published entries.
@@ -59,7 +60,15 @@ final class KafkaRelay[F[_]: Async, A <: Event] private (
 ):
 
   /** Run the relay. Returns when the input stream completes or fails. */
-  def run: F[Unit] = ???
+  def run: F[Unit] =
+    outbox
+      .stream(batchSize)
+      .evalMap { envelope =>
+        publisher.publish(topic, envelope) *>
+          outbox.markPublished(envelope.metadata.globalPosition)
+      }
+      .compile
+      .drain
 
 object KafkaRelay:
 

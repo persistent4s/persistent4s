@@ -185,4 +185,7 @@ object KafkaModule:
     codec: EventCodec[A],
     topic: String,
     batchSize: Int = 128,
-  ): Resource[F, KafkaRelay[F, A]] = ???
+  ): Resource[F, KafkaRelay[F, A]] =
+    KafkaModule.publisher[F, A](config, codec).map { publisher =>
+      KafkaRelay(outbox, publisher, topic, batchSize)
+    }
