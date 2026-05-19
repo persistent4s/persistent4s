@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder>
+      <pattern>%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} -- %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <!-- Quiet down the very chatty docker-java HTTP wire and testcontainers internals. -->
+  <logger name="com.github.dockerjava" level="WARN"/>
+  <logger name="org.testcontainers" level="WARN"/>
+  <logger name="tc" level="WARN"/>
+  <logger name="org.apache.hc" level="WARN"/>
+
+  <!-- Kafka client itself is also fairly noisy at INFO; bump to WARN for tests. -->
+  <logger name="org.apache.kafka" level="WARN"/>
+  <logger name="org.apache.kafka.clients.NetworkClient" level="ERROR"/>
+  <logger name="org.apache.kafka.clients.Metadata" level="ERROR"/>
+
+  <!-- fs2-kafka wraps the client; keep its own logging at INFO unless we have a reason. -->
+  <logger name="fs2.kafka" level="INFO"/>
+
+  <!-- Library code: keep INFO so we can see the relevant lines during failing tests. -->
+  <root level="INFO">
+    <appender-ref ref="STDOUT"/>
+  </root>
+
+</configuration>

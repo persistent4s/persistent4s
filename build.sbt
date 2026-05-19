@@ -89,7 +89,7 @@ lazy val circe = (project in file("modules/circe"))
   )
 
 lazy val kafka = (project in file("modules/kafka"))
-  .dependsOn(core)
+  .dependsOn(core, circe)
   .settings(
     name                 := "persistent4s-kafka",
     libraryDependencies ++= List(
