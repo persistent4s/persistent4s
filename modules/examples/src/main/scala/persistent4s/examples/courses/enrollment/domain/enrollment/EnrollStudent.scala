@@ -29,7 +29,7 @@ import persistent4s.examples.courses.enrollment.domain.{
   StudentEnrolled,
   StudentRegistered,
 }
-import persistent4s.examples.courses.enrollment.domain.courseview.CourseViewRepository
+import persistent4s.examples.courses.enrollment.domain.courseview.{CourseView, CourseViewRepository}
 
 /** DCB-style enrollment: validates a student-into-course command against a multi-tag scope.
   *
@@ -85,7 +85,7 @@ final class EnrollStudentHandler[F[_]: Async](
               )
       expectedIndex = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
       view         <- courseView.find(command.courseId)
-      _            <- validate(command, state, view) match
+      _            <- validate(state, command, view) match
              case Left(e)  => Async[F].raiseError(e)
              case Right(_) => Async[F].unit
       event = StudentEnrolled(command.studentId, command.courseId, OffsetDateTime.now())
@@ -109,9 +109,9 @@ final class EnrollStudentHandler[F[_]: Async](
     case _ => s
 
   private def validate(
-    command: EnrollStudent,
     state: EnrollStudentState,
-    view: Option[persistent4s.examples.courses.enrollment.domain.courseview.CourseView],
+    command: EnrollStudent,
+    view: Option[CourseView],
   ): Either[Throwable, Unit] =
     view match
       case None =>
