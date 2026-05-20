@@ -66,8 +66,8 @@ object CatalogEventConsumer:
       repo.find(id).flatMap {
         case Some(existing) => repo.upsert(existing.copy(capacity = newCapacity))
         case None           =>
-          // CapacityChanged before CourseOpened observed locally — should not happen given single-partition + per-tag
-          // ordering, but if it does, log and skip rather than crash.
+          // CapacityChanged before CourseOpened locally — shouldn't happen under single-partition + per-tag ordering;
+          // skip rather than crash so a later replay can self-heal once the missing CourseOpened arrives.
           Async[F].unit
       }
     case CourseClosed(id) =>
