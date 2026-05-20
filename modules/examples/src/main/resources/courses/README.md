@@ -18,7 +18,7 @@ From the repository root in one terminal, bring the infra up:
 ```bash
 cd modules/examples/src/main/resources/courses
 docker compose up -d
-docker compose ps    # wait for "(healthy)" on all three containers
+docker compose ps    # wait for "(healthy)" on the three Postgres/Kafka containers
 ```
 
 Then, in two separate terminals at the repo root:
@@ -32,7 +32,8 @@ sbt "examples/runMain persistent4s.examples.courses.enrollment.infrastructure.En
 ```
 
 Smithy docs are at <http://localhost:8183/docs> and <http://localhost:8184/docs>. Projection monitoring UIs are at
-<http://localhost:9091> and <http://localhost:9092>.
+<http://localhost:9091> and <http://localhost:9092>. The Kafka UI (topics, messages, consumer groups, lag) is at
+<http://localhost:8090>.
 
 ## Demo script
 
