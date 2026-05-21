@@ -240,3 +240,60 @@ object PostgresEventStoreSuite extends IOSuite:
   test("notify completes without error") { eventStore =>
     eventStore.notify(EventStoreNotification.PauseProjection("test-proj")).as(success)
   }
+
+  test("appending with a provided UUID sets isExternal to true") { store =>
+    for
+      id  <- freshId("external")
+      tag  = Tag("external", id)
+      uuid = UUID.randomUUID()
+      _   <- store.append(
+             EventFilter(Set.empty, Set(tag)),
+             0L,
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], TestEvent("external-event"))),
+           )
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.isExternal == true,
+    )
+  }
+
+  test("appending without a provided UUID sets isExternal to false") { store =>
+    for
+      id     <- freshId("internal")
+      tag     = Tag("internal", id)
+      _      <- appendOne(store, 0L, Set(tag), "internal-event")
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.isExternal == false,
+    )
+  }
+
+  test("appending a duplicate UUID is a no-op and returns the original global position") { store =>
+    for
+      id  <- freshId("dedup")
+      tag  = Tag("dedup", id)
+      uuid = UUID.randomUUID()
+      _   <- store.append(
+             EventFilter(Set.empty, Set(tag)),
+             0L,
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], TestEvent("first"))),
+           )
+      pos1 <- store
+                .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
+                .compile
+                .toList
+                .map(_.head.metadata.globalPosition)
+      _ <- store.append(
+             EventFilter(Set.empty, Set(tag)),
+             pos1,
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], TestEvent("duplicate"))),
+           )
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.globalPosition == pos1,
+      events.head.payload == TestEvent("first"),
+    )
+  }
