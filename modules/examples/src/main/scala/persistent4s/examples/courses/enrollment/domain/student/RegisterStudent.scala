@@ -19,7 +19,7 @@ package persistent4s.examples.courses.enrollment.domain.student
 import java.util.UUID
 
 import persistent4s.{CommandHandler, EventTypeName, Tag}
-import persistent4s.examples.courses.enrollment.domain.{EnrollmentEvent, StudentRegistered}
+import persistent4s.examples.courses.enrollment.domain.{SchoolEvent, StudentRegistered}
 
 final case class RegisterStudent(
   studentId: UUID,
@@ -29,7 +29,7 @@ final case class RegisterStudent(
 
 final case class RegisterStudentState(exists: Boolean)
 
-object RegisterStudentHandler extends CommandHandler[RegisterStudent, RegisterStudentState, EnrollmentEvent]:
+object RegisterStudentHandler extends CommandHandler[RegisterStudent, RegisterStudentState, SchoolEvent]:
 
   override def eventTypes: Option[Set[EventTypeName]] =
     Some(Set(EventTypeName.of[StudentRegistered]))
@@ -39,7 +39,7 @@ object RegisterStudentHandler extends CommandHandler[RegisterStudent, RegisterSt
 
   def initial: RegisterStudentState = RegisterStudentState(exists = false)
 
-  def evolve(command: RegisterStudent, state: RegisterStudentState, event: EnrollmentEvent): RegisterStudentState =
+  def evolve(command: RegisterStudent, state: RegisterStudentState, event: SchoolEvent): RegisterStudentState =
     event match
       case _: StudentRegistered => state.copy(exists = true)
       case _                    => state
@@ -48,7 +48,7 @@ object RegisterStudentHandler extends CommandHandler[RegisterStudent, RegisterSt
     if state.exists then Left(new Exception(s"Student already registered: ${command.studentId}"))
     else Right(())
 
-  def decide(state: RegisterStudentState, command: RegisterStudent): List[(Set[Tag], EnrollmentEvent)] =
+  def decide(state: RegisterStudentState, command: RegisterStudent): List[(Set[Tag], SchoolEvent)] =
     List(
       (
         Set(Tag("student", command.studentId)),

@@ -22,19 +22,18 @@ import cats.effect.IO
 
 import persistent4s.EventStore
 import persistent4s.examples.courses.enrollment.api.*
-import persistent4s.examples.courses.enrollment.domain.EnrollmentEvent
+import persistent4s.examples.courses.enrollment.domain.SchoolEvent
 import persistent4s.examples.courses.enrollment.domain.enrollment.*
 import smithy4s.time.Timestamp
 
 class EnrollmentServiceImpl(
-  enrollStudent: EnrollStudentHandler[IO],
   repository: EnrollmentRepository[IO],
-)(using EventStore[IO, EnrollmentEvent])
+)(using EventStore[IO, SchoolEvent])
     extends EnrollmentService[IO]:
 
   def enrollStudent(studentId: String, courseId: String): IO[Unit] =
-    enrollStudent
-      .run(EnrollStudent(UUID.fromString(studentId), UUID.fromString(courseId)))
+    EnrollStudentHandler
+      .run[IO](EnrollStudent(UUID.fromString(studentId), UUID.fromString(courseId)))
       .adaptError {
         case e if e.getMessage.contains("not found") || e.getMessage.contains("not registered") =>
           NotFoundError(e.getMessage)

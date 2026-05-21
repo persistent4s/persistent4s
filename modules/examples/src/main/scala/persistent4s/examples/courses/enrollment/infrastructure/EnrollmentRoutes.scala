@@ -25,19 +25,19 @@ import smithy4s.http4s.swagger.docs
 import persistent4s.EventStore
 import persistent4s.examples.courses.enrollment.api.*
 import persistent4s.examples.courses.enrollment.application.*
-import persistent4s.examples.courses.enrollment.domain.EnrollmentEvent
+import persistent4s.examples.courses.enrollment.domain.SchoolEvent
 
 object EnrollmentRoutes:
 
   def make(module: EnrollmentModule): Resource[IO, HttpRoutes[IO]] =
-    given EventStore[IO, EnrollmentEvent] = module.store
+    given EventStore[IO, SchoolEvent] = module.store
 
     for
       studentRoutes    <- SimpleRestJsonBuilder.routes(StudentServiceImpl(module.studentRepository)).resource
       enrollmentRoutes <- SimpleRestJsonBuilder
-                            .routes(EnrollmentServiceImpl(module.enrollStudentHandler, module.enrollmentRepository))
+                            .routes(EnrollmentServiceImpl(module.enrollmentRepository))
                             .resource
-      courseViewRoutes <- SimpleRestJsonBuilder.routes(CourseViewServiceImpl(module.courseViewRepository)).resource
+      courseViewRoutes <- SimpleRestJsonBuilder.routes(CourseViewServiceImpl(module.courseRepository)).resource
       eventsRoutes     <- SimpleRestJsonBuilder.routes(EventsServiceImpl(module.store)).resource
       docsRoutes        = docs[IO](
                      StudentService,

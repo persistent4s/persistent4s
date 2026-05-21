@@ -22,7 +22,7 @@ import cats.effect.*
 import cats.syntax.all.*
 
 import persistent4s.*
-import persistent4s.examples.courses.enrollment.domain.{EnrollmentEvent, StudentRegistered}
+import persistent4s.examples.courses.enrollment.domain.{SchoolEvent, StudentRegistered}
 
 final case class StudentState(
   studentId: UUID,
@@ -32,17 +32,17 @@ final case class StudentState(
 
 final class StudentProjection[F[_]: Async] private (
   protected val repository: Repository[F, UUID, StudentState],
-) extends Projection[F, EnrollmentEvent, UUID, StudentState]:
+) extends Projection[F, SchoolEvent, UUID, StudentState]:
 
   override val name: String = "student-projection"
 
   override val filter: Set[EventTypeName] = Set(EventTypeName.of[StudentRegistered])
 
-  override def resolveKeys(event: EventEnvelope[EnrollmentEvent]): List[UUID] = event.payload match
+  override def resolveKeys(event: EventEnvelope[SchoolEvent]): List[UUID] = event.payload match
     case StudentRegistered(id, _, _) => List(id)
     case _                           => Nil
 
-  override def handle(state: Option[StudentState], event: EventEnvelope[EnrollmentEvent]): F[Option[StudentState]] =
+  override def handle(state: Option[StudentState], event: EventEnvelope[SchoolEvent]): F[Option[StudentState]] =
     (state, event.payload) match
       case (None, StudentRegistered(id, name, email)) =>
         StudentState(id, name, email).some.pure[F]

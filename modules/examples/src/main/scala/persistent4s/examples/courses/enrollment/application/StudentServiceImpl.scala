@@ -22,10 +22,10 @@ import cats.effect.IO
 
 import persistent4s.EventStore
 import persistent4s.examples.courses.enrollment.api.*
-import persistent4s.examples.courses.enrollment.domain.EnrollmentEvent
+import persistent4s.examples.courses.enrollment.domain.SchoolEvent
 import persistent4s.examples.courses.enrollment.domain.student.*
 
-class StudentServiceImpl(repository: StudentRepository[IO])(using EventStore[IO, EnrollmentEvent])
+class StudentServiceImpl(repository: StudentRepository[IO])(using EventStore[IO, SchoolEvent])
     extends StudentService[IO]:
 
   def registerStudent(name: String, email: String): IO[RegisterStudentOutput] =

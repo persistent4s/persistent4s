@@ -79,9 +79,10 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
           for
             _ <- acquireAppendLocks(session, allTags)
             _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
-            _ <- flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
-                   insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).void
-                 }
+            _ <-
+              flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
+                insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).flatMap(enqueueOutbox(session, _))
+              }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield ()
         }

@@ -21,9 +21,10 @@ import cats.syntax.all.*
 import fs2.Stream
 
 import persistent4s.EventEnvelope
-import persistent4s.examples.courses.catalog.domain.{CapacityChanged, CatalogEvent, CourseClosed, CourseOpened}
 import persistent4s.kafka.{EventSubscriber, KafkaConsumerConfig, KafkaModule}
 import persistent4s.EventCodec
+import persistent4s.EventStore
+import persistent4s.examples.courses.enrollment.domain.SchoolEvent
 
 /** Subscribes to `catalog.events`, applies each event to the local `course_view` table, then commits the offset.
   *
@@ -35,17 +36,17 @@ object CatalogEventConsumer:
 
   def stream[F[_]: Async](
     consumerCfg: KafkaConsumerConfig,
-    codec: EventCodec[CatalogEvent],
-    repo: CourseViewRepository[F],
+    store: EventStore[F, SchoolEvent],
+    codec: EventCodec[SchoolEvent],
     topic: String,
   ): Resource[F, Stream[F, Unit]] =
-    KafkaModule.subscriber[F, CatalogEvent](consumerCfg, codec).map { subscriber =>
-      consume(subscriber, repo, topic)
+    KafkaModule.subscriber[F, SchoolEvent](consumerCfg, codec).map { subscriber =>
+      consume(subscriber, store, topic)
     }
 
   private def consume[F[_]: Async](
-    subscriber: EventSubscriber[F, CatalogEvent],
-    repo: CourseViewRepository[F],
+    subscriber: EventSubscriber[F, SchoolEvent],
+    store: EventStore[F, SchoolEvent],
     topic: String,
   ): Stream[F, Unit] =
     subscriber
@@ -53,25 +54,14 @@ object CatalogEventConsumer:
       .evalMap { case (envelope, offset) =>
         // At-least-once: apply (idempotent) before committing. Per-message commit is the simplest correct pattern;
         // batching would be a perf optimization not worth the example's complexity.
-        apply(envelope, repo) *> offset.commit
+        val tags = envelope.metadata.tags
+        /* store.append(¨
+         eventFilter = None,
+
+        ) *> */
+        offset.commit
       }
 
   private def apply[F[_]: Async](
-    envelope: EventEnvelope[CatalogEvent],
-    repo: CourseViewRepository[F],
-  ): F[Unit] = envelope.payload match
-    case CourseOpened(id, code, title, capacity, instructor) =>
-      repo.upsert(CourseView(id, code, title, capacity, instructor, isOpen = true))
-    case CapacityChanged(id, newCapacity) =>
-      repo.find(id).flatMap {
-        case Some(existing) => repo.upsert(existing.copy(capacity = newCapacity))
-        case None           =>
-          // CapacityChanged before CourseOpened locally — shouldn't happen under single-partition + per-tag ordering;
-          // skip rather than crash so a later replay can self-heal once the missing CourseOpened arrives.
-          Async[F].unit
-      }
-    case CourseClosed(id) =>
-      repo.find(id).flatMap {
-        case Some(existing) => repo.upsert(existing.copy(isOpen = false))
-        case None           => Async[F].unit
-      }
+    envelope: EventEnvelope[SchoolEvent],
+  ): F[Unit] = ???

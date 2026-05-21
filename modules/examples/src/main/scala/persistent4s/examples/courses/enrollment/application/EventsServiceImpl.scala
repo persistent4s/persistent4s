@@ -20,10 +20,10 @@ import cats.effect.IO
 
 import persistent4s.{EventFilter, EventStore}
 import persistent4s.examples.courses.enrollment.api.*
-import persistent4s.examples.courses.enrollment.domain.EnrollmentEvent
+import persistent4s.examples.courses.enrollment.domain.SchoolEvent
 import smithy4s.time.Timestamp
 
-class EventsServiceImpl(eventStore: EventStore[IO, EnrollmentEvent]) extends EventsService[IO]:
+class EventsServiceImpl(eventStore: EventStore[IO, SchoolEvent]) extends EventsService[IO]:
 
   def getEvents(): IO[GetEventsOutput] =
     eventStore

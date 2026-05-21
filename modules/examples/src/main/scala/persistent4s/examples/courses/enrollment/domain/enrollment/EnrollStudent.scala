@@ -19,17 +19,8 @@ package persistent4s.examples.courses.enrollment.domain.enrollment
 import java.time.OffsetDateTime
 import java.util.UUID
 
-import cats.effect.Async
-import cats.syntax.all.*
-
 import persistent4s.*
-import persistent4s.examples.courses.enrollment.domain.{
-  EnrollmentEvent,
-  StudentDropped,
-  StudentEnrolled,
-  StudentRegistered,
-}
-import persistent4s.examples.courses.enrollment.domain.courseview.{CourseView, CourseViewRepository}
+import persistent4s.examples.courses.enrollment.domain.*
 
 /** DCB-style enrollment: validates a student-into-course command against a multi-tag scope.
   *
@@ -50,79 +41,46 @@ final case class EnrollStudent(
 final case class EnrollStudentState(
   studentRegistered: Boolean,
   activeForThisStudent: Boolean,
-  activeOtherStudents: Int,
+  courseExists: Boolean,
+  courseCapacity: Int,
+  nbEnrollments: Int,
 )
 
-final class EnrollStudentHandler[F[_]: Async](
-  eventStore: EventStore[F, EnrollmentEvent],
-  courseView: CourseViewRepository[F],
-  maxRetries: Int = 3,
-):
+object EnrollStudentHandler extends CommandHandler[EnrollStudent, EnrollStudentState, SchoolEvent]:
 
-  def run(command: EnrollStudent): F[Unit] = attempt(command, maxRetries)
+  override def tags(command: EnrollStudent): Set[Tag] =
+    Set(Tag("student", command.studentId), Tag("course", command.courseId))
 
-  private def attempt(command: EnrollStudent, retriesLeft: Int): F[Unit] =
-    runOnce(command).handleErrorWith {
-      case _: IndexConflictException if retriesLeft > 0 => attempt(command, retriesLeft - 1)
-      case other                                        => Async[F].raiseError(other)
-    }
+  override def initial: EnrollStudentState = EnrollStudentState(
+    studentRegistered = false, activeForThisStudent = false, courseExists = false, courseCapacity = 0, nbEnrollments = 0,
+  )
 
-  private def runOnce(command: EnrollStudent): F[Unit] =
-    val tags = Set(Tag("student", command.studentId), Tag("course", command.courseId))
-    val filter = EventFilter(
-      Set(
-        EventTypeName.of[StudentRegistered],
-        EventTypeName.of[StudentEnrolled],
-        EventTypeName.of[StudentDropped],
+  override def evolve(command: EnrollStudent, state: EnrollStudentState, event: SchoolEvent): EnrollStudentState =
+    event match
+      case StudentRegistered(studentId, _, _)      => state.copy(studentRegistered = true)
+      case StudentEnrolled(studentId, courseId, _) =>
+        state.copy(activeForThisStudent = true, nbEnrollments = state.nbEnrollments + 1)
+      case StudentDropped(studentId, courseId, _) =>
+        state.copy(activeForThisStudent = false, nbEnrollments = state.nbEnrollments - 1)
+      case CourseOpened(courseId, _, _, capacity, _) =>
+        state.copy(courseExists = true, courseCapacity = capacity)
+      case CapacityChanged(courseId, newCapacity) =>
+        state.copy(courseCapacity = newCapacity)
+      case CourseClosed(courseId) =>
+        state.copy(courseExists = false, courseCapacity = 0)
+
+  override def validate(state: EnrollStudentState, command: EnrollStudent): Either[Throwable, Unit] =
+    if !state.studentRegistered then Left(new Exception(s"Student not registered: ${command.studentId}"))
+    else if !state.courseExists then Left(new Exception(s"Course not found: ${command.courseId}"))
+    else if state.activeForThisStudent then
+      Left(new Exception(s"Student ${command.studentId} already enrolled in course ${command.courseId}"))
+    else if state.nbEnrollments >= state.courseCapacity then Left(new Exception(s"Course ${command.courseId} is full"))
+    else Right(())
+
+  override def decide(state: EnrollStudentState, command: EnrollStudent): List[(Set[Tag], SchoolEvent)] =
+    List(
+      (
+        Set(Tag("student", command.studentId), Tag("course", command.courseId)),
+        StudentEnrolled(command.studentId, command.courseId, OffsetDateTime.now()),
       ),
-      tags,
     )
-
-    for
-      envelopes <- eventStore.readFrom(0L, filter).compile.toList
-      state      = envelopes.foldLeft(
-                EnrollStudentState(studentRegistered = false, activeForThisStudent = false, activeOtherStudents = 0),
-              )((s, env) => fold(command, s, env.payload))
-      expectedIndex = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-      view         <- courseView.find(command.courseId)
-      _            <- validate(state, command, view) match
-             case Left(e)  => Async[F].raiseError(e)
-             case Right(_) => Async[F].unit
-      event = StudentEnrolled(command.studentId, command.courseId, OffsetDateTime.now())
-      _    <- eventStore.append(filter, expectedIndex, List((None, tags, EventTypeName.fromInstance(event), event)))
-    yield ()
-
-  private def fold(command: EnrollStudent, s: EnrollStudentState, e: EnrollmentEvent): EnrollStudentState = e match
-    case StudentRegistered(command.studentId, _, _) =>
-      s.copy(studentRegistered = true)
-
-    case StudentEnrolled(command.studentId, command.courseId, _) =>
-      s.copy(activeForThisStudent = true)
-    case StudentDropped(command.studentId, command.courseId, _) =>
-      s.copy(activeForThisStudent = false)
-
-    case StudentEnrolled(otherStudent, command.courseId, _) if otherStudent != command.studentId =>
-      s.copy(activeOtherStudents = s.activeOtherStudents + 1)
-    case StudentDropped(otherStudent, command.courseId, _) if otherStudent != command.studentId =>
-      s.copy(activeOtherStudents = s.activeOtherStudents - 1)
-
-    case _ => s
-
-  private def validate(
-    state: EnrollStudentState,
-    command: EnrollStudent,
-    view: Option[CourseView],
-  ): Either[Throwable, Unit] =
-    view match
-      case None =>
-        Left(new Exception(s"Course not found in local view: ${command.courseId}"))
-      case Some(c) if !c.isOpen =>
-        Left(new Exception(s"Course is closed: ${command.courseId}"))
-      case Some(_) if !state.studentRegistered =>
-        Left(new Exception(s"Student not registered: ${command.studentId}"))
-      case Some(_) if state.activeForThisStudent =>
-        Left(new Exception(s"Student already enrolled in this course"))
-      case Some(c) if state.activeOtherStudents >= c.capacity =>
-        Left(new Exception(s"Course is full (capacity ${c.capacity})"))
-      case Some(_) =>
-        Right(())

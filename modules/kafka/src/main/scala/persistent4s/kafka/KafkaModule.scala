@@ -141,7 +141,7 @@ object KafkaModule:
         timestampStr <- header(TimestampHeaderName, headers)
         timestamp    <- Try(Instant.parse(timestampStr)).toEither
         payload      <- codec.decode(eventTypeName, record.value)
-      yield EventEnvelope(EventMetadata(position, eventId, tags, eventTypeName, timestamp), payload)
+      yield EventEnvelope(EventMetadata(position, eventId, tags, eventTypeName, true, timestamp), payload)
       decodedMessage match
         case Right(envelope) => Async[F].pure(envelope)
         case Left(error)     =>

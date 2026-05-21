@@ -23,7 +23,13 @@ import io.circe.{Decoder, Encoder}
 
 import persistent4s.Event
 
-sealed trait EnrollmentEvent extends Event
+sealed trait SchoolEvent extends Event
+
+// ===============================================================================
+// Domain Events
+// ===============================================================================
+
+sealed trait EnrollmentEvent extends SchoolEvent derives Encoder, Decoder
 
 final case class StudentRegistered(
   studentId: UUID,
@@ -42,3 +48,26 @@ final case class StudentDropped(
   courseId: UUID,
   droppedAt: OffsetDateTime,
 ) extends EnrollmentEvent derives Encoder, Decoder
+
+// ===============================================================================
+// Catalog events
+// ===============================================================================
+
+sealed trait CatalogEvent extends SchoolEvent derives Encoder, Decoder
+
+final case class CourseOpened(
+  courseId: UUID,
+  code: String,
+  title: String,
+  capacity: Int,
+  instructor: String,
+) extends CatalogEvent derives Encoder, Decoder
+
+final case class CapacityChanged(
+  courseId: UUID,
+  newCapacity: Int,
+) extends CatalogEvent derives Encoder, Decoder
+
+final case class CourseClosed(
+  courseId: UUID,
+) extends CatalogEvent derives Encoder, Decoder

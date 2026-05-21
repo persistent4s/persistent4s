@@ -20,7 +20,7 @@ import java.time.OffsetDateTime
 import java.util.UUID
 
 import persistent4s.{CommandHandler, EventTypeName, Tag}
-import persistent4s.examples.courses.enrollment.domain.{EnrollmentEvent, StudentDropped, StudentEnrolled}
+import persistent4s.examples.courses.enrollment.domain.{SchoolEvent, StudentDropped, StudentEnrolled}
 
 final case class DropStudent(
   studentId: UUID,
@@ -29,7 +29,7 @@ final case class DropStudent(
 
 final case class DropStudentState(activeEnrollment: Boolean)
 
-object DropStudentHandler extends CommandHandler[DropStudent, DropStudentState, EnrollmentEvent]:
+object DropStudentHandler extends CommandHandler[DropStudent, DropStudentState, SchoolEvent]:
 
   override def eventTypes: Option[Set[EventTypeName]] =
     Some(
@@ -40,11 +40,11 @@ object DropStudentHandler extends CommandHandler[DropStudent, DropStudentState, 
     )
 
   def tags(command: DropStudent): Set[Tag] =
-    Set(Tag("student", command.studentId), Tag("course", command.courseId))
+    Set(Tag("student", command.studentId))
 
   def initial: DropStudentState = DropStudentState(activeEnrollment = false)
 
-  def evolve(command: DropStudent, state: DropStudentState, event: EnrollmentEvent): DropStudentState =
+  def evolve(command: DropStudent, state: DropStudentState, event: SchoolEvent): DropStudentState =
     event match
       case StudentEnrolled(command.studentId, command.courseId, _) =>
         state.copy(activeEnrollment = true)
@@ -57,7 +57,7 @@ object DropStudentHandler extends CommandHandler[DropStudent, DropStudentState, 
       Left(new Exception(s"No active enrollment to drop for student=${command.studentId} course=${command.courseId}"))
     else Right(())
 
-  def decide(state: DropStudentState, command: DropStudent): List[(Set[Tag], EnrollmentEvent)] =
+  def decide(state: DropStudentState, command: DropStudent): List[(Set[Tag], SchoolEvent)] =
     List(
       (
         Set(Tag("student", command.studentId), Tag("course", command.courseId)),
