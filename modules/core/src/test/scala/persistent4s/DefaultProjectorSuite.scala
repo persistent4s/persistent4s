@@ -60,7 +60,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Option[UUID], Set[Tag], EventTypeName, A)]*,
+      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
     ): IO[Unit] =
       events.modify { current =>
         val relevant = current.filter(matches(_, eventFilter))
@@ -68,14 +68,14 @@ object DefaultProjectorSuite extends SimpleIOSuite:
         if actualIdx != expectedIndex then (current, Left(new IndexConflictException(expectedIndex, actualIdx)))
         else
           val lastPos = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvts = evts.flatten.zipWithIndex.map { case ((maybeId, tags, eventType, evt), i) =>
+          val newEvts = evts.flatten.zipWithIndex.map { case ((maybeId, tags, eventType, isExternal, evt), i) =>
             EventEnvelope(
               EventMetadata(
                 lastPos + i.toLong + 1L,
                 maybeId.getOrElse(UUID.randomUUID()),
                 tags,
                 eventType,
-                false,
+                isExternal,
                 java.time.Instant.now(),
               ),
               evt,
@@ -141,7 +141,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       store.append(
         EventFilter(),
         i.toLong,
-        List((None, tags, EventTypeName.fromInstance(event), event)),
+        List((None, tags, EventTypeName.fromInstance(event), false, event)),
       )
     }
 
@@ -417,10 +417,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                   0L,
                   List(
                     (
-                      None,
-                      Set(entityTag("1")),
-                      EventTypeName.fromString("Created"),
-                      TestEvent.Created("1"),
+                      None, Set(entityTag("1")), EventTypeName.fromString("Created"), false, TestEvent.Created("1"),
                     ),
                   ),
                 ) *>

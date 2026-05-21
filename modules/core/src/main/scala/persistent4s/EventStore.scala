@@ -47,14 +47,15 @@ trait EventStore[F[_], A <: Event]:
     * @param expectedIndex
     *   the global position of the last known matching event, or 0 if none are expected
     * @param events
-    *   one or more lists of events to append, each event paired with its tags and type name
+    *   one or more lists of events to append, each event paired with its tags, type name, and a boolean indicating if
+    *   it is external
     * @return
     *   a F[Unit] that completes when the events have been written, or fails with [[IndexConflictException]] on conflict
     */
   def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
-    events: List[(Option[UUID], Set[Tag], EventTypeName, A)]*,
+    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
   ): F[Unit]
 
   /** Read events from the event store starting from a specific position, filtering by event types and tags. The
