@@ -326,6 +326,7 @@ object PostgresEventStore:
     sql"""
       INSERT INTO events (event_id, event_type, tags, payload)
       VALUES ($uuid, $text, $jsonb, $jsonb)
+      ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
       RETURNING sequence_number
     """.query(int8)
 
