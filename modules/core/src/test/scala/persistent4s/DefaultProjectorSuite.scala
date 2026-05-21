@@ -87,6 +87,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
         case Right(_) => queue.offer(EventsAppended)
       }
 
+    def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): IO[Unit] = IO.unit
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
