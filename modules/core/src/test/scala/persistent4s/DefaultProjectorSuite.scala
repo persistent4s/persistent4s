@@ -75,6 +75,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                 maybeId.getOrElse(UUID.randomUUID()),
                 tags,
                 eventType,
+                false,
                 java.time.Instant.now(),
               ),
               evt,
