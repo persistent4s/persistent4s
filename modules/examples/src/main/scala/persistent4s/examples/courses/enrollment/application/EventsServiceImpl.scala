@@ -35,9 +35,9 @@ class EventsServiceImpl(eventStore: EventStore[IO, EnrollmentEvent]) extends Eve
           events.map { e =>
             EventItem(
               globalPosition = e.metadata.globalPosition,
-              eventType      = e.metadata.eventType.value,
-              tags           = e.metadata.tags.map(_.value).toList,
-              timestamp      = Timestamp.fromInstant(e.metadata.timestamp),
+              eventType = e.metadata.eventType.value,
+              tags = e.metadata.tags.map(_.value).toList,
+              timestamp = Timestamp.fromInstant(e.metadata.timestamp),
             )
           },
         )

@@ -27,17 +27,16 @@ import pureconfig.ConfigSource
 import skunk.*
 
 given Tracer[IO] = Tracer.Implicits.noop
-given Meter[IO]  = Meter.Implicits.noop
+
+given Meter[IO] = Meter.Implicits.noop
+
 given Logger[IO] = Slf4jLogger.getLogger[IO]
 
 import persistent4s.*
 import persistent4s.circe.CirceEventCodec
 import persistent4s.examples.courses.catalog.domain.CatalogEvent
 import persistent4s.examples.courses.enrollment.domain.*
-import persistent4s.examples.courses.enrollment.domain.courseview.{
-  CatalogEventConsumer,
-  CourseViewRepository,
-}
+import persistent4s.examples.courses.enrollment.domain.courseview.{CatalogEventConsumer, CourseViewRepository}
 import persistent4s.examples.courses.enrollment.domain.enrollment.{
   EnrollStudentHandler,
   EnrollmentProjection,
@@ -59,13 +58,18 @@ final class EnrollmentModule private (
 object EnrollmentModule:
 
   val eventCodec: EventCodec[EnrollmentEvent] = CirceEventCodec.derived[EnrollmentEvent]
-  val catalogCodec: EventCodec[CatalogEvent]  = CirceEventCodec.derived[CatalogEvent]
 
-  private val pgConfigPath    = "persistent4s.enrollment.postgres"
+  val catalogCodec: EventCodec[CatalogEvent] = CirceEventCodec.derived[CatalogEvent]
+
+  private val pgConfigPath = "persistent4s.enrollment.postgres"
+
   private val kafkaConfigPath = "persistent4s.courses.kafka"
-  val enrollmentTopic         = "enrollment.events"
-  val catalogTopic            = "catalog.events"
-  val catalogGroupId          = "enrollment-service.catalog-consumer"
+
+  val enrollmentTopic = "enrollment.events"
+
+  val catalogTopic = "catalog.events"
+
+  val catalogGroupId = "enrollment-service.catalog-consumer"
 
   def make: Resource[IO, EnrollmentModule] =
     for
@@ -77,38 +81,37 @@ object EnrollmentModule:
                     new IllegalStateException("Outbox missing despite enableOutbox = true"),
                   ),
                 )
-      _          <- MonitoringServer.make[IO](checkpoint, store.notify, port = port"9092")
-      pgConfig   <- Resource.eval(loadPgConfig)
-      bootstrap  <- Resource.eval(loadKafkaBootstrap)
-      viewPool   <- Session
+      _         <- MonitoringServer.make[IO](checkpoint, store.notify, port = port"9092")
+      pgConfig  <- Resource.eval(loadPgConfig)
+      bootstrap <- Resource.eval(loadKafkaBootstrap)
+      viewPool  <- Session
                     .Builder[IO]
                     .withHost(pgConfig.host)
                     .withPort(pgConfig.port)
                     .withUserAndPassword(pgConfig.user, pgConfig.password)
                     .withDatabase(pgConfig.database)
                     .pooled(pgConfig.maxConnections)
-      studentRepo       = StudentRepository.make[IO](viewPool)
-      enrollmentRepo    = EnrollmentRepository.make[IO](viewPool)
-      courseViewRepo    = CourseViewRepository.make[IO](viewPool)
-      studentProj      <- Resource.eval(StudentProjection.make[IO](studentRepo))
-      enrollmentProj   <- Resource.eval(EnrollmentProjection.make[IO](enrollmentRepo))
-      projector         = DefaultProjector[IO, EnrollmentEvent](store, checkpoint)
-      _                <- projector.run(studentProj).compile.drain.background
-      _                <- projector.run(enrollmentProj).compile.drain.background
-      consumerCfg       = KafkaConsumerConfig(
-                            bootstrapServers = bootstrap,
-                            groupId          = catalogGroupId,
-                          )
-      catalogStream    <- CatalogEventConsumer.stream[IO](consumerCfg, catalogCodec, courseViewRepo, catalogTopic)
-      _                <- catalogStream.compile.drain.background
-      producerCfg       = KafkaProducerConfig[EnrollmentEvent](
-                            bootstrapServers = bootstrap,
-                            recordKey =
-                              _.metadata.tags.find(_.category == "student").map(_.id).getOrElse("unknown"),
-                          )
-      relay            <- KafkaModule.relay[IO, EnrollmentEvent](outbox, producerCfg, eventCodec, topic = enrollmentTopic)
-      _                <- relay.run.background
-      enrollHandler     = new EnrollStudentHandler[IO](store, courseViewRepo)
+      studentRepo     = StudentRepository.make[IO](viewPool)
+      enrollmentRepo  = EnrollmentRepository.make[IO](viewPool)
+      courseViewRepo  = CourseViewRepository.make[IO](viewPool)
+      studentProj    <- Resource.eval(StudentProjection.make[IO](studentRepo))
+      enrollmentProj <- Resource.eval(EnrollmentProjection.make[IO](enrollmentRepo))
+      projector       = DefaultProjector[IO, EnrollmentEvent](store, checkpoint)
+      _              <- projector.run(studentProj).compile.drain.background
+      _              <- projector.run(enrollmentProj).compile.drain.background
+      consumerCfg     = KafkaConsumerConfig(
+                      bootstrapServers = bootstrap,
+                      groupId = catalogGroupId,
+                    )
+      catalogStream <- CatalogEventConsumer.stream[IO](consumerCfg, catalogCodec, courseViewRepo, catalogTopic)
+      _             <- catalogStream.compile.drain.background
+      producerCfg    = KafkaProducerConfig[EnrollmentEvent](
+                      bootstrapServers = bootstrap,
+                      recordKey = _.metadata.tags.find(_.category == "student").map(_.id).getOrElse("unknown"),
+                    )
+      relay        <- KafkaModule.relay[IO, EnrollmentEvent](outbox, producerCfg, eventCodec, topic = enrollmentTopic)
+      _            <- relay.run.background
+      enrollHandler = new EnrollStudentHandler[IO](store, courseViewRepo)
     yield new EnrollmentModule(store, studentRepo, enrollmentRepo, courseViewRepo, enrollHandler)
 
   private def loadPgConfig: IO[PostgresConfig] =

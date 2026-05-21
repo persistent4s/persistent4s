@@ -36,10 +36,6 @@ class CourseViewServiceImpl(repository: CourseViewRepository[IO]) extends Course
 
   private def toItem(c: CourseView): CourseViewItem =
     CourseViewItem(
-      courseId   = c.courseId.toString,
-      code       = c.code,
-      title      = c.title,
-      capacity   = c.capacity,
-      instructor = c.instructor,
-      isOpen     = c.isOpen,
+      courseId = c.courseId.toString, code = c.code, title = c.title, capacity = c.capacity, instructor = c.instructor,
+      isOpen = c.isOpen,
     )

@@ -27,7 +27,9 @@ import pureconfig.ConfigSource
 import skunk.*
 
 given Tracer[IO] = Tracer.Implicits.noop
-given Meter[IO]  = Meter.Implicits.noop
+
+given Meter[IO] = Meter.Implicits.noop
+
 given Logger[IO] = Slf4jLogger.getLogger[IO]
 
 import persistent4s.*
@@ -47,9 +49,11 @@ object CatalogModule:
 
   val eventCodec: EventCodec[CatalogEvent] = CirceEventCodec.derived[CatalogEvent]
 
-  private val pgConfigPath    = "persistent4s.catalog.postgres"
+  private val pgConfigPath = "persistent4s.catalog.postgres"
+
   private val kafkaConfigPath = "persistent4s.courses.kafka"
-  val catalogTopic            = "catalog.events"
+
+  val catalogTopic = "catalog.events"
 
   def make: Resource[IO, CatalogModule] =
     for
@@ -61,10 +65,10 @@ object CatalogModule:
                     new IllegalStateException("Outbox missing despite enableOutbox = true"),
                   ),
                 )
-      _          <- MonitoringServer.make[IO](checkpoint, store.notify, port = port"9091")
-      pgConfig   <- Resource.eval(loadPgConfig)
-      bootstrap  <- Resource.eval(loadKafkaBootstrap)
-      viewPool   <- Session
+      _         <- MonitoringServer.make[IO](checkpoint, store.notify, port = port"9091")
+      pgConfig  <- Resource.eval(loadPgConfig)
+      bootstrap <- Resource.eval(loadKafkaBootstrap)
+      viewPool  <- Session
                     .Builder[IO]
                     .withHost(pgConfig.host)
                     .withPort(pgConfig.port)
@@ -79,8 +83,8 @@ object CatalogModule:
                       bootstrapServers = bootstrap,
                       recordKey = _.metadata.tags.find(_.category == "course").map(_.id).getOrElse("unknown"),
                     )
-      relay      <- KafkaModule.relay[IO, CatalogEvent](outbox, producerCfg, eventCodec, topic = catalogTopic)
-      _          <- relay.run.background
+      relay <- KafkaModule.relay[IO, CatalogEvent](outbox, producerCfg, eventCodec, topic = catalogTopic)
+      _     <- relay.run.background
     yield new CatalogModule(store, courseRepo)
 
   private def loadPgConfig: IO[PostgresConfig] =

@@ -80,9 +80,9 @@ final class EnrollStudentHandler[F[_]: Async](
 
     for
       envelopes <- eventStore.readFrom(0L, filter).compile.toList
-      state      = envelopes.foldLeft(EnrollStudentState(studentRegistered = false, activeForThisStudent = false, activeOtherStudents = 0))(
-                (s, env) => fold(command, s, env.payload),
-              )
+      state      = envelopes.foldLeft(
+                EnrollStudentState(studentRegistered = false, activeForThisStudent = false, activeOtherStudents = 0),
+              )((s, env) => fold(command, s, env.payload))
       expectedIndex = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
       view         <- courseView.find(command.courseId)
       _            <- validate(state, command, view) match

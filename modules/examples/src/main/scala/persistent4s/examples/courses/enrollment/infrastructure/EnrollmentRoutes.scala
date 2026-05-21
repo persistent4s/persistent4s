@@ -40,9 +40,9 @@ object EnrollmentRoutes:
       courseViewRoutes <- SimpleRestJsonBuilder.routes(CourseViewServiceImpl(module.courseViewRepository)).resource
       eventsRoutes     <- SimpleRestJsonBuilder.routes(EventsServiceImpl(module.store)).resource
       docsRoutes        = docs[IO](
-                            StudentService,
-                            EnrollmentService,
-                            CourseViewService,
-                            EventsService,
-                          )
+                     StudentService,
+                     EnrollmentService,
+                     CourseViewService,
+                     EventsService,
+                   )
     yield studentRoutes <+> enrollmentRoutes <+> courseViewRoutes <+> eventsRoutes <+> docsRoutes

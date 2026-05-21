@@ -28,8 +28,8 @@ import persistent4s.EventCodec
 /** Subscribes to `catalog.events`, applies each event to the local `course_view` table, then commits the offset.
   *
   * At-least-once: the upsert/delete is idempotent so re-deliveries are safe. On a decode or DB error the fs2 stream
-  * fails — the supervising fiber terminates and the server crashes loudly. A production deployment would route to a
-  * DLQ instead; for an example this fail-fast behavior is intentional.
+  * fails — the supervising fiber terminates and the server crashes loudly. A production deployment would route to a DLQ
+  * instead; for an example this fail-fast behavior is intentional.
   */
 object CatalogEventConsumer:
 

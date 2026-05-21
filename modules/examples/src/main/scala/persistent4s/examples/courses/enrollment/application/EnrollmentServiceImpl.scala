@@ -29,7 +29,8 @@ import smithy4s.time.Timestamp
 class EnrollmentServiceImpl(
   enrollStudent: EnrollStudentHandler[IO],
   repository: EnrollmentRepository[IO],
-)(using EventStore[IO, EnrollmentEvent]) extends EnrollmentService[IO]:
+)(using EventStore[IO, EnrollmentEvent])
+    extends EnrollmentService[IO]:
 
   def enrollStudent(studentId: String, courseId: String): IO[Unit] =
     enrollStudent
@@ -59,8 +60,8 @@ class EnrollmentServiceImpl(
 
   private def toItem(r: EnrollmentRecord): EnrollmentItem =
     EnrollmentItem(
-      studentId  = r.studentId.toString,
-      courseId   = r.courseId.toString,
+      studentId = r.studentId.toString,
+      courseId = r.courseId.toString,
       enrolledAt = Timestamp.fromInstant(r.enrolledAt.toInstant),
-      droppedAt  = r.droppedAt.map(d => Timestamp.fromInstant(d.toInstant)),
+      droppedAt = r.droppedAt.map(d => Timestamp.fromInstant(d.toInstant)),
     )

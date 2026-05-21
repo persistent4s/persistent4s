@@ -25,8 +25,7 @@ import persistent4s.examples.courses.catalog.api.*
 import persistent4s.examples.courses.catalog.domain.CatalogEvent
 import persistent4s.examples.courses.catalog.domain.course.*
 
-class CourseServiceImpl(repository: CourseRepository[IO])(using EventStore[IO, CatalogEvent])
-    extends CourseService[IO]:
+class CourseServiceImpl(repository: CourseRepository[IO])(using EventStore[IO, CatalogEvent]) extends CourseService[IO]:
 
   def openCourse(code: String, title: String, capacity: Int, instructor: String): IO[OpenCourseOutput] =
     (for
@@ -51,9 +50,7 @@ class CourseServiceImpl(repository: CourseRepository[IO])(using EventStore[IO, C
       }
 
   def getCourses(): IO[GetCoursesOutput] =
-    repository.getCourses.map(courses =>
-      GetCoursesOutput(courses.map(toCourseItem)),
-    )
+    repository.getCourses.map(courses => GetCoursesOutput(courses.map(toCourseItem)))
 
   def getCourse(courseId: String): IO[GetCourseOutput] =
     repository.find(UUID.fromString(courseId)).flatMap {
@@ -63,10 +60,6 @@ class CourseServiceImpl(repository: CourseRepository[IO])(using EventStore[IO, C
 
   private def toCourseItem(c: CourseState): CourseItem =
     CourseItem(
-      courseId = c.courseId.toString,
-      code = c.code,
-      title = c.title,
-      capacity = c.capacity,
-      instructor = c.instructor,
+      courseId = c.courseId.toString, code = c.code, title = c.title, capacity = c.capacity, instructor = c.instructor,
       isOpen = c.isOpen,
     )
