@@ -148,12 +148,12 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
                   _.stream(fromPosition *: eventTypesList *: tagsList *: max *: EmptyTuple, FetchSize),
                 )
 
-        rowStream.evalMap { case (seqNum, eventId, eventType, tags, payload, recordedAt) =>
+        rowStream.evalMap { case (seqNum, eventId, eventType, tags, payload, isExternal, recordedAt) =>
           val eventTypeName = EventTypeName.fromString(eventType)
           parsePayload(eventTypeName, payload).map { event =>
             EventEnvelope(
               EventMetadata(
-                globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName,
+                globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName, isExternal = isExternal,
                 timestamp = recordedAt.toInstant,
               ),
               event,
@@ -340,24 +340,25 @@ object PostgresEventStore:
     }(tags => Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*))
 
   private[postgres] val eventDecoder: Decoder[
-    Long *: UUID *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple,
+    Long *: UUID *: String *: Set[Tag] *: Json *: Boolean *: OffsetDateTime *: EmptyTuple,
   ] =
-    int8 *: uuid *: text *: tagsCodec *: jsonb *: timestamptz
+    int8 *: uuid *: text *: tagsCodec *: jsonb *: bool *: timestamptz
 
   private val acquireTagLockQuery: Query[String, String] =
     sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
 
   private val insertEventQuery: Query[String *: Json *: Json *: EmptyTuple, Long] =
     sql"""
-      INSERT INTO events (event_type, tags, payload)
-      VALUES ($text, $jsonb, $jsonb)
+      INSERT INTO events (event_type, tags, payload, is_external)
+      VALUES ($text, $jsonb, $jsonb, false)
       RETURNING sequence_number
     """.query(int8)
 
   private val insertEventWithIdQuery: Query[UUID *: String *: Json *: Json *: EmptyTuple, Long] =
     sql"""
-      INSERT INTO events (event_id, event_type, tags, payload)
-      VALUES ($uuid, $text, $jsonb, $jsonb)
+      INSERT INTO events (event_id, event_type, tags, payload, is_external)
+      VALUES ($uuid, $text, $jsonb, $jsonb, true)
+      ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
       RETURNING sequence_number
     """.query(int8)
 
@@ -409,114 +410,114 @@ object PostgresEventStore:
     """.query(int8)
 
   private[postgres] type EventRow =
-    Long *: UUID *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple
+    Long *: UUID *: String *: Set[Tag] *: Json *: Boolean *: OffsetDateTime *: EmptyTuple
 
   private val readAllQuery: Query[Long, EventRow] =
     sql"""
-        SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
-        FROM events
-        WHERE sequence_number > $int8
-        ORDER BY sequence_number ASC
-      """.query(eventDecoder)
+      SELECT sequence_number, event_id, event_type, tags, payload, is_external, recorded_at
+      FROM events
+      WHERE sequence_number > $int8
+      ORDER BY sequence_number ASC
+    """.query(eventDecoder)
 
   private val readAllLimitedQuery: Query[Long *: Int *: EmptyTuple, EventRow] =
     sql"""
-        SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
-        FROM events
-        WHERE sequence_number > $int8
-        ORDER BY sequence_number ASC
-        LIMIT $int4
-      """.query(eventDecoder)
+      SELECT sequence_number, event_id, event_type, tags, payload, is_external, recorded_at
+      FROM events
+      WHERE sequence_number > $int8
+      ORDER BY sequence_number ASC
+      LIMIT $int4
+    """.query(eventDecoder)
 
   private def readByEventTypesQuery(
     numEventTypes: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-        SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
-        FROM events
-        WHERE sequence_number > $int8
-          AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-        ORDER BY sequence_number ASC
-      """.query(eventDecoder)
+      SELECT sequence_number, event_id, event_type, tags, payload, is_external, recorded_at
+      FROM events
+      WHERE sequence_number > $int8
+        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+      ORDER BY sequence_number ASC
+    """.query(eventDecoder)
 
   private def readByEventTypesLimitedQuery(
     numEventTypes: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-        SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
-        FROM events
-        WHERE sequence_number > $int8
-          AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-        ORDER BY sequence_number ASC
-        LIMIT $int4
-      """.query(eventDecoder)
+      SELECT sequence_number, event_id, event_type, tags, payload, is_external, recorded_at
+      FROM events
+      WHERE sequence_number > $int8 
+        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+      ORDER BY sequence_number ASC
+      LIMIT $int4
+    """.query(eventDecoder)
 
   private def readByTagsQuery(
     numTags: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-        SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
-        FROM events e
-        WHERE e.sequence_number > $int8
-          AND EXISTS (
-            SELECT 1
-            FROM event_tags et
-            WHERE et.sequence_number = e.sequence_number
-              AND et.tag = ANY(ARRAY[${text.list(numTags)}])
-          )
-        ORDER BY e.sequence_number ASC
-      """.query(eventDecoder)
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
+      FROM events e
+      WHERE e.sequence_number > $int8
+        AND EXISTS (
+          SELECT 1
+          FROM event_tags et
+          WHERE et.sequence_number = e.sequence_number
+            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        )
+      ORDER BY e.sequence_number ASC
+    """.query(eventDecoder)
 
   private def readByTagsLimitedQuery(
     numTags: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-        SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
-        FROM events e
-        WHERE e.sequence_number > $int8
-          AND EXISTS (
-            SELECT 1
-            FROM event_tags et
-            WHERE et.sequence_number = e.sequence_number
-              AND et.tag = ANY(ARRAY[${text.list(numTags)}])
-          )
-        ORDER BY e.sequence_number ASC
-        LIMIT $int4
-      """.query(eventDecoder)
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
+      FROM events e
+      WHERE e.sequence_number > $int8
+        AND EXISTS (
+          SELECT 1
+          FROM event_tags et
+          WHERE et.sequence_number = e.sequence_number
+            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        )
+      ORDER BY e.sequence_number ASC
+      LIMIT $int4
+    """.query(eventDecoder)
 
   private def readByBothQuery(
     numEventTypes: Int,
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-        SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
-        FROM events e
-        WHERE e.sequence_number > $int8
-          AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-          AND EXISTS (
-            SELECT 1
-            FROM event_tags et
-            WHERE et.sequence_number = e.sequence_number
-              AND et.tag = ANY(ARRAY[${text.list(numTags)}])
-          )
-        ORDER BY e.sequence_number ASC
-      """.query(eventDecoder)
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
+      FROM events e
+      WHERE e.sequence_number > $int8
+        AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+        AND EXISTS (
+          SELECT 1
+          FROM event_tags et
+          WHERE et.sequence_number = e.sequence_number
+            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        )
+      ORDER BY e.sequence_number ASC
+    """.query(eventDecoder)
 
   private def readByBothLimitedQuery(
     numEventTypes: Int,
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-        SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
-        FROM events e
-        WHERE e.sequence_number > $int8
-          AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-          AND EXISTS (
-            SELECT 1
-            FROM event_tags et
-            WHERE et.sequence_number = e.sequence_number
-              AND et.tag = ANY(ARRAY[${text.list(numTags)}])
-          )
-        ORDER BY e.sequence_number ASC
-        LIMIT $int4
-      """.query(eventDecoder)
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
+      FROM events e
+      WHERE e.sequence_number > $int8
+        AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+        AND EXISTS (
+          SELECT 1
+          FROM event_tags et
+          WHERE et.sequence_number = e.sequence_number
+            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+        )
+      ORDER BY e.sequence_number ASC
+      LIMIT $int4
+    """.query(eventDecoder)
