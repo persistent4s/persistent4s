@@ -147,12 +147,12 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
                   _.stream(fromPosition *: eventTypesList *: tagsList *: max *: EmptyTuple, FetchSize),
                 )
 
-        rowStream.evalMap { case (seqNum, eventId, eventType, tags, payload, recordedAt) =>
+        rowStream.evalMap { case (seqNum, eventId, eventType, tags, payload, isExternal, recordedAt) =>
           val eventTypeName = EventTypeName.fromString(eventType)
           parsePayload(eventTypeName, payload).map { event =>
             EventEnvelope(
               EventMetadata(
-                globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName,
+                globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName, isExternal = isExternal,
                 timestamp = recordedAt.toInstant,
               ),
               event,
@@ -308,9 +308,9 @@ object PostgresEventStore:
   }(tags => Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*))
 
   private val eventDecoder: Decoder[
-    Long *: UUID *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple,
+    Long *: UUID *: String *: Set[Tag] *: Json *: Boolean *: OffsetDateTime *: EmptyTuple,
   ] =
-    int8 *: uuid *: text *: tagsCodec *: jsonb *: timestamptz
+    int8 *: uuid *: text *: tagsCodec *: jsonb *: bool *: timestamptz
 
   private val acquireTagLockQuery: Query[String, String] =
     sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
@@ -378,11 +378,11 @@ object PostgresEventStore:
     """.query(int8)
 
   private type EventRow =
-    Long *: UUID *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple
+    Long *: UUID *: String *: Set[Tag] *: Json *: Boolean *: OffsetDateTime *: EmptyTuple
 
   private val readAllQuery: Query[Long, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
+      SELECT sequence_number, event_id, event_type, tags, payload, is_external, recorded_at
       FROM events
       WHERE sequence_number > $int8
       ORDER BY sequence_number ASC
@@ -390,7 +390,7 @@ object PostgresEventStore:
 
   private val readAllLimitedQuery: Query[Long *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
+      SELECT sequence_number, event_id, event_type, tags, payload, is_external, recorded_at
       FROM events
       WHERE sequence_number > $int8
       ORDER BY sequence_number ASC
@@ -401,7 +401,7 @@ object PostgresEventStore:
     numEventTypes: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
+      SELECT sequence_number, event_id, event_type, tags, payload, is_external, recorded_at
       FROM events
       WHERE sequence_number > $int8
         AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -412,7 +412,7 @@ object PostgresEventStore:
     numEventTypes: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, tags, payload, recorded_at
+      SELECT sequence_number, event_id, event_type, tags, payload, is_external, recorded_at
       FROM events
       WHERE sequence_number > $int8 
         AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -424,7 +424,7 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND EXISTS (
@@ -440,7 +440,7 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND EXISTS (
@@ -458,7 +458,7 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -476,7 +476,7 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])

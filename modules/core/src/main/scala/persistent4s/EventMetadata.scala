@@ -29,6 +29,8 @@ import java.util.UUID
   *   the tags associated with the event
   * @param eventType
   *   the type of the event
+  * @param isExternal
+  *   whether the event was come from an external domain or not
   * @param timestamp
   *   the timestamp of when the event was created
   */
@@ -37,5 +39,6 @@ final case class EventMetadata(
   id: UUID,
   tags: Set[Tag],
   eventType: EventTypeName,
+  isExternal: Boolean,
   timestamp: Instant,
 )
