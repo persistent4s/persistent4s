@@ -42,7 +42,8 @@ object KafkaRelaySuite extends SimpleIOSuite:
     EventEnvelope(
       EventMetadata(
         globalPosition = globalPosition, id = UUID.randomUUID(), tags = Set.empty,
-        eventType = EventTypeName.fromString("TestEvent"), timestamp = Instant.parse("2026-01-01T00:00:00Z"),
+        eventType = EventTypeName.fromString("TestEvent"), isExternal = false,
+        timestamp = Instant.parse("2026-01-01T00:00:00Z"),
       ),
       TestEvent(s"e$globalPosition"),
     )
