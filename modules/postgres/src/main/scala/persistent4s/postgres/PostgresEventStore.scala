@@ -317,15 +317,15 @@ object PostgresEventStore:
 
   private val insertEventQuery: Query[String *: Json *: Json *: EmptyTuple, Long] =
     sql"""
-      INSERT INTO events (event_type, tags, payload)
-      VALUES ($text, $jsonb, $jsonb)
+      INSERT INTO events (event_type, tags, payload, is_external)
+      VALUES ($text, $jsonb, $jsonb, false)
       RETURNING sequence_number
     """.query(int8)
 
   private val insertEventWithIdQuery: Query[UUID *: String *: Json *: Json *: EmptyTuple, Long] =
     sql"""
-      INSERT INTO events (event_id, event_type, tags, payload)
-      VALUES ($uuid, $text, $jsonb, $jsonb)
+      INSERT INTO events (event_id, event_type, tags, payload, is_external)
+      VALUES ($uuid, $text, $jsonb, $jsonb, true)
       ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
       RETURNING sequence_number
     """.query(int8)
