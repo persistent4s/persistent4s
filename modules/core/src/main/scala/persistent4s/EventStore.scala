@@ -58,6 +58,37 @@ trait EventStore[F[_], A <: Event]:
     events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
   ): F[Unit]
 
+  /** Append events to the event store WITHOUT optimistic concurrency control.
+    *
+    * Unlike [[append]], this method performs no filter-scoped conflict check and acquires no advisory locks. Use it
+    * when the caller does not need to protect a local invariant — typically when re-ingesting events that were already
+    * ordered by some external authority. The common case is a subscriber importing events from another service's Kafka
+    * topic into the local store: the source service has already serialized those events under its own concurrency
+    * model, so re-checking on the receiving side is meaningless.
+    *
+    * The events are still assigned fresh `globalPosition` values in commit order and emit the same notification on
+    * commit, so projections wake up normally.
+    *
+    * The `events` parameter is variadic with the same semantics as [[append]]: multiple lists are flattened into a
+    * single ordered sequence, and an empty call is a no-op (no writes, no notification).
+    *
+    * ==Idempotency==
+    *
+    * At-least-once delivery from a broker means the same event may arrive twice. To make this method idempotent in the
+    * face of redelivery, pass the source event's UUID via the tuple's first element. The unique constraint on
+    * `event_id` then rejects duplicates at the storage layer, and the caller can catch that error and treat it as
+    * "already imported" (typically: commit the broker offset and continue). Passing `None` skips this safeguard and is
+    * appropriate only if duplicates are impossible by construction.
+    *
+    * @param events
+    *   one or more lists of events to append, each event paired with its optional id, tags, type name, an `isExternal`
+    *   flag and the payload itself. See [[append]] for the per-element semantics.
+    * @return
+    *   a `F[Unit]` that completes when the events have been written. May fail at the storage layer if a duplicate
+    *   `event_id` is detected — see the idempotency note above.
+    */
+  def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): F[Unit]
+
   /** Read events from the event store starting from a specific position, filtering by event types and tags. The
     * returned Stream will emit EventEnvelope[A] instances that match the specified event types and tags. The Stream
     * will complete when there are no more matching events to read.
