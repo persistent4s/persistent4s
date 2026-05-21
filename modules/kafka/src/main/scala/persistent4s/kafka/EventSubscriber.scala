@@ -34,11 +34,7 @@ import persistent4s.{Event, EventEnvelope}
   * Across disjoint tag scopes, ordering matches the relay's publication order, which is the commit order of the
   * appending transactions — **not** necessarily ascending `globalPosition`. Two independently-tagged events with
   * `globalPosition` 5 and 6 may be delivered as `(6, 5)` if the writer of 6 committed first. This is acceptable under
-  * DCB: causally independent events have no defined relative order, and consumers that care about ordering should
-  * filter by tag.
-  *
-  * The ordering guarantee assumes a single [[KafkaRelay]] instance is publishing to the topic; see [[KafkaRelay]] for
-  * the deployment constraint.
+  * DCB: causally independent events have no defined relative order.
   */
 trait EventSubscriber[F[_], A <: Event]:
 
