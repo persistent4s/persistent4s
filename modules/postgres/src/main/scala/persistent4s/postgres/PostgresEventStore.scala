@@ -66,7 +66,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
   override def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
-    events: List[(Option[UUID], Set[Tag], EventTypeName, A)]*,
+    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
   ): F[Unit] =
     val flatEvents = events.flatten.toList
     if flatEvents.isEmpty then Async[F].unit
@@ -78,8 +78,8 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
           for
             _ <- acquireAppendLocks(session, allTags)
             _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
-            _ <- flatEvents.traverse_ { case (eventIdOpt, tags, eventType, event) =>
-                   insertEvent(session, eventIdOpt, tags, eventType, event).void
+            _ <- flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
+                   insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).void
                  }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield ()
@@ -232,6 +232,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     eventIdOpt: Option[UUID],
     tags: Set[Tag],
     eventType: EventTypeName,
+    isExternal: Boolean,
     event: A,
   ): F[Long] =
     val tagsJson = tagsToJson(tags)
@@ -240,11 +241,11 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
       sequenceNumber <- eventIdOpt match
                           case Some(eventId) =>
                             session.unique(insertEventWithIdQuery)(
-                              eventId *: eventType.value *: tagsJson *: payloadJson *: EmptyTuple,
+                              eventId *: eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
                             )
                           case None =>
                             session.unique(insertEventQuery)(
-                              eventType.value *: tagsJson *: payloadJson *: EmptyTuple,
+                              eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
                             )
       _ <- insertEventTags(session, sequenceNumber, tags)
     yield sequenceNumber
@@ -315,17 +316,17 @@ object PostgresEventStore:
   private val acquireTagLockQuery: Query[String, String] =
     sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
 
-  private val insertEventQuery: Query[String *: Json *: Json *: EmptyTuple, Long] =
+  private val insertEventQuery: Query[String *: Json *: Json *: Boolean *: EmptyTuple, Long] =
     sql"""
       INSERT INTO events (event_type, tags, payload, is_external)
-      VALUES ($text, $jsonb, $jsonb, false)
+      VALUES ($text, $jsonb, $jsonb, $bool)
       RETURNING sequence_number
     """.query(int8)
 
-  private val insertEventWithIdQuery: Query[UUID *: String *: Json *: Json *: EmptyTuple, Long] =
+  private val insertEventWithIdQuery: Query[UUID *: String *: Json *: Json *: Boolean *: EmptyTuple, Long] =
     sql"""
       INSERT INTO events (event_id, event_type, tags, payload, is_external)
-      VALUES ($uuid, $text, $jsonb, $jsonb, true)
+      VALUES ($uuid, $text, $jsonb, $jsonb, $bool)
       ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
       RETURNING sequence_number
     """.query(int8)

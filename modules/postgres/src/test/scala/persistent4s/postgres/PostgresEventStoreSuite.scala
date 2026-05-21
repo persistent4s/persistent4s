@@ -82,7 +82,7 @@ object PostgresEventStoreSuite extends IOSuite:
     store.append(
       EventFilter(Set.empty, tags),
       expectedIndex,
-      List((None, tags, EventTypeName.of[TestEvent], TestEvent(value))),
+      List((None, tags, EventTypeName.of[TestEvent], false, TestEvent(value))),
     )
 
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
@@ -231,7 +231,7 @@ object PostgresEventStoreSuite extends IOSuite:
                   .append(
                     EventFilter(Set.empty, Set.empty),
                     0L,
-                    List((None, Set(secondTag), EventTypeName.of[TestEvent], TestEvent("after"))),
+                    List((None, Set(secondTag), EventTypeName.of[TestEvent], false, TestEvent("after"))),
                   )
                   .attempt
     yield expect(isConflict(result))
@@ -249,7 +249,7 @@ object PostgresEventStoreSuite extends IOSuite:
       _   <- store.append(
              EventFilter(Set.empty, Set(tag)),
              0L,
-             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], TestEvent("external-event"))),
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("external-event"))),
            )
       events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
     yield expect.all(
@@ -278,7 +278,7 @@ object PostgresEventStoreSuite extends IOSuite:
       _   <- store.append(
              EventFilter(Set.empty, Set(tag)),
              0L,
-             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], TestEvent("first"))),
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("first"))),
            )
       pos1 <- store
                 .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
@@ -288,7 +288,7 @@ object PostgresEventStoreSuite extends IOSuite:
       _ <- store.append(
              EventFilter(Set.empty, Set(tag)),
              pos1,
-             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], TestEvent("duplicate"))),
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("duplicate"))),
            )
       events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
     yield expect.all(
