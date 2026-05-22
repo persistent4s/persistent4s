@@ -89,6 +89,16 @@ object PostgresEventStoreSuite extends IOSuite:
       List((None, tags, EventTypeName.of[TestEvent], false, TestEvent(value))),
     )
 
+  private def appendUncheckedOne(
+    store: PostgresEventStore[IO, TestEvent],
+    tags: Set[Tag],
+    value: String,
+    eventId: Option[UUID] = None,
+  ): IO[Unit] =
+    store.appendUnchecked(
+      List((eventId, tags, EventTypeName.of[TestEvent], true, TestEvent(value))),
+    )
+
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
     result match
       case Left(_: IndexConflictException) => true
@@ -300,4 +310,65 @@ object PostgresEventStoreSuite extends IOSuite:
       events.head.metadata.globalPosition == pos1,
       events.head.payload == TestEvent("first"),
     )
+  }
+
+  test("appendUnchecked stores event with correct payload, tags, event type, and isExternal") { store =>
+    for
+      id     <- freshId("imported")
+      tag     = Tag("imported", id)
+      _      <- appendUncheckedOne(store, Set(tag), "imported-event")
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.payload == TestEvent("imported-event"),
+      events.head.metadata.tags == Set(tag),
+      events.head.metadata.eventType == EventTypeName.of[TestEvent],
+      events.head.metadata.isExternal == true,
+      events.head.metadata.globalPosition >= 1L,
+    )
+  }
+
+  test("concurrent appendUnchecked calls with the same tag all succeed (no OCC)") { store =>
+    // Unlike append, appendUnchecked performs no conflict check, so parallel writes with overlapping tags
+    // do not race — both events land in the store.
+    for
+      id      <- freshId("concurrent")
+      tag      = Tag("imported", id)
+      first    = appendUncheckedOne(store, Set(tag), "first").attempt
+      second   = appendUncheckedOne(store, Set(tag), "second").attempt
+      results <- (first, second).parTupled
+      events  <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      results._1.isRight,
+      results._2.isRight,
+      events.length == 2,
+    )
+  }
+
+  test("appendUnchecked with a duplicate UUID is a no-op and returns the original global position") { store =>
+    for
+      id   <- freshId("dedup-unchecked")
+      tag   = Tag("imported", id)
+      uuid  = UUID.randomUUID()
+      _    <- appendUncheckedOne(store, Set(tag), "first", Some(uuid))
+      pos1 <- store
+                .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
+                .compile
+                .toList
+                .map(_.head.metadata.globalPosition)
+      _      <- appendUncheckedOne(store, Set(tag), "duplicate", Some(uuid))
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.globalPosition == pos1,
+      events.head.payload == TestEvent("first"),
+    )
+  }
+
+  test("appendUnchecked with no events is a no-op") { store =>
+    for
+      before <- store.readFrom(0L, EventFilter(Set.empty, Set.empty)).compile.toList.map(_.length)
+      _      <- store.appendUnchecked()
+      after  <- store.readFrom(0L, EventFilter(Set.empty, Set.empty)).compile.toList.map(_.length)
+    yield expect(before == after)
   }

@@ -88,6 +88,23 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
         }
       }
 
+  override def appendUnchecked(
+    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+  ): F[Unit] =
+    val flatEvents = events.flatten.toList
+    if flatEvents.isEmpty then Async[F].unit
+    else
+      pool.use { session =>
+        session.transaction.use { _ =>
+          for
+            _ <- flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
+                   insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).void
+                 }
+            _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
+          yield ()
+        }
+      }
+
   override def readFrom(
     fromPosition: Long,
     eventFilter: EventFilter,
