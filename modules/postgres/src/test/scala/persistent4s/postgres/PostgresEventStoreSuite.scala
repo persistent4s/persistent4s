@@ -343,10 +343,10 @@ object PostgresEventStoreSuite extends IOSuite:
 
   test("appendUnchecked with a duplicate UUID is a no-op and returns the original global position") { store =>
     for
-      id  <- freshId("dedup-unchecked")
-      tag  = Tag("imported", id)
-      uuid = UUID.randomUUID()
-      _   <- appendUncheckedOne(store, Set(tag), "first", Some(uuid))
+      id   <- freshId("dedup-unchecked")
+      tag   = Tag("imported", id)
+      uuid  = UUID.randomUUID()
+      _    <- appendUncheckedOne(store, Set(tag), "first", Some(uuid))
       pos1 <- store
                 .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
                 .compile
