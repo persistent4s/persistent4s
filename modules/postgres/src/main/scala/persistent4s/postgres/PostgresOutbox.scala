@@ -140,7 +140,7 @@ object PostgresOutbox:
 
   private val selectUnpublishedQuery: Query[Void, PostgresEventStore.EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
       FROM event_outbox o
       JOIN events e ON e.sequence_number = o.global_position
       ORDER BY o.global_position ASC

@@ -81,7 +81,8 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
             _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
             _ <-
               flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
-                insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).flatMap(enqueueOutbox(session, _))
+                insertEvent(session, eventIdOpt, tags, eventType, isExternal, event)
+                  .flatMap(pos => if !isExternal then enqueueOutbox(session, pos) else Async[F].unit)
               }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield ()
@@ -98,7 +99,8 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
         session.transaction.use { _ =>
           for
             _ <- flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
-                   insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).void
+                   insertEvent(session, eventIdOpt, tags, eventType, isExternal, event)
+                     .flatMap(pos => if !isExternal then enqueueOutbox(session, pos) else Async[F].unit)
                  }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield ()
