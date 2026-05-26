@@ -14,24 +14,17 @@
  * limitations under the License.
  */
 
-package persistent4s.examples.courses.enrollment.domain.courseview
+package persistent4s.examples.courses.enrollment.domain.course
 
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 import fs2.Stream
 
-import persistent4s.EventEnvelope
 import persistent4s.kafka.{EventSubscriber, KafkaConsumerConfig, KafkaModule}
 import persistent4s.EventCodec
 import persistent4s.EventStore
 import persistent4s.examples.courses.enrollment.domain.SchoolEvent
 
-/** Subscribes to `catalog.events`, applies each event to the local `course_view` table, then commits the offset.
-  *
-  * At-least-once: the upsert/delete is idempotent so re-deliveries are safe. On a decode or DB error the fs2 stream
-  * fails — the supervising fiber terminates and the server crashes loudly. A production deployment would route to a DLQ
-  * instead; for an example this fail-fast behavior is intentional.
-  */
 object CatalogEventConsumer:
 
   def stream[F[_]: Async](
@@ -44,24 +37,20 @@ object CatalogEventConsumer:
       consume(subscriber, store, topic)
     }
 
-  private def consume[F[_]: Async](
-    subscriber: EventSubscriber[F, SchoolEvent],
-    store: EventStore[F, SchoolEvent],
-    topic: String,
-  ): Stream[F, Unit] =
-    subscriber
-      .subscribe(topic, fromBeginning = true)
-      .evalMap { case (envelope, offset) =>
-        // At-least-once: apply (idempotent) before committing. Per-message commit is the simplest correct pattern;
-        // batching would be a perf optimization not worth the example's complexity.
-        val tags = envelope.metadata.tags
-        /* store.append(¨
-         eventFilter = None,
-
-        ) *> */
+private def consume[F[_]: Async](
+  subscriber: EventSubscriber[F, SchoolEvent],
+  store: EventStore[F, SchoolEvent],
+  topic: String,
+): Stream[F, Unit] =
+  subscriber
+    .subscribe(topic, fromBeginning = true)
+    .evalMap { case (envelope, offset) =>
+      store.appendUnchecked(
+        List(
+          (
+            Some(envelope.metadata.id), envelope.metadata.tags, envelope.metadata.eventType, true, envelope.payload,
+          ),
+        ),
+      ) *>
         offset.commit
-      }
-
-  private def apply[F[_]: Async](
-    envelope: EventEnvelope[SchoolEvent],
-  ): F[Unit] = ???
+    }

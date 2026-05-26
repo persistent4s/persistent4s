@@ -128,6 +128,7 @@ lazy val examples = (project in file("modules/examples"))
   .enablePlugins(NoPublishPlugin, Smithy4sCodegenPlugin)
   .settings(
     name                 := "persistent4s-examples",
+    fork                 := true,
     libraryDependencies ++= List(
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s"         % Smithy4sV,
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s-swagger" % Smithy4sV,

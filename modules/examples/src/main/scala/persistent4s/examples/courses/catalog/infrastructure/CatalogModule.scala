@@ -84,7 +84,7 @@ object CatalogModule:
                       recordKey = _.metadata.tags.find(_.category == "course").map(_.id).getOrElse("unknown"),
                     )
       relay <- KafkaModule.relay[IO, CatalogEvent](outbox, producerCfg, eventCodec, topic = catalogTopic)
-      _     <- relay.run.background
+      _     <- relay.run().background
     yield new CatalogModule(store, courseRepo)
 
   private def loadPgConfig: IO[PostgresConfig] =

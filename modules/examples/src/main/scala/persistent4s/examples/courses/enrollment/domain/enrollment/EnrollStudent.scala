@@ -22,17 +22,6 @@ import java.util.UUID
 import persistent4s.*
 import persistent4s.examples.courses.enrollment.domain.*
 
-/** DCB-style enrollment: validates a student-into-course command against a multi-tag scope.
-  *
-  * The handler reads events filtered by `{student:S, course:C}` and folds them into a single state covering:
-  *   - whether the student is registered;
-  *   - whether this (student, course) pair is currently actively enrolled;
-  *   - how many other students are currently actively enrolled in the course.
-  *
-  * Course capacity and openness come from `course_view`, populated by [[CatalogEventConsumer]] from the Kafka topic
-  * `catalog.events`. The optimistic-concurrency `append` covers the full multi-tag set, so two concurrent enrollments
-  * to a near-full course cannot both succeed.
-  */
 final case class EnrollStudent(
   studentId: UUID,
   courseId: UUID,
@@ -57,17 +46,22 @@ object EnrollStudentHandler extends CommandHandler[EnrollStudent, EnrollStudentS
 
   override def evolve(command: EnrollStudent, state: EnrollStudentState, event: SchoolEvent): EnrollStudentState =
     event match
-      case StudentRegistered(studentId, _, _)      => state.copy(studentRegistered = true)
-      case StudentEnrolled(studentId, courseId, _) =>
+      case StudentRegistered(studentId, _, _)                                                                        => state.copy(studentRegistered = true)
+      case StudentEnrolled(studentId, courseId, _) if command.studentId == studentId && command.courseId == courseId =>
         state.copy(activeForThisStudent = true, nbEnrollments = state.nbEnrollments + 1)
-      case StudentDropped(studentId, courseId, _) =>
+      case StudentEnrolled(studentId, courseId, _) if command.courseId == courseId && command.studentId != studentId =>
+        state.copy(nbEnrollments = state.nbEnrollments + 1)
+      case StudentDropped(studentId, courseId, _) if command.studentId == studentId && command.courseId == courseId =>
         state.copy(activeForThisStudent = false, nbEnrollments = state.nbEnrollments - 1)
+      case StudentDropped(studentId, courseId, _) if command.courseId == courseId && command.studentId != studentId =>
+        state.copy(nbEnrollments = state.nbEnrollments - 1)
       case CourseOpened(courseId, _, _, capacity, _) =>
         state.copy(courseExists = true, courseCapacity = capacity)
       case CapacityChanged(courseId, newCapacity) =>
         state.copy(courseCapacity = newCapacity)
       case CourseClosed(courseId) =>
         state.copy(courseExists = false, courseCapacity = 0)
+      case _ => state
 
   override def validate(state: EnrollStudentState, command: EnrollStudent): Either[Throwable, Unit] =
     if !state.studentRegistered then Left(new Exception(s"Student not registered: ${command.studentId}"))

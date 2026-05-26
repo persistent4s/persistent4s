@@ -21,9 +21,9 @@ import java.util.UUID
 import cats.effect.IO
 
 import persistent4s.examples.courses.enrollment.api.*
-import persistent4s.examples.courses.enrollment.domain.courseview.{CourseView, CourseViewRepository}
+import persistent4s.examples.courses.enrollment.domain.course.{CourseState, CourseRepository}
 
-class CourseViewServiceImpl(repository: CourseViewRepository[IO]) extends CourseViewService[IO]:
+class CourseViewServiceImpl(repository: CourseRepository[IO]) extends CourseViewService[IO]:
 
   def getCourseView(): IO[GetCourseViewOutput] =
     repository.findAll.map(cs => GetCourseViewOutput(cs.map(toItem)))
@@ -34,7 +34,7 @@ class CourseViewServiceImpl(repository: CourseViewRepository[IO]) extends Course
       case None    => IO.raiseError(NotFoundError(s"Course not in local view: $courseId"))
     }
 
-  private def toItem(c: CourseView): CourseViewItem =
+  private def toItem(c: CourseState): CourseViewItem =
     CourseViewItem(
       courseId = c.courseId.toString, code = c.code, title = c.title, capacity = c.capacity, instructor = c.instructor,
       isOpen = c.isOpen,
