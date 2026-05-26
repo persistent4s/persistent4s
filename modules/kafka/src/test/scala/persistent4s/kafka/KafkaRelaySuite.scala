@@ -83,6 +83,24 @@ object KafkaRelaySuite extends SimpleIOSuite:
 
     override def notifications: Stream[IO, Unit] = Stream.empty
 
+  /** Fails the first `failTimes` publish calls (regardless of position), then succeeds. Simulates a Kafka broker that
+    * is temporarily unavailable.
+    */
+  final private class TransientPublisher(
+    recorded: Ref[IO, Vector[(String, EventEnvelope[TestEvent])]],
+    failTimes: Int,
+    callCount: Ref[IO, Int],
+  ) extends EventPublisher[IO, TestEvent]:
+
+    override def publish(topic: String, envelope: EventEnvelope[TestEvent]): IO[Unit] =
+      callCount.getAndUpdate(_ + 1).flatMap { n =>
+        if n < failTimes then IO.raiseError(new RuntimeException(s"transient failure $n"))
+        else recorded.update(_ :+ (topic, envelope))
+      }
+
+    override def publish(topic: String, envelopes: List[EventEnvelope[TestEvent]]): IO[Unit] =
+      envelopes.traverse_(publish(topic, _))
+
   /** Poll `ref` until its size reaches `n` or `timeout` elapses. */
   private def waitFor[A](ref: Ref[IO, Vector[A]], n: Int, timeout: FiniteDuration = 5.seconds): IO[Unit] =
     def poll: IO[Unit] = ref.get.flatMap { v =>
@@ -99,7 +117,7 @@ object KafkaRelaySuite extends SimpleIOSuite:
       publisher  = new FakePublisher(recorded)
       outbox     = new FakeOutbox(pending, published)
       relay      = KafkaRelay[IO, TestEvent](outbox, publisher, topic = "events", batchSize = 10)
-      _         <- relay.run.background.use { _ =>
+      _         <- relay.runOnce.background.use { _ =>
              waitFor(recorded, 3)
            }
       pubs <- recorded.get
@@ -118,7 +136,7 @@ object KafkaRelaySuite extends SimpleIOSuite:
       publisher  = new FakePublisher(recorded)
       outbox     = new FakeOutbox(pending, published)
       relay      = KafkaRelay[IO, TestEvent](outbox, publisher, topic = "events", batchSize = 10)
-      _         <- relay.run.background.use { _ =>
+      _         <- relay.runOnce.background.use { _ =>
              waitFor(published, 3)
            }
       acks <- published.get
@@ -133,7 +151,7 @@ object KafkaRelaySuite extends SimpleIOSuite:
       publisher  = new FakePublisher(recorded, failOn = _ == 2L)
       outbox     = new FakeOutbox(pending, published)
       relay      = KafkaRelay[IO, TestEvent](outbox, publisher, topic = "events", batchSize = 10)
-      result    <- relay.run.attempt
+      result    <- relay.runOnce.attempt
       pubs      <- recorded.get
       acks      <- published.get
     yield expect.all(
@@ -152,9 +170,41 @@ object KafkaRelaySuite extends SimpleIOSuite:
       publisher  = new FakePublisher(recorded)
       outbox     = new FakeOutbox(pending, published)
       relay      = KafkaRelay[IO, TestEvent](outbox, publisher, topic = "events", batchSize = 10)
-      _         <- relay.run.background.use { _ =>
+      _         <- relay.runOnce.background.use { _ =>
              waitFor(recorded, 50)
            }
       positions <- recorded.get.map(_.map(_._2.metadata.globalPosition))
     yield expect(positions == (1L to 50L).toVector)
+  }
+
+  test("run retries after a transient failure and eventually publishes and acks all envelopes") {
+    val pending = List(envelope(1L), envelope(2L), envelope(3L))
+    for
+      recorded  <- Ref.of[IO, Vector[(String, EventEnvelope[TestEvent])]](Vector.empty)
+      published <- Ref.of[IO, Vector[Long]](Vector.empty)
+      callCount <- Ref.of[IO, Int](0)
+      publisher  = new TransientPublisher(recorded, failTimes = 1, callCount)
+      outbox     = new FakeOutbox(pending, published)
+      relay      = KafkaRelay[IO, TestEvent](outbox, publisher, topic = "events", batchSize = 10)
+      _         <- relay.run(initialDelay = 1.millis).background.use { _ =>
+             waitFor(published, 3)
+           }
+      acks <- published.get
+    yield expect(acks.toSet == Set(1L, 2L, 3L))
+  }
+
+  test("run retries multiple times before succeeding") {
+    val pending = List(envelope(1L), envelope(2L))
+    for
+      recorded  <- Ref.of[IO, Vector[(String, EventEnvelope[TestEvent])]](Vector.empty)
+      published <- Ref.of[IO, Vector[Long]](Vector.empty)
+      callCount <- Ref.of[IO, Int](0)
+      publisher  = new TransientPublisher(recorded, failTimes = 3, callCount)
+      outbox     = new FakeOutbox(pending, published)
+      relay      = KafkaRelay[IO, TestEvent](outbox, publisher, topic = "events", batchSize = 10)
+      _         <- relay.run(initialDelay = 1.millis).background.use { _ =>
+             waitFor(published, 2)
+           }
+      acks <- published.get
+    yield expect(acks.toSet == Set(1L, 2L))
   }

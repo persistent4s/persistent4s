@@ -16,7 +16,9 @@
 
 package persistent4s.kafka
 
-import cats.effect.Async
+import scala.concurrent.duration.*
+
+import cats.effect.{Async, Temporal}
 import cats.syntax.all.*
 import persistent4s.{Event, Outbox}
 
@@ -59,8 +61,10 @@ final class KafkaRelay[F[_]: Async, A <: Event] private (
   batchSize: Int,
 ):
 
-  /** Run the relay. Returns when the input stream completes or fails. */
-  def run: F[Unit] =
+  /** Run the relay once. Returns when the input stream completes or fails. Fails fast on any publish error without
+    * acking the failing envelope, so the next run reprocesses it.
+    */
+  def runOnce: F[Unit] =
     outbox
       .stream(batchSize)
       .evalMap { envelope =>
@@ -69,6 +73,19 @@ final class KafkaRelay[F[_]: Async, A <: Event] private (
       }
       .compile
       .drain
+
+  /** Run the relay with exponential-backoff supervision. Restarts [[runOnce]] after a delay whenever it fails, doubling
+    * the delay up to `maxDelay`. Never terminates unless the outbox stream itself completes.
+    *
+    * TODO: log the error and current delay before each retry once a logging library is integrated.
+    */
+  def run(
+    initialDelay: FiniteDuration = 1.second,
+    maxDelay: FiniteDuration = 30.seconds,
+  ): F[Unit] =
+    runOnce.handleErrorWith { _ =>
+      Temporal[F].sleep(initialDelay) *> run((initialDelay * 2).min(maxDelay), maxDelay)
+    }
 
 object KafkaRelay:
 
