@@ -20,12 +20,12 @@ import pureconfig.ConfigReader
 
 /** SSL/TLS mode for the PostgreSQL connection.
   *
-  *   - [[Disabled]] — no encryption. The default; suitable for local development.
-  *   - [[System]] — encrypted, validate the server certificate chain against the JVM's default trust store. Honors
-  *     `-Djavax.net.ssl.trustStore` and friends, so production setups that ship a custom trust store via JVM system
-  *     properties work without further configuration. This is the production default.
-  *   - [[TrustAll]] — encrypted, but does '''not''' validate the server certificate (accepts any cert, including
-  *     self-signed). Vulnerable to MITM. Only use for debugging or against self-signed dev servers; never in
+  *   - [[PostgresSslMode.Disabled]] — no encryption. The default; suitable for local development.
+  *   - [[PostgresSslMode.System]] — encrypted, validate the server certificate chain against the JVM's default trust
+  *     store. Honors `-Djavax.net.ssl.trustStore` and friends, so production setups that ship a custom trust store via
+  *     JVM system properties work without further configuration. This is the production default.
+  *   - [[PostgresSslMode.TrustAll]] — encrypted, but does '''not''' validate the server certificate (accepts any cert,
+  *     including self-signed). Vulnerable to MITM. Only use for debugging or against self-signed dev servers; never in
   *     production.
   */
 enum PostgresSslMode derives ConfigReader:

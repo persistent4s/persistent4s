@@ -45,9 +45,9 @@ trait Outbox[F[_], A <: Event]:
     * two appending transactions run concurrently and the higher-positioned one commits first, the higher-positioned
     * entry is emitted before the lower one (which only becomes visible after its transaction commits).
     *
-    * This matches the per-tag ordering guarantee exposed by [[persistent4s.kafka.EventSubscriber]]: events sharing a
-    * tag scope are serialized at append time by the event store, so within any tag scope this stream is in
-    * `globalPosition` order. Across disjoint tag scopes the order is the relay's-eye view of commit order.
+    * This matches the per-tag ordering guarantee exposed by `EventSubscriber`: events sharing a tag scope are
+    * serialized at append time by the event store, so within any tag scope this stream is in `globalPosition` order.
+    * Across disjoint tag scopes the order is the relay's-eye view of commit order.
     *
     * @param batchSize
     *   maximum number of entries to fetch per round-trip
