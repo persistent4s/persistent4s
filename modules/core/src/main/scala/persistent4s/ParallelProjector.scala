@@ -24,6 +24,9 @@ import cats.effect.Ref
 import cats.syntax.all.*
 import fs2.Stream
 import persistent4s.EventStoreNotification.*
+import org.typelevel.log4cats.Logger
+import java.io.StringWriter
+import java.io.PrintWriter
 
 /** A [[Projector]] implementation that processes events for distinct keys in parallel within each batch.
   *
@@ -44,7 +47,7 @@ import persistent4s.EventStoreNotification.*
   * @param maxBatchPerPass
   *   maximum number of batches read in a single wake-up pass (default: 10)
   */
-final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
+final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
   checkpoint: ProjectionCheckpoint[F],
   batchSize: Int = 100,
@@ -83,7 +86,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         next     = current.copy(
                  globalPosition = progress.lastProcessedPosition.getOrElse(current.globalPosition),
                  running = if (error.isEmpty) current.running else false,
-                 error = error.map(formatError),
+                 error = error.map(e => formatError(e)),
                )
         _ <- projection.persistStates(statesToPersist)
         _ <- checkpoint.save(next)
@@ -235,27 +238,54 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         } yield ()
 
       notif match {
-        case PauseProjection(_)              => saveState(_.copy(running = false))
-        case ResumeProjection(_)             => saveState(_.copy(running = true, error = None)) *> markPending(wakeupState)
+        case PauseProjection(_) =>
+          Logger[F].info(s"Pausing projection ${projection.name}") *> saveState(_.copy(running = false))
+        case ResumeProjection(_) =>
+          Logger[F].info(s"Resuming projection ${projection.name}") *> saveState(
+            _.copy(running = true, error = None),
+          ) *> markPending(wakeupState)
         case UpdateCheckpointIndex(_, index) =>
-          saveState(_.copy(globalPosition = index, error = None)) *> markPending(wakeupState)
+          Logger[F].info(s"Updating checkpoint for projection ${projection.name} to index $index") *> saveState(
+            _.copy(globalPosition = index, error = None),
+          ) *> markPending(wakeupState)
         case _ => Applicative[F].unit
       }
 
-    def formatError(e: Throwable): String =
-      s"${e.getClass.getSimpleName}: ${e.getMessage}\n${e.getStackTrace.mkString("\n")}"
+    def formatError(e: Throwable, maxLength: Int = 32_000): String = {
+      val sw = new StringWriter()
+      val pw = new PrintWriter(sw)
+      e.printStackTrace(pw)
+      pw.flush()
+
+      val s = sw.toString
+      if (s.length <= maxLength) s
+      else s.take(maxLength) + s"\n... truncated, original length=${s.length}"
+    }
 
     def pauseWithError(projectionState: Ref[F, ProjectionCheckpointState])(error: Throwable): F[Unit] =
       for {
         current <- projectionState.get
-        next     = current.copy(running = false, error = Some(formatError(error)))
-        _       <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
-        _       <- projectionState.set(next)
+        _       <-
+          Logger[F].error(error)(
+            s"Error processing projection ${projection.name} on index ${current.globalPosition}",
+          )
+        next = current.copy(running = false, error = Some(formatError(error)))
+        _   <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
+        _   <- projectionState.set(next)
       } yield ()
 
     Stream.eval {
       for {
-        maybeState      <- checkpoint.load(projection.name)
+        maybeState <- checkpoint.load(projection.name)
+        _          <- maybeState match
+               case Some(state) if !state.running && state.error.isDefined =>
+                 Logger[F].warn(s"Projection ${projection.name} is currently paused with error")
+               case Some(state) if !state.running =>
+                 Logger[F].warn(s"Projection ${projection.name} is currently paused without error")
+               case Some(state) =>
+                 Logger[F].info(s"Resuming projection ${projection.name} from position ${state.globalPosition}")
+               case None =>
+                 Logger[F].info(s"No checkpoint found for projection ${projection.name}, starting from the beginning")
         initialState     = maybeState.getOrElse(ProjectionCheckpointState(projection.name, -1L, true, None))
         projectionState <- Ref.of[F, ProjectionCheckpointState](initialState)
         initialSignal   <- Deferred[F, Unit]
