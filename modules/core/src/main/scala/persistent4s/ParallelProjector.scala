@@ -149,13 +149,16 @@ final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
                      dirtyKeys = Set.empty,
                      lastProcessedPosition = None,
                    )
-                   batch
-                     .foldLeftM(progress0) { (progress, event) =>
-                       processEvent(progress, event).handleErrorWith { error =>
-                         persistProgress(progress, projectionState, Some(error)) *> Async[F].raiseError(error)
+                   Logger[F].warn(
+                     s"Parallel processing failed for batch starting at position ${batch.head.metadata.globalPosition}, falling back to sequential processing",
+                   ) *>
+                     batch
+                       .foldLeftM(progress0) { (progress, event) =>
+                         processEvent(progress, event).handleErrorWith { error =>
+                           persistProgress(progress, projectionState, Some(error)) *> Async[F].raiseError(error)
+                         }
                        }
-                     }
-                     .flatMap(progress => persistProgress(progress, projectionState))
+                       .flatMap(progress => persistProgress(progress, projectionState))
                }
         } yield ()
       }
