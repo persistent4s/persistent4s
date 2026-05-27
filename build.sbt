@@ -69,6 +69,7 @@ lazy val postgres = (project in file("modules/postgres"))
       "org.tpolecat"          %% "skunk-core"      % SkunkV,
       "org.tpolecat"          %% "skunk-circe"     % SkunkV,
       "org.typelevel"         %% "otel4s-core"     % Otel4sV,
+      "org.typelevel"         %% "log4cats-core"   % Log4CatsV,
       "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
       "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
       "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
