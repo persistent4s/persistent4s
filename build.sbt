@@ -53,11 +53,11 @@ lazy val core = (project in file("modules/core"))
   .settings(
     name                 := "persistent4s-core",
     libraryDependencies ++= List(
-      "org.typelevel" %% "cats-effect"    % CatsEffectV,
-      "co.fs2"        %% "fs2-core"       % Fs2V,
-      "org.typelevel" %% "log4cats-slf4j" % Log4CatsV,
-      "org.typelevel" %% "otel4s-core"    % Otel4sV,
-      "org.typelevel" %% "weaver-cats"    % WeaverV % Test,
+      "org.typelevel" %% "cats-effect"   % CatsEffectV,
+      "co.fs2"        %% "fs2-core"      % Fs2V,
+      "org.typelevel" %% "log4cats-core" % Log4CatsV,
+      "org.typelevel" %% "otel4s-core"   % Otel4sV,
+      "org.typelevel" %% "weaver-cats"   % WeaverV % Test,
     ),
   )
 
@@ -73,6 +73,7 @@ lazy val postgres = (project in file("modules/postgres"))
       "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
       "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
       "org.testcontainers"     % "postgresql"      % TestcontainersV % Test,
+      "org.typelevel"         %% "log4cats-noop"   % Log4CatsV       % Test,
     ),
   )
 
@@ -146,6 +147,7 @@ lazy val monitoring = (project in file("modules/monitoring"))
       "org.testcontainers" % "postgresql"          % TestcontainersV % Test,
       "org.http4s"        %% "http4s-ember-client" % Http4sV         % Test,
       "org.typelevel"     %% "otel4s-core"         % Otel4sV,
+      "org.typelevel"     %% "log4cats-noop"       % Log4CatsV       % Test,
     ),
   )
 
