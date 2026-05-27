@@ -25,16 +25,20 @@ import io.circe.syntax.*
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 
-given Tracer[IO] = Tracer.Implicits.noop
-
-given Meter[IO] = Meter.Implicits.noop
-
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
 import persistent4s.{EventFilter, EventStoreNotification, IndexConflictException, Tag}
 import weaver.IOSuite
 import persistent4s.EventTypeName
 import persistent4s.Event
+import org.typelevel.log4cats.Logger
+import persistent4s.{postgres => slf4j}
+
+given Tracer[IO] = Tracer.Implicits.noop
+
+given Meter[IO] = Meter.Implicits.noop
+
+given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
 object PostgresEventStoreSuite extends IOSuite:
 

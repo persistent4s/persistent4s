@@ -23,7 +23,6 @@ import fs2.io.net.Network
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.log4cats.Logger
-import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.ConfigSource
 import skunk.*
 import skunk.implicits.*
@@ -96,20 +95,19 @@ object PostgresModule:
     *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint, or fails with a clear error
     *   message
     */
-  def make[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
+  def make[F[_]: Async: Network: Logger: Tracer: Meter: Console, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
   ): Resource[F, Components[F, A]] =
     for
-      logger <- Resource.eval(Slf4jLogger.create[F])
       config <- Resource.eval(loadConfig[F](configPath))
       _      <- Resource.eval(
-             logger.info(
+             Logger[F].info(
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
       pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger))
+      _    <- Resource.eval(initializeDatabase[F](pool))
     yield Components(
       PostgresEventStore[F, A](pool, codec),
       PostgresProjectionCheckpoint.make[F](pool),
@@ -124,19 +122,18 @@ object PostgresModule:
     * @return
     *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint
     */
-  def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
+  def makeWithConfig[F[_]: Async: Network: Logger: Tracer: Meter: Console, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
   ): Resource[F, Components[F, A]] =
     for
-      logger <- Resource.eval(Slf4jLogger.create[F])
-      _      <- Resource.eval(
-             logger.info(
+      _ <- Resource.eval(
+             Logger[F].info(
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
       pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger))
+      _    <- Resource.eval(initializeDatabase[F](pool))
     yield Components(
       PostgresEventStore[F, A](pool, codec),
       PostgresProjectionCheckpoint.make[F](pool),
@@ -165,16 +162,15 @@ object PostgresModule:
       .pooled(config.maxConnections)
       .adaptError { case e => PostgresModuleError.ConnectionFailed(e) }
 
-  private def initializeDatabase[F[_]: Async](
+  private def initializeDatabase[F[_]: Async: Logger](
     pool: Resource[F, Session[F]],
-    logger: Logger[F],
   ): F[Unit] =
     pool.use { session =>
       for
         eventsTableExists <- checkTableExists(session, "events")
         _                 <-
-          if !eventsTableExists then logger.info("Event store schema not found, creating schema...")
-          else logger.info("Event store schema already exists, ensuring required objects are present")
+          if !eventsTableExists then Logger[F].info("Event store schema not found, creating schema...")
+          else Logger[F].info("Event store schema already exists, ensuring required objects are present")
         _ <- createSchema(session)
       yield ()
     }

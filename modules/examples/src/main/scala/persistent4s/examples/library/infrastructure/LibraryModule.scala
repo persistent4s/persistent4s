@@ -21,10 +21,6 @@ import fs2.io.net.Network
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 
-given Tracer[IO] = Tracer.Implicits.noop
-
-given Meter[IO] = Meter.Implicits.noop
-
 import pureconfig.ConfigSource
 import skunk.*
 
@@ -36,6 +32,14 @@ import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, Borr
 import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
 import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule}
 import persistent4s.monitoring.MonitoringServer
+import org.typelevel.log4cats.slf4j.Slf4jLogger
+import org.typelevel.log4cats.Logger
+
+given Tracer[IO] = Tracer.Implicits.noop
+
+given Meter[IO] = Meter.Implicits.noop
+
+given logger: Logger[IO] = Slf4jLogger.getLogger[IO]
 
 final class LibraryModule private (
   val store: PostgresEventStore[IO, LibraryEvent],
@@ -52,6 +56,7 @@ object LibraryModule:
   val eventCodec: EventCodec[LibraryEvent] = CirceEventCodec.derived[LibraryEvent]
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
+
     for
       resources  <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
       store       = resources.eventStore
