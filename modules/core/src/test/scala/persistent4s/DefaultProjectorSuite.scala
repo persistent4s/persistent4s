@@ -24,8 +24,11 @@ import persistent4s.EventStoreNotification.*
 import weaver.SimpleIOSuite
 
 import scala.concurrent.duration.*
+import org.typelevel.log4cats.Logger
 
 object DefaultProjectorSuite extends SimpleIOSuite:
+
+  given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   // ---------------------------------------------------------------------------
   // Test domain

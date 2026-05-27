@@ -38,9 +38,9 @@ given Tracer[IO] = Tracer.Implicits.noop
 
 given Meter[IO] = Meter.Implicits.noop
 
-given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
-
 object PostgresEventStoreSuite extends IOSuite:
+
+  given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   override def maxParallelism: Int = 1
 

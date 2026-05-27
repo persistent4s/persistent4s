@@ -19,12 +19,15 @@ package persistent4s.postgres
 import java.util.UUID
 
 import cats.effect.{IO, Resource}
+import org.typelevel.log4cats.Logger
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.ProjectionCheckpointState
 import skunk.Session
 import weaver.IOSuite
 
 object PostgresProjectionCheckpointSuite extends IOSuite:
+
+  given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   override def maxParallelism: Int = 1
 
