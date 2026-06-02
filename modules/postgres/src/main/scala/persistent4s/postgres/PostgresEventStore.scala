@@ -28,6 +28,7 @@ import skunk.data.Identifier
 import skunk.implicits.*
 
 import persistent4s.*
+import java.time.OffsetDateTime
 
 /** A PostgreSQL-backed implementation of the EventStore trait. This implementation uses Skunk for database access and
   * implements optimistic concurrency control for event appending.
@@ -301,7 +302,7 @@ object PostgresEventStore:
   }(tags => Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*))
 
   private val eventDecoder: Decoder[
-    Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple,
+    Long *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple,
   ] =
     int8 *: text *: tagsCodec *: jsonb *: timestamptz
 
@@ -363,7 +364,7 @@ object PostgresEventStore:
     """.query(int8)
 
   private type EventRow =
-    Long *: String *: Set[Tag] *: Json *: java.time.OffsetDateTime *: EmptyTuple
+    Long *: String *: Set[Tag] *: Json *: OffsetDateTime *: EmptyTuple
 
   private val readAllQuery: Query[Long, EventRow] =
     sql"""
