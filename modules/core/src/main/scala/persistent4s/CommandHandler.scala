@@ -53,6 +53,14 @@ trait CommandHandler[C, S, E <: Event]:
     */
   def decide(state: S, command: C): List[(Set[Tag], E)]
 
+  /** A unique identifier for this handler, mainly used for snapshotting. Snapshot keys are derived from this ID and the
+    * command's tags.
+    */
+  def handlerId: String = getClass.getName()
+
+  /** After how many events should a snapshot be taken for this handler? Override to customize. Default is 100. */
+  def snapshotThreshold: Int = 100
+
   /** Maximum number of retry attempts on optimistic concurrency conflicts. Override to customize. Default is 3. */
   def maxRetries: Int = 3
 
@@ -62,11 +70,15 @@ trait CommandHandler[C, S, E <: Event]:
     */
   def run[F[_]: Concurrent](command: C)(using
     eventStore: EventStore[F, E],
+    snapshotStore: SnapshotStore[F],
+    codec: SnapshotCodec[S],
   ): F[Unit] =
     runWithRetry(command, maxRetries)
 
   private def runWithRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
     eventStore: EventStore[F, E],
+    snapshotStore: SnapshotStore[F],
+    codec: SnapshotCodec[S],
   ): F[Unit] =
     attempt(command).handleErrorWith {
       case _: IndexConflictException if retriesLeft > 0 =>
@@ -77,17 +89,30 @@ trait CommandHandler[C, S, E <: Event]:
 
   private def attempt[F[_]: Concurrent](
     command: C,
-  )(using eventStore: EventStore[F, E]): F[Unit] =
+  )(using
+    eventStore: EventStore[F, E],
+    snapshotStore: SnapshotStore[F],
+    codec: SnapshotCodec[S],
+  ): F[Unit] =
     for
-      tags      <- Concurrent[F].pure(tags(command))
-      filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
-      envelopes <- eventStore.readFrom(0L, filter).compile.toList
-      state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
-      index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-      _         <- validate(state, command) match
+      tags          <- Concurrent[F].pure(tags(command))
+      filter         = EventFilter(eventTypes.getOrElse(Set.empty), tags)
+      maybeSnapshot <- snapshotStore.load[S](handlerId, tags).recover { case _: SnapshotDecodeException => None }
+      fromPosition   = maybeSnapshot.map(_.globalPosition).getOrElse(0L)
+      envelopes     <- eventStore.readFrom(fromPosition, filter).compile.toList
+      baseState      = maybeSnapshot.map(_.state).getOrElse(initial)
+      state          = envelopes.foldLeft(baseState)((s, env) => evolve(command, s, env.payload))
+      index          = envelopes.lastOption
+                .map(_.metadata.globalPosition)
+                .orElse(maybeSnapshot.map(_.globalPosition))
+                .getOrElse(0L)
+      _ <- validate(state, command) match
              case Left(e)  => Concurrent[F].raiseError(e)
              case Right(_) => Concurrent[F].unit
       decided = decide(state, command)
       events  = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
       _      <- eventStore.append(filter, index, events)
+      _      <-
+        if envelopes.size >= snapshotThreshold then snapshotStore.save[S](handlerId, tags, Snapshot(state, index))
+        else Concurrent[F].unit
     yield ()
