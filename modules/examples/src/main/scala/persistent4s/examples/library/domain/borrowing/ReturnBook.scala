@@ -35,8 +35,6 @@ final case class ReturnBookState(
 
 object ReturnBookHandler extends CommandHandler[ReturnBook, ReturnBookState, LibraryEvent]:
 
-  override def snapshotThreshold: Int = 5
-
   override def eventTypes: Option[Set[EventTypeName]] =
     Some(Set(EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]))
 

@@ -35,11 +35,10 @@ final case class BorrowBookState(
   totalCopies: Int,
   borrowedCopies: Int,
   memberHasBook: Boolean,
-) derives Encoder, Decoder
+) derives Encoder,
+      Decoder
 
 object BorrowBookHandler extends CommandHandler[BorrowBook, BorrowBookState, LibraryEvent]:
-
-  override def snapshotThreshold: Int = 3
 
   override def eventTypes: Option[Set[EventTypeName]] =
     Some(
