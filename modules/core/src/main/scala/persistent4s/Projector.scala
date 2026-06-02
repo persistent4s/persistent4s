@@ -19,8 +19,8 @@ package persistent4s
 import fs2.Stream
 
 /** Drives a [[Projection]] by reading events from an [[EventStore]], tracking progress via a [[ProjectionCheckpoint]],
-  * and reacting to [[EventNotification]]s. Delivery semantics (batching, retry, checkpoint frequency) are determined
-  * by the implementation.
+  * and reacting to [[EventNotification]]s. Delivery semantics (batching, retry, checkpoint frequency) are determined by
+  * the implementation.
   */
 trait Projector[F[_], A <: Event]:
 
