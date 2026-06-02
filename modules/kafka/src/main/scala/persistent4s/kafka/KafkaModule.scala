@@ -29,6 +29,8 @@ import fs2.kafka.*
 import io.circe.{Json, parser}
 
 import persistent4s.{Event, EventCodec, EventEnvelope, EventMetadata, EventTypeName, Outbox, Tag}
+import persistent4s.EventSubscriber
+import persistent4s.EventPublisher
 
 /** Entry point for building the Kafka-side components of the library.
   *
@@ -49,8 +51,16 @@ object KafkaModule:
 
   val MetaVersionHeaderName = "persistent4s.metaVersion"
 
-  /** Build a Kafka [[EventPublisher]] backed by an fs2-kafka producer. The underlying producer is released when the
-    * resource is finalized.
+  /** Build a Kafka [[EventPublisher]] backed by an fs2-kafka producer.
+    *
+    * Event metadata (id, globalPosition, eventType, tags, timestamp) is serialised as record headers; the payload is
+    * encoded via the supplied [[EventCodec]]. The record key is determined by `config.recordKey`, which controls
+    * partition assignment and therefore per-key ordering.
+    *
+    * The underlying producer is configured with `enable.idempotence=true`, so retries on transient broker errors do
+    * not produce duplicate or reordered records. The producer is released when the resource is finalized.
+    *
+    * Batch publishes pipeline all records in a single request but preserve the order they appear in the input list.
     */
   def publisher[F[_]: Async: Parallel, A <: Event](
     config: KafkaProducerConfig[A],
@@ -99,7 +109,29 @@ object KafkaModule:
       }
     }
 
-  /** Build a Kafka [[EventSubscriber]] backed by an fs2-kafka consumer. */
+  /** Build a Kafka [[EventSubscriber]] backed by an fs2-kafka consumer.
+    *
+    * Auto-commit is disabled; each emitted envelope is paired with its offset's `commit` action so the caller decides
+    * when to acknowledge. Invoking the action only after successful processing gives at-least-once delivery; combining
+    * it with an idempotent downstream write yields effectively-once semantics.
+    *
+    * ==Ordering guarantee==
+    *
+    * Within any single tag scope, events are delivered in the order they were appended (ascending `globalPosition`).
+    * This holds because the event store serializes appends that share at least one tag.
+    *
+    * Across disjoint tag scopes, ordering matches the relay's publication order (commit order of the appending
+    * transactions), which is **not** necessarily ascending `globalPosition`. Two independently-tagged events with
+    * positions 5 and 6 may arrive as `(6, 5)` if the writer of 6 committed first. Under DCB, causally independent
+    * events have no defined relative order, so this is acceptable.
+    *
+    * Each call to `subscribe` creates an independent consumer using the `groupId` from [[KafkaConsumerConfig]],
+    * tracking its own offsets per topic.
+    *
+    * @param fromBeginning
+    *   if true and no committed offset exists for the consumer group, seek to the earliest offset; otherwise rely on
+    *   the broker's `auto.offset.reset` policy.
+    */
   def subscriber[F[_]: Async, A <: Event](
     config: KafkaConsumerConfig,
     codec: EventCodec[A],
@@ -154,7 +186,7 @@ object KafkaModule:
       override def subscribe(
         topic: String,
         fromBeginning: Boolean,
-      ): Stream[F, (EventEnvelope[A], CommittableOffset[F])] =
+      ): Stream[F, (EventEnvelope[A], F[Unit])] =
         val settings =
           if fromBeginning then baseSettings.withAutoOffsetReset(AutoOffsetReset.Earliest)
           else baseSettings.withAutoOffsetReset(AutoOffsetReset.Latest)
@@ -164,7 +196,7 @@ object KafkaModule:
           .subscribeTo(topic)
           .records
           .evalMap { committable =>
-            envelopeFromRecord(committable.record).map(envelope => (envelope, committable.offset))
+            envelopeFromRecord(committable.record).map(envelope => (envelope, committable.offset.commit))
           })
 
   /** Build a [[KafkaRelay]] that drains the given outbox into the supplied Kafka `topic`.
