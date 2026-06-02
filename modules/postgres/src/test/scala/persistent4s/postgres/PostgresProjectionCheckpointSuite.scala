@@ -42,7 +42,7 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
         .pooled(cfg.maxConnections)
         .flatMap { pool =>
           for _ <- Resource.eval(pool.use(_.execute(PostgresProjectionCheckpoint.createTableCommand).void))
-          yield PostgresProjectionCheckpoint.make[IO](pool)
+          yield PostgresProjectionCheckpoint[IO](pool)
         }
     }
 
