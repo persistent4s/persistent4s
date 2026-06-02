@@ -37,10 +37,12 @@ private trait LowPrioritySnapshotCodec:
     * paired with the noop SnapshotStore — a real store with this codec will fail at runtime.
     */
   given noop[S]: SnapshotCodec[S] with
+
     def encode(state: S): String =
       throw new UnsupportedOperationException(
         "noop SnapshotCodec — provide a real SnapshotCodec[S] to enable snapshots",
       )
+
     def decode(payload: String): Either[Throwable, S] =
       Left(
         new UnsupportedOperationException(

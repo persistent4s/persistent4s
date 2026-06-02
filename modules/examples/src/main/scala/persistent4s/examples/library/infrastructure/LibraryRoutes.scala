@@ -31,7 +31,7 @@ object LibraryRoutes:
 
   def make(module: LibraryModule): Resource[IO, HttpRoutes[IO]] =
     given EventStore[IO, LibraryEvent] = module.store
-    given SnapshotStore[IO]            = module.snapshotStore
+    given SnapshotStore[IO] = module.snapshotStore
 
     for
       bookRoutes <- SimpleRestJsonBuilder

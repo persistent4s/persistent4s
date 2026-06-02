@@ -40,8 +40,10 @@ object SnapshotStore:
     * is provided, allowing CommandHandler.run to compile without a snapshot backend.
     */
   given noop[F[_]: Applicative]: SnapshotStore[F] with
+
     def load[S: SnapshotCodec](handlerName: String, tags: Set[Tag]): F[Option[Snapshot[S]]] =
       Applicative[F].pure(None)
+
     def save[S: SnapshotCodec](handlerName: String, tags: Set[Tag], snapshot: Snapshot[S]): F[Unit] =
       Applicative[F].unit
 

@@ -26,8 +26,8 @@ object CirceSnapshotCodecSuite extends SimpleIOSuite:
   final case class TestState(count: Int, label: String) derives Encoder, Decoder
 
   pureTest("encode then decode round-trips correctly") {
-    val state   = TestState(42, "hello")
-    val codec   = summon[SnapshotCodec[TestState]]
+    val state = TestState(42, "hello")
+    val codec = summon[SnapshotCodec[TestState]]
     val encoded = codec.encode(state)
     expect(codec.decode(encoded) == Right(state))
   }

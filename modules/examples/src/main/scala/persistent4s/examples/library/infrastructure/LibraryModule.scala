@@ -54,13 +54,13 @@ object LibraryModule:
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
     for
-      resources     <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
-      store          = resources.eventStore
-      checkpoint     = resources.checkpoint
-      snapshotStore  = resources.snapshotStore
-      monitoring <- MonitoringServer.make(checkpoint, store.notify)
-      config     <- Resource.eval(loadConfig(configPath))
-      viewPool   <- Session
+      resources    <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      store         = resources.eventStore
+      checkpoint    = resources.checkpoint
+      snapshotStore = resources.snapshotStore
+      monitoring   <- MonitoringServer.make(checkpoint, store.notify)
+      config       <- Resource.eval(loadConfig(configPath))
+      viewPool     <- Session
                     .Builder[IO]
                     .withHost(config.host)
                     .withPort(config.port)
@@ -77,7 +77,8 @@ object LibraryModule:
       _             <- projector.run(bookProj).compile.drain.background
       _             <- projector.run(memberProj).compile.drain.background
       _             <- projector.run(borrowingProj).compile.drain.background
-    yield new LibraryModule(store, snapshotStore, bookProj, memberProj, borrowingProj, bookRepo, memberRepo, borrowingRepo)
+    yield new LibraryModule(store, snapshotStore, bookProj, memberProj, borrowingProj, bookRepo, memberRepo,
+      borrowingRepo)
 
   private def loadConfig(configPath: String): IO[PostgresConfig] =
     IO.delay(ConfigSource.default.at(configPath).load[PostgresConfig]).flatMap {

@@ -85,10 +85,10 @@ object PostgresSnapshotStoreSuite extends IOSuite:
 
   test("save and load round-trip") { store =>
     for
-      tags     <- freshTags
-      snapshot  = Snapshot(TestState(42), 10L)
-      _        <- store.save[TestState]("handler", tags, snapshot)
-      result   <- store.load[TestState]("handler", tags)
+      tags    <- freshTags
+      snapshot = Snapshot(TestState(42), 10L)
+      _       <- store.save[TestState]("handler", tags, snapshot)
+      result  <- store.load[TestState]("handler", tags)
     yield expect(result == Some(snapshot))
   }
 
@@ -105,33 +105,33 @@ object PostgresSnapshotStoreSuite extends IOSuite:
 
   test("snapshots for distinct handler names are stored independently") { store =>
     for
-      tags  <- freshTags
-      snap1  = Snapshot(TestState(10), 1L)
-      snap2  = Snapshot(TestState(20), 2L)
-      _     <- store.save[TestState]("handler-a", tags, snap1)
-      _     <- store.save[TestState]("handler-b", tags, snap2)
-      r1    <- store.load[TestState]("handler-a", tags)
-      r2    <- store.load[TestState]("handler-b", tags)
+      tags <- freshTags
+      snap1 = Snapshot(TestState(10), 1L)
+      snap2 = Snapshot(TestState(20), 2L)
+      _    <- store.save[TestState]("handler-a", tags, snap1)
+      _    <- store.save[TestState]("handler-b", tags, snap2)
+      r1   <- store.load[TestState]("handler-a", tags)
+      r2   <- store.load[TestState]("handler-b", tags)
     yield expect(r1 == Some(snap1)) && expect(r2 == Some(snap2))
   }
 
   test("snapshots for distinct tag sets are stored independently") { store =>
     for
-      tags1  <- freshTags
-      tags2  <- freshTags
-      snap1   = Snapshot(TestState(10), 1L)
-      snap2   = Snapshot(TestState(20), 2L)
-      _      <- store.save[TestState]("handler", tags1, snap1)
-      _      <- store.save[TestState]("handler", tags2, snap2)
-      r1     <- store.load[TestState]("handler", tags1)
-      r2     <- store.load[TestState]("handler", tags2)
+      tags1 <- freshTags
+      tags2 <- freshTags
+      snap1  = Snapshot(TestState(10), 1L)
+      snap2  = Snapshot(TestState(20), 2L)
+      _     <- store.save[TestState]("handler", tags1, snap1)
+      _     <- store.save[TestState]("handler", tags2, snap2)
+      r1    <- store.load[TestState]("handler", tags1)
+      r2    <- store.load[TestState]("handler", tags2)
     yield expect(r1 == Some(snap1)) && expect(r2 == Some(snap2))
   }
 
   test("load raises SnapshotDecodeException on a corrupted payload") { store =>
     given badCodec: SnapshotCodec[TestState] with
-      def encode(s: TestState): String                       = "corrupted"
-      def decode(p: String): Either[Throwable, TestState]   = Left(RuntimeException("bad payload"))
+      def encode(s: TestState): String = "corrupted"
+      def decode(p: String): Either[Throwable, TestState] = Left(RuntimeException("bad payload"))
     for
       tags   <- freshTags
       _      <- store.save[TestState]("handler", tags, Snapshot(TestState(1), 1L))

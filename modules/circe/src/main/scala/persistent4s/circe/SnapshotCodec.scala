@@ -28,6 +28,7 @@ import persistent4s.SnapshotCodec
 object CirceSnapshotCodec:
 
   given [S: Encoder: Decoder]: SnapshotCodec[S] with
+
     def encode(state: S): String =
       summon[Encoder[S]].apply(state).noSpaces
 
