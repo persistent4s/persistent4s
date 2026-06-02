@@ -19,14 +19,7 @@ package persistent4s
 import fs2.Stream
 import java.util.UUID
 
-/** An EventStore is a component that allows you to append and read events in an event-sourced system. Appending events
-  * to the store is done with optimistic concurrency control.
-  *
-  * @tparam F
-  *   the effect type, such as `cats.effect.IO`
-  * @tparam A
-  *   the event type, which must extend the Event trait
-  */
+/** Appends and reads events in an event-sourced system. Appending is done with optimistic concurrency control. */
 trait EventStore[F[_], A <: Event]:
 
   /** Append events to the event store using optimistic concurrency control.
@@ -60,11 +53,10 @@ trait EventStore[F[_], A <: Event]:
 
   /** Append events to the event store WITHOUT optimistic concurrency control.
     *
-    * Unlike [[append]], this method performs no filter-scoped conflict check and acquires no advisory locks. Use it
-    * when the caller does not need to protect a local invariant — typically when re-ingesting events that were already
-    * ordered by some external authority. The common case is a subscriber importing events from another service's Kafka
-    * topic into the local store: the source service has already serialized those events under its own concurrency
-    * model, so re-checking on the receiving side is meaningless.
+    * Unlike [[append]], this method performs no filter-scoped conflict check. Use it when the caller does not need to
+    * protect a local invariant — typically when re-ingesting events that were already ordered by an external authority.
+    * The source has already serialized those events under its own concurrency model, so re-checking on the receiving
+    * side is meaningless.
     *
     * The events are still assigned fresh `globalPosition` values in commit order and emit the same notification on
     * commit, so projections wake up normally.
@@ -75,31 +67,24 @@ trait EventStore[F[_], A <: Event]:
     * ==Idempotency==
     *
     * At-least-once delivery from a broker means the same event may arrive twice. To make this method idempotent in the
-    * face of redelivery, pass the source event's UUID via the tuple's first element. The unique constraint on
-    * `event_id` then rejects duplicates at the storage layer, and the caller can catch that error and treat it as
-    * "already imported" (typically: commit the broker offset and continue). Passing `None` skips this safeguard and is
-    * appropriate only if duplicates are impossible by construction.
+    * face of redelivery, pass the source event's UUID via the tuple's first element. Implementations may use it to
+    * reject duplicates; callers can catch that error and treat it as "already imported". Passing `None` skips this
+    * safeguard and is appropriate only if duplicates are impossible by construction.
     *
     * @param events
     *   one or more lists of events to append, each event paired with its optional id, tags, type name, an `isExternal`
     *   flag and the payload itself. See [[append]] for the per-element semantics.
-    * @return
-    *   a `F[Unit]` that completes when the events have been written. May fail at the storage layer if a duplicate
-    *   `event_id` is detected — see the idempotency note above.
     */
   def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): F[Unit]
 
-  /** Read events from the event store starting from a specific position, filtering by event types and tags. The
-    * returned Stream will emit EventEnvelope[A] instances that match the specified event types and tags. The Stream
-    * will complete when there are no more matching events to read.
+  /** Read a snapshot of events from the store starting at `fromPosition` (exclusive). The stream completes once all
+    * currently matching events have been emitted — it is a one-shot read, not a live subscription.
     *
     * @param fromPosition
-    *   the position in the event store to start reading from (exclusive)
+    *   position to start from (exclusive); pass 0 to read from the beginning
     * @param eventFilter
-    *   the filter to apply to the events
+    *   filter to apply; see [[EventFilter]] for matching semantics
     * @param maxEvents
-    *   the maximum number of events to read, or None to read all available events
-    * @return
-    *   a Stream of EventEnvelope[A] containing the matching events
+    *   cap on the number of events returned; `None` means no cap
     */
   def readFrom(fromPosition: Long, eventFilter: EventFilter, maxEvents: Option[Int] = None): Stream[F, EventEnvelope[A]]

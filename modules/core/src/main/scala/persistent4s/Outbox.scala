@@ -24,7 +24,7 @@ import fs2.Stream
   * the event, so an event either becomes visible together with its outbox entry or not at all. A relay process then
   * streams unpublished entries via [[stream]], publishes them, and acknowledges with [[markPublished]].
   *
-  * The trait deliberately knows nothing about Kafka. Any broker-specific relay can consume from it.
+  * The trait deliberately knows nothing abouut the broker. Any broker-specific relay can consume from it.
   *
   * @tparam F
   *   the effect type
@@ -45,18 +45,16 @@ trait Outbox[F[_], A <: Event]:
     * two appending transactions run concurrently and the higher-positioned one commits first, the higher-positioned
     * entry is emitted before the lower one (which only becomes visible after its transaction commits).
     *
-    * This matches the per-tag ordering guarantee exposed by `EventSubscriber`: events sharing a tag scope are
-    * serialized at append time by the event store, so within any tag scope this stream is in `globalPosition` order.
-    * Across disjoint tag scopes the order is the relay's-eye view of commit order.
+    * Within any single tag scope this stream is in `globalPosition` order, because the event store serializes appends
+    * that share a tag. Across disjoint tag scopes the order is commit order as seen by the outbox.
     *
     * @param batchSize
     *   maximum number of entries to fetch per round-trip
     */
   def stream(batchSize: Int): Stream[F, EventEnvelope[A]]
 
-  /** Mark a single entry as published. After this call returns successfully, the entry must no longer be emitted by
-    * [[stream]]. How implementations achieve that (by deleting the row, stamping a `published_at` column, moving it to
-    * an archive table, etc.) is a backend choice. Idempotent: marking an already-published or unknown entry is a no-op.
+  /** Mark a single entry as published. After this call returns, the entry must no longer be emitted by [[stream]].
+    * Idempotent: marking an already-published or unknown entry is a no-op.
     */
   def markPublished(globalPosition: Long): F[Unit]
 

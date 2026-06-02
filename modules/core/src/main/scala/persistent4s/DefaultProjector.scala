@@ -70,14 +70,6 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
     lastProcessedPosition: Option[Long],
   )
 
-  // TODO How should we handle failure? What do we do if the process dies?
-  // Answer: On failure, push the error in the checkpoint state and wait on the Defer until the dev restart or fix the issue.
-
-  // TODO Projection can miss some notifications due to connexion issue or restart.
-  // A solution would be to store user requests in postgres and keep track of the last processed request in the checkpoint.
-  // The projector can then reprocess all events since the last processed request to catch up on missed notifications.
-  // Also note that currently, only the last user intent is stored if multiple notifications arrive during a batch processing.
-
   override def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit] = {
 
     def persistProgress(

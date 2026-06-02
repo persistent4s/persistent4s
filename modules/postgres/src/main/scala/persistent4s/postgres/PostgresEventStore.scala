@@ -31,28 +31,21 @@ import persistent4s.*
 import java.util.UUID
 import java.time.OffsetDateTime
 
-/** A PostgreSQL-backed implementation of the EventStore trait. This implementation uses Skunk for database access and
-  * implements optimistic concurrency control for event appending.
+/** PostgreSQL-backed [[EventStore]] using Skunk for database access.
   *
-  * Events are stored in a table with the following schema:
-  *   - sequence_number: BIGSERIAL PRIMARY KEY (global position)
-  *   - event_type: TEXT NOT NULL
-  *   - tags: JSONB NOT NULL (array of tag strings)
-  *   - payload: JSONB NOT NULL
-  *   - recorded_at: TIMESTAMPTZ NOT NULL
+  * Events are stored in an `events` table with columns: `sequence_number` (BIGSERIAL PK), `event_id` (UUID, unique),
+  * `event_type` (TEXT), `tags` (JSONB array), `payload` (JSONB), `is_external` (BOOL), `recorded_at` (TIMESTAMPTZ).
   *
-  * [[readFrom]] streams events lazily using a PostgreSQL server-side cursor (fetching 256 rows per round-trip), so it
-  * is safe to use on stores with millions of events without loading them all into memory. A read-only transaction is
-  * held open for the lifetime of the stream; callers must ensure the stream is fully consumed or cancelled to release
-  * the connection back to the pool.
+  * [[readFrom]] streams events lazily via a server-side cursor (256 rows per round-trip), safe on stores with millions
+  * of events. A transaction is held open for the stream's lifetime; callers must consume or cancel the stream to
+  * release the connection.
   *
-  * Notifications are sent via PostgreSQL NOTIFY/LISTEN mechanism, enabling cross-process and cross-machine event
-  * notifications for horizontal scaling.
+  * Notifications are delivered via PostgreSQL NOTIFY/LISTEN, enabling cross-process wake-ups without polling.
   *
   * @param pool
-  *   a resource for obtaining database sessions
+  *   session pool shared with other store operations
   * @param codec
-  *   the event codec for serializing/deserializing events
+  *   codec for serializing/deserializing event payloads
   */
 final class PostgresEventStore[F[_]: Async, A <: Event] private (
   pool: Resource[F, Session[F]],
@@ -184,7 +177,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     }
 
   /** Returns a stream of notifications for new events appended to the store. Notifications are sent via PostgreSQL's
-    * NOTIFY/LISTEN mechanism. Each notification payload is decoded into a EventStoreNotification.
+    * NOTIFY/LISTEN mechanism. Each notification payload is decoded into an [[EventStoreNotification]].
     */
   override def notification(projectionName: String): Stream[F, EventStoreNotification] =
     Stream.resource(pool).flatMap { session =>

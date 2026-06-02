@@ -32,10 +32,7 @@ import cats.syntax.all.*
   */
 trait Projection[F[_]: Applicative, A <: Event, K, S]:
 
-  /** Repository for fetching and persisting projection state. The projector will call `fetchStates` to get the current
-    * state for relevant keys before processing a batch of events, and will call `upsertMany` and `deleteMany` after
-    * processing a batch to save the updated state.
-    */
+  /** Storage backend for this projection's read-model state. */
   protected val repository: Repository[F, K, S]
 
   /** The name of the projection, used for checkpointing.
@@ -91,25 +88,12 @@ trait Projection[F[_]: Applicative, A <: Event, K, S]:
     */
   def handle(state: Option[S], event: EventEnvelope[A]): F[Option[S]]
 
-  /** Fetch the current state for multiple keys. This method will be called before processing a batch of events to get
-    * the current state for all relevant keys.
-    *
-    * @param keys
-    *   the keys for which to fetch the state
-    * @return
-    *   a map of keys to their corresponding state, or `None` if no state exists for a key
-    */
+  /** Provided by the framework. Fetches current state for the given keys via [[repository]]. */
   final def fetchStates(keys: List[K]): F[Map[K, Option[S]]] =
     repository.findMany(keys)
 
-  /** Persist the current state for a given key. This method will be called after processing an event to save the
-    * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
-    * cache. Passing None indicates that the state should be removed for that key.
-    *
-    * @param states
-    *   a map of keys to their corresponding state, or `None` if the state should be deleted for a key
-    * @return
-    *   a F[Unit] that completes when the state has been persisted
+  /** Provided by the framework. Persists a batch of state updates via [[repository]]: `None` values trigger deletion,
+    * `Some` values trigger upsert.
     */
   final def persistStates(states: Map[K, Option[S]]): F[Unit] =
     val toDelete = states.collect { case (key, None) => key }.toList
