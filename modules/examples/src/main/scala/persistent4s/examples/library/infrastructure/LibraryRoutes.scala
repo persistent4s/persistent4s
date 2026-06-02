@@ -22,7 +22,7 @@ import org.http4s.HttpRoutes
 import smithy4s.http4s.SimpleRestJsonBuilder
 import smithy4s.http4s.swagger.docs
 
-import persistent4s.EventStore
+import persistent4s.{EventStore, SnapshotStore}
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.application.*
 import persistent4s.examples.library.domain.LibraryEvent
@@ -31,6 +31,7 @@ object LibraryRoutes:
 
   def make(module: LibraryModule): Resource[IO, HttpRoutes[IO]] =
     given EventStore[IO, LibraryEvent] = module.store
+    given SnapshotStore[IO]            = module.snapshotStore
 
     for
       bookRoutes <- SimpleRestJsonBuilder

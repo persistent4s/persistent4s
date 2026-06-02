@@ -16,6 +16,7 @@
 
 package persistent4s.examples.library.domain.member
 
+import io.circe.{Decoder, Encoder}
 import persistent4s.{CommandHandler, Tag}
 import persistent4s.examples.library.domain.{LibraryEvent, MemberRegistered}
 import java.util.UUID
@@ -26,7 +27,7 @@ final case class RegisterMember(
   email: String,
 )
 
-final case class RegisterMemberState(exists: Boolean)
+final case class RegisterMemberState(exists: Boolean) derives Encoder, Decoder
 
 object RegisterMemberHandler extends CommandHandler[RegisterMember, RegisterMemberState, LibraryEvent]:
 

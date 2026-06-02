@@ -16,6 +16,7 @@
 
 package persistent4s.examples.library.domain.book
 
+import io.circe.{Decoder, Encoder}
 import persistent4s.{CommandHandler, Tag}
 import persistent4s.examples.library.domain.{BookAdded, LibraryEvent}
 import java.util.UUID
@@ -27,7 +28,7 @@ final case class AddBook(
   totalCopies: Int,
 )
 
-final case class AddBookState(exists: Boolean)
+final case class AddBookState(exists: Boolean) derives Encoder, Decoder
 
 object AddBookHandler extends CommandHandler[AddBook, AddBookState, LibraryEvent]:
 

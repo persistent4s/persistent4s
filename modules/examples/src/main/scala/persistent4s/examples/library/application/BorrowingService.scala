@@ -18,7 +18,8 @@ package persistent4s.examples.library.application
 
 import cats.effect.IO
 
-import persistent4s.EventStore
+import persistent4s.{EventStore, SnapshotStore}
+import persistent4s.circe.CirceSnapshotCodec.given
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.borrowing.*
@@ -26,7 +27,7 @@ import persistent4s.examples.library.domain.borrowing.*
 import java.util.UUID
 import smithy4s.time.Timestamp
 
-class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore[IO, LibraryEvent])
+class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore[IO, LibraryEvent], SnapshotStore[IO])
     extends BorrowingService[IO]:
 
   def borrowBook(bookId: String, memberId: String): IO[Unit] =

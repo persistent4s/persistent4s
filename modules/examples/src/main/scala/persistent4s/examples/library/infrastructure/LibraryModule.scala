@@ -34,11 +34,12 @@ import persistent4s.examples.library.domain.*
 import persistent4s.examples.library.domain.book.{BookProjection, BookRepository}
 import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, BorrowingRepository}
 import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
-import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule}
+import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule, PostgresSnapshotStore}
 import persistent4s.monitoring.MonitoringServer
 
 final class LibraryModule private (
   val store: PostgresEventStore[IO, LibraryEvent],
+  val snapshotStore: PostgresSnapshotStore[IO],
   val bookProjection: BookProjection[IO],
   val memberProjection: MemberProjection[IO],
   val borrowingProjection: BorrowingProjection[IO],
@@ -53,9 +54,10 @@ object LibraryModule:
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
     for
-      resources  <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
-      store       = resources.eventStore
-      checkpoint  = resources.checkpoint
+      resources     <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      store          = resources.eventStore
+      checkpoint     = resources.checkpoint
+      snapshotStore  = resources.snapshotStore
       monitoring <- MonitoringServer.make(checkpoint, store.notify)
       config     <- Resource.eval(loadConfig(configPath))
       viewPool   <- Session
@@ -75,7 +77,7 @@ object LibraryModule:
       _             <- projector.run(bookProj).compile.drain.background
       _             <- projector.run(memberProj).compile.drain.background
       _             <- projector.run(borrowingProj).compile.drain.background
-    yield new LibraryModule(store, bookProj, memberProj, borrowingProj, bookRepo, memberRepo, borrowingRepo)
+    yield new LibraryModule(store, snapshotStore, bookProj, memberProj, borrowingProj, bookRepo, memberRepo, borrowingRepo)
 
   private def loadConfig(configPath: String): IO[PostgresConfig] =
     IO.delay(ConfigSource.default.at(configPath).load[PostgresConfig]).flatMap {
