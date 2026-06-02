@@ -57,8 +57,8 @@ object KafkaModule:
     * encoded via the supplied [[EventCodec]]. The record key is determined by `config.recordKey`, which controls
     * partition assignment and therefore per-key ordering.
     *
-    * The underlying producer is configured with `enable.idempotence=true`, so retries on transient broker errors do
-    * not produce duplicate or reordered records. The producer is released when the resource is finalized.
+    * The underlying producer is configured with `enable.idempotence=true`, so retries on transient broker errors do not
+    * produce duplicate or reordered records. The producer is released when the resource is finalized.
     *
     * Batch publishes pipeline all records in a single request but preserve the order they appear in the input list.
     */

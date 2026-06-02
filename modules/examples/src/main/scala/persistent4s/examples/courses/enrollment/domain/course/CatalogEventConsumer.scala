@@ -20,7 +20,8 @@ import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 import fs2.Stream
 
-import persistent4s.kafka.{EventSubscriber, KafkaConsumerConfig, KafkaModule}
+import persistent4s.kafka.{KafkaConsumerConfig, KafkaModule}
+import persistent4s.EventSubscriber
 import persistent4s.EventCodec
 import persistent4s.EventStore
 import persistent4s.examples.courses.enrollment.domain.SchoolEvent
@@ -52,5 +53,5 @@ private def consume[F[_]: Async](
           ),
         ),
       ) *>
-        offset.commit
+        offset
     }

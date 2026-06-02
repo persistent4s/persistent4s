@@ -27,6 +27,7 @@ import fs2.Stream
 import weaver.SimpleIOSuite
 
 import persistent4s.{Event, EventEnvelope, EventMetadata, EventTypeName, Outbox}
+import persistent4s.EventPublisher
 
 /** Unit tests for [[KafkaRelay]] using in-memory fakes for the outbox and the publisher.
   *

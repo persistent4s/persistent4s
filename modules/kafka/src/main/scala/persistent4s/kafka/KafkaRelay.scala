@@ -21,6 +21,7 @@ import scala.concurrent.duration.*
 import cats.effect.{Async, Temporal}
 import cats.syntax.all.*
 import persistent4s.{Event, Outbox}
+import persistent4s.EventPublisher
 
 /** Drains an [[Outbox]] into Kafka via an [[EventPublisher]] and acknowledges published entries.
   *
