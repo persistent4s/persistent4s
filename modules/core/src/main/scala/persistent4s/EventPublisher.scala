@@ -14,24 +14,15 @@
  * limitations under the License.
  */
 
-package persistent4s.kafka
+package persistent4s
 
 import persistent4s.{Event, EventEnvelope}
 
-/** Publishes [[EventEnvelope]]s to Kafka. The destination topic is supplied per call so a single publisher can fan out
-  * to multiple topics; the producer configuration (bootstrap servers, acks, partitioner, etc.) is supplied by the
-  * caller via [[KafkaModule]].
-  *
-  * Event metadata is carried as Kafka record headers; the payload is serialized through the supplied `EventCodec[A]`.
-  */
+/** Publishes [[EventEnvelope]]s to a topic. */
 trait EventPublisher[F[_], A <: Event]:
 
-  /** Publish a single envelope to `topic`. Semantically completes only once the broker has acknowledged the record
-    * according to the configured `acks` policy.
-    */
+  /** Publish a single envelope to `topic`. */
   def publish(topic: String, envelope: EventEnvelope[A]): F[Unit]
 
-  /** Publish a batch of envelopes to `topic` in order. Implementations may pipeline records but must preserve per-key
-    * ordering.
-    */
+  /** Publish a batch of envelopes to `topic` in order. */
   def publish(topic: String, envelopes: List[EventEnvelope[A]]): F[Unit]
