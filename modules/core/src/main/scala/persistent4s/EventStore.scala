@@ -48,9 +48,10 @@ trait EventStore[F[_], A <: Event]:
     * @param events
     *   one or more lists of events to append, each event paired with its tags and type name
     * @return
-    *   a F[Unit] that completes when the events have been written, or fails with [[IndexConflictException]] on conflict
+    *   a F[List[A]] that completes when the events have been written, or fails with [[IndexConflictException]] on
+    *   conflict
     */
-  def append(eventFilter: EventFilter, expectedIndex: Long, events: List[(Set[Tag], EventTypeName, A)]*): F[Unit]
+  def append(eventFilter: EventFilter, expectedIndex: Long, events: List[(Set[Tag], EventTypeName, A)]*): F[List[A]]
 
   /** Read events from the event store starting from a specific position, filtering by event types and tags. The
     * returned Stream will emit EventEnvelope[A] instances that match the specified event types and tags. The Stream

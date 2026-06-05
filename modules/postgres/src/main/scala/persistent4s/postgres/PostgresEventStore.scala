@@ -65,9 +65,9 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     eventFilter: EventFilter,
     expectedIndex: Long,
     events: List[(Set[Tag], EventTypeName, A)]*,
-  ): F[Unit] =
+  ): F[List[A]] =
     val flatEvents = events.flatten.toList
-    if flatEvents.isEmpty then Async[F].unit
+    if flatEvents.isEmpty then Async[F].pure(List.empty)
     else
       val allTags = eventFilter.tags
       val eventTypes = eventFilter.eventTypes
@@ -80,7 +80,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
                    insertEvent(session, tags, eventType, event).void
                  }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
-          yield ()
+          yield flatEvents.map(_._3)
         }
       }
 

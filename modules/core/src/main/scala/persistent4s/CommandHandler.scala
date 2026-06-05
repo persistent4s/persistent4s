@@ -62,12 +62,12 @@ trait CommandHandler[C, S, E <: Event]:
     */
   def run[F[_]: Concurrent](command: C)(using
     eventStore: EventStore[F, E],
-  ): F[Unit] =
+  ): F[List[E]] =
     runWithRetry(command, maxRetries)
 
   private def runWithRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
     eventStore: EventStore[F, E],
-  ): F[Unit] =
+  ): F[List[E]] =
     attempt(command).handleErrorWith {
       case _: IndexConflictException if retriesLeft > 0 =>
         runWithRetry(command, retriesLeft - 1)
@@ -77,7 +77,7 @@ trait CommandHandler[C, S, E <: Event]:
 
   private def attempt[F[_]: Concurrent](
     command: C,
-  )(using eventStore: EventStore[F, E]): F[Unit] =
+  )(using eventStore: EventStore[F, E]): F[List[E]] =
     for
       tags      <- Concurrent[F].pure(tags(command))
       filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
@@ -87,7 +87,7 @@ trait CommandHandler[C, S, E <: Event]:
       _         <- validate(state, command) match
              case Left(e)  => Concurrent[F].raiseError(e)
              case Right(_) => Concurrent[F].unit
-      decided = decide(state, command)
-      events  = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
-      _      <- eventStore.append(filter, index, events)
-    yield ()
+      decided         = decide(state, command)
+      events          = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
+      appendedEvents <- eventStore.append(filter, index, events)
+    yield appendedEvents
