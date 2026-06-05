@@ -41,12 +41,12 @@ object MonitoringServer:
     * @param sendNotification
     *   function to send a control notification (typically `components.eventStore.notify`)
     * @param port
-    *   the port to bind on (default: 9090)
+    *   the port to bind on (default: 9595)
     */
   def make[F[_]: Async: Network](
     checkpoint: ProjectionCheckpoint[F],
     sendNotification: EventStoreNotification => F[Unit],
-    port: Port = port"9090",
+    port: Port = port"9595",
   ): Resource[F, Unit] =
     val routes = new CheckpointRoutes[F](checkpoint.loadAll(), sendNotification).routes
     EmberServerBuilder

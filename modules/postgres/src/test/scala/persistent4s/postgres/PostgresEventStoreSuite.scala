@@ -83,7 +83,19 @@ object PostgresEventStoreSuite extends IOSuite:
       .append(
         EventFilter(Set.empty, tags),
         expectedIndex,
-        List((tags, EventTypeName.of[TestEvent], TestEvent(value))),
+        List((None, tags, EventTypeName.of[TestEvent], false, TestEvent(value))),
+      )
+      .void
+
+  private def appendUncheckedOne(
+    store: PostgresEventStore[IO, TestEvent],
+    tags: Set[Tag],
+    value: String,
+    eventId: Option[UUID] = None,
+  ): IO[Unit] =
+    store
+      .appendUnchecked(
+        List((eventId, tags, EventTypeName.of[TestEvent], true, TestEvent(value))),
       )
       .void
 
@@ -233,7 +245,7 @@ object PostgresEventStoreSuite extends IOSuite:
                   .append(
                     EventFilter(Set.empty, Set.empty),
                     0L,
-                    List((Set(secondTag), EventTypeName.of[TestEvent], TestEvent("after"))),
+                    List((None, Set(secondTag), EventTypeName.of[TestEvent], false, TestEvent("after"))),
                   )
                   .void
                   .attempt
@@ -242,4 +254,122 @@ object PostgresEventStoreSuite extends IOSuite:
 
   test("notify completes without error") { eventStore =>
     eventStore.notify(EventStoreNotification.PauseProjection("test-proj")).as(success)
+  }
+
+  test("appending with a provided UUID sets isExternal to true") { store =>
+    for
+      id  <- freshId("external")
+      tag  = Tag("external", id)
+      uuid = UUID.randomUUID()
+      _   <- store.append(
+             EventFilter(Set.empty, Set(tag)),
+             0L,
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("external-event"))),
+           )
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.isExternal == true,
+    )
+  }
+
+  test("appending without a provided UUID sets isExternal to false") { store =>
+    for
+      id     <- freshId("internal")
+      tag     = Tag("internal", id)
+      _      <- appendOne(store, 0L, Set(tag), "internal-event")
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.isExternal == false,
+    )
+  }
+
+  test("appending a duplicate UUID is a no-op and returns the original global position") { store =>
+    for
+      id  <- freshId("dedup")
+      tag  = Tag("dedup", id)
+      uuid = UUID.randomUUID()
+      _   <- store.append(
+             EventFilter(Set.empty, Set(tag)),
+             0L,
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("first"))),
+           )
+      pos1 <- store
+                .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
+                .compile
+                .toList
+                .map(_.head.metadata.globalPosition)
+      _ <- store.append(
+             EventFilter(Set.empty, Set(tag)),
+             pos1,
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("duplicate"))),
+           )
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.globalPosition == pos1,
+      events.head.payload == TestEvent("first"),
+    )
+  }
+
+  test("appendUnchecked stores event with correct payload, tags, event type, and isExternal") { store =>
+    for
+      id     <- freshId("imported")
+      tag     = Tag("imported", id)
+      _      <- appendUncheckedOne(store, Set(tag), "imported-event")
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.payload == TestEvent("imported-event"),
+      events.head.metadata.tags == Set(tag),
+      events.head.metadata.eventType == EventTypeName.of[TestEvent],
+      events.head.metadata.isExternal == true,
+      events.head.metadata.globalPosition >= 1L,
+    )
+  }
+
+  test("concurrent appendUnchecked calls with the same tag all succeed (no OCC)") { store =>
+    // Unlike append, appendUnchecked performs no conflict check, so parallel writes with overlapping tags
+    // do not race — both events land in the store.
+    for
+      id      <- freshId("concurrent")
+      tag      = Tag("imported", id)
+      first    = appendUncheckedOne(store, Set(tag), "first").attempt
+      second   = appendUncheckedOne(store, Set(tag), "second").attempt
+      results <- (first, second).parTupled
+      events  <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      results._1.isRight,
+      results._2.isRight,
+      events.length == 2,
+    )
+  }
+
+  test("appendUnchecked with a duplicate UUID is a no-op and returns the original global position") { store =>
+    for
+      id   <- freshId("dedup-unchecked")
+      tag   = Tag("imported", id)
+      uuid  = UUID.randomUUID()
+      _    <- appendUncheckedOne(store, Set(tag), "first", Some(uuid))
+      pos1 <- store
+                .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
+                .compile
+                .toList
+                .map(_.head.metadata.globalPosition)
+      _      <- appendUncheckedOne(store, Set(tag), "duplicate", Some(uuid))
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.globalPosition == pos1,
+      events.head.payload == TestEvent("first"),
+    )
+  }
+
+  test("appendUnchecked with no events is a no-op") { store =>
+    for
+      before <- store.readFrom(0L, EventFilter(Set.empty, Set.empty)).compile.toList.map(_.length)
+      _      <- store.appendUnchecked()
+      after  <- store.readFrom(0L, EventFilter(Set.empty, Set.empty)).compile.toList.map(_.length)
+    yield expect(before == after)
   }

@@ -88,6 +88,6 @@ trait CommandHandler[C, S, E <: Event]:
              case Left(e)  => Concurrent[F].raiseError(e)
              case Right(_) => Concurrent[F].unit
       decided         = decide(state, command)
-      events          = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
+      events          = decided.map((tags, event) => (None, tags, EventTypeName.fromInstance(event), false, event))
       appendedEvents <- eventStore.append(filter, index, events)
     yield appendedEvents
