@@ -25,6 +25,8 @@ import java.util.UUID
   *
   * @param globalPosition
   *   the global position of the event in the event store
+  * @param id
+  *   the UUID of the event
   * @param tags
   *   the tags associated with the event
   * @param eventType
@@ -33,6 +35,8 @@ import java.util.UUID
   *   whether the event was come from an external domain or not
   * @param timestamp
   *   the timestamp of when the event was created
+  * @param headers
+  *   arbitrary author-supplied key-value metadata
   */
 final case class EventMetadata(
   globalPosition: Long,
@@ -41,4 +45,5 @@ final case class EventMetadata(
   eventType: EventTypeName,
   isExternal: Boolean,
   timestamp: Instant,
+  headers: Map[String, String],
 )
