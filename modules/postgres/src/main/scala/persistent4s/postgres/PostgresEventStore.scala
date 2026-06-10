@@ -249,13 +249,14 @@ final class PostgresEventStore[F[_]: Async: SecureRandom, A <: Event] private (
       resolved <- events.traverse { case (idOpt, tags, eventType, isExternal, event) =>
                     resolveId(idOpt).map(id => (id, tags, eventType, isExternal, event))
                   }
-      rows = resolved.distinctBy(_._1).map { case (id, tags, eventType, isExternal, event) =>
+      uniqueByEventId = resolved.distinctBy(_._1)
+      rows            = uniqueByEventId.map { case (id, tags, eventType, isExternal, event) =>
                id *: eventType.value *: tagsToJson(tags) *: encodePayload(event) *: isExternal *: EmptyTuple
              }
       idToSeq <- chunked(rows, paramsPerRow = 5)
                    .flatTraverse(chunk => session.execute(insertEventsQuery(chunk.size))(chunk))
                    .map(_.map { case id *: seq *: EmptyTuple => id -> seq }.toMap)
-      tagPairs = resolved.flatMap { case (id, tags, _, _, _) =>
+      tagPairs = uniqueByEventId.flatMap { case (id, tags, _, _, _) =>
                    tags.toList.map(tag => tag.value *: idToSeq(id) *: EmptyTuple)
                  }
       _ <- chunked(tagPairs, paramsPerRow = 2)
