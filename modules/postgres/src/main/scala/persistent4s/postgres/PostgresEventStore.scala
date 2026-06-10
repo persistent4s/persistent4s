@@ -268,7 +268,7 @@ final class PostgresEventStore[F[_]: Async: SecureRandom, A <: Event] private (
     parseJson(codec.encode(event)).getOrElse(Json.obj())
 
   private def chunked[T](rows: List[T], paramsPerRow: Int): List[List[T]] =
-    rows.grouped(MaxBindParams / paramsPerRow).toList
+    rows.grouped(MaxUsableBindParams / paramsPerRow).toList
 
   private def parsePayload(eventType: EventTypeName, payload: Json): F[A] =
     codec.decode(eventType, payload.noSpaces) match
@@ -289,7 +289,11 @@ object PostgresEventStore:
       )
 
   /** Max number of parameters supported by PostgreSQL within a query */
-  private val MaxBindParams: Int = 65535
+  private val MaxBindParams: Int = 32767
+
+  private val BindParamSafetyMargin: Int = 16
+
+  private val MaxUsableBindParams: Int = MaxBindParams - BindParamSafetyMargin
 
   /** Number of rows fetched per cursor round-trip when streaming events from PostgreSQL. */
   private val FetchSize: Int = 256
