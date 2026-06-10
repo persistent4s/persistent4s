@@ -21,6 +21,8 @@ import cats.effect.{Async, Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
 import weaver.SimpleIOSuite
+
+import java.util.UUID
 import persistent4s.CommandHandlerRunSuite.TestEvent.StudentCreated
 import persistent4s.CommandHandlerRunSuite.TestEvent.StudentDeleted
 import persistent4s.CommandHandlerRunSuite.CounterEvent.Incremented
@@ -40,32 +42,38 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     override def append(
       filter: EventFilter,
       expectedIndex: Long,
-      events: List[(Set[Tag], EventTypeName, A)]*,
-    ): F[Unit] =
+      events: List[PendingEvent[A]]*,
+    ): F[List[A]] =
       store.modify { currentEvents =>
-        val incomingTags = events.flatten.map(_._1).flatten.toSet
+        val incomingTags = events.flatten.flatMap(_.tags).toSet
         val relevantEvents = currentEvents.filter(env => env.metadata.tags.exists(incomingTags.contains))
         val actualIndex = relevantEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
         if actualIndex != expectedIndex then
           (currentEvents, Left(new IndexConflictException(expectedIndex, actualIndex)))
         else
           val lastGlobalPosition = currentEvents.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvents = events.flatten.zipWithIndex.map { case ((tags, eventType, event), i) =>
+          val newEvents = events.flatten.zipWithIndex.map { case (pending, i) =>
             EventEnvelope(
               EventMetadata(
                 globalPosition = lastGlobalPosition + i.toLong + 1L,
-                tags = tags,
-                eventType = eventType,
+                id = pending.id.getOrElse(UUID.randomUUID()),
+                tags = pending.tags,
+                eventType = pending.eventType,
+                isExternal = pending.isExternal,
                 timestamp = java.time.Instant.now(),
+                headers = pending.headers,
               ),
-              event,
+              pending.payload,
             )
           }
-          (currentEvents ++ newEvents, Right(()))
+          (currentEvents ++ newEvents, Right(events.flatten.map(_.payload).toList))
       }.flatMap {
-        case Left(error) => Async[F].raiseError(error)
-        case Right(_)    => Async[F].unit
+        case Left(error)   => Async[F].raiseError(error)
+        case Right(result) => Async[F].pure(result)
       }
+
+    override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[A]] =
+      Async[F].pure(List.empty) // not needed for these tests
 
     override def readFrom(
       fromPosition: Long,
@@ -137,7 +145,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     def decide(state: CounterState, command: IncrementCounter): List[(Set[Tag], CounterEvent)] =
       List((Set(Tag("counter", command.counterId)), CounterEvent.Incremented(command.counterId)))
 
-  private def isConflict(result: Either[Throwable, Unit]): Boolean =
+  private def isConflict(result: Either[Throwable, Any]): Boolean =
     result match
       case Left(_: IndexConflictException) => true
       case _                               => false
@@ -148,8 +156,10 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     gate: Deferred[IO, Unit],
   ): EventStore[IO, A] =
     new EventStore[IO, A]:
-      def append(filter: EventFilter, expectedIndex: Long, events: List[(Set[Tag], EventTypeName, A)]*): IO[Unit] =
+      def append(filter: EventFilter, expectedIndex: Long, events: List[PendingEvent[A]]*): IO[List[A]] =
         underlying.append(filter, expectedIndex, events*)
+      def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[A]] =
+        underlying.appendUnchecked(events*)
       def readFrom(
         fromPosition: Long,
         eventFilter: EventFilter,
@@ -238,7 +248,14 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       _     <- store.append(
              EventFilter(),
              0L,
-             List((Set(studentTag("1")), EventTypeName.of[StudentCreated], TestEvent.StudentCreated("1"))),
+             List(
+               PendingEvent(
+                 TestEvent.StudentCreated("1"),
+                 Set(studentTag("1")),
+                 EventTypeName.of[StudentCreated],
+                 isExternal = false,
+               ),
+             ),
            )
       _ <- {
         given EventStore[IO, TestEvent] = store
@@ -361,7 +378,14 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       _     <- store.append(
              EventFilter(),
              0L,
-             List((Set(studentTag("1")), EventTypeName.of[StudentCreated], TestEvent.StudentCreated("1"))),
+             List(
+               PendingEvent(
+                 TestEvent.StudentCreated("1"),
+                 Set(studentTag("1")),
+                 EventTypeName.of[StudentCreated],
+                 isExternal = false,
+               ),
+             ),
            )
       result <- {
                   given EventStore[IO, TestEvent] = store
@@ -401,6 +425,35 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       events(0).payload == TestEvent.StudentCreated("1"),
       events(1).metadata.eventType == EventTypeName.of[StudentDeleted],
       events(1).payload == TestEvent.StudentDeleted("1"),
+    )
+  }
+
+  test("run attaches the handler's headers(command) to every produced event") {
+    val handlerWithHeaders = new CommandHandler[CreateStudent, StudentState, TestEvent]:
+      def tags(command: CreateStudent): Set[Tag] = Set(studentTag(command.studentId))
+      def initial: StudentState = StudentState(exists = false)
+      def evolve(command: CreateStudent, state: StudentState, event: TestEvent): StudentState =
+        CommandHandlerRunSuite.evolve(state, event)
+      def validate(state: StudentState, command: CreateStudent): Either[Throwable, Unit] =
+        if (state.exists) Left(new RuntimeException("Student already exists")) else Right(())
+      def decide(state: StudentState, command: CreateStudent): List[(Set[Tag], TestEvent)] =
+        List(
+          (Set(studentTag(command.studentId)), TestEvent.StudentCreated(command.studentId)),
+          (Set(studentTag(command.studentId)), TestEvent.StudentDeleted(command.studentId)),
+        )
+      override def headers(command: CreateStudent): Map[String, String] =
+        Map("correlationId" -> command.studentId, "source" -> "test")
+
+    for
+      store <- InMemoryEventStore.make[IO, TestEvent]
+      _     <- {
+        given EventStore[IO, TestEvent] = store
+        handlerWithHeaders.run[IO](CreateStudent("1"))
+      }
+      events <- store.getEvents
+    yield expect.all(
+      events.length == 2,
+      events.forall(_.metadata.headers == Map("correlationId" -> "1", "source" -> "test")),
     )
   }
 

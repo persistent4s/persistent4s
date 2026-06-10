@@ -123,6 +123,45 @@ object PostgresEventStoreSuite extends IOSuite:
     )
   }
 
+  test("append round-trips non-empty headers through the store") { store =>
+    val headers = Map("correlationId" -> "abc-123", "userId" -> "42")
+    for
+      id <- freshId("student")
+      tag = Tag("student", id)
+      _  <- store
+             .append(
+               EventFilter(Set.empty, Set(tag)),
+               0L,
+               List(
+                 PendingEvent(
+                   TestEvent("hello"),
+                   Set(tag),
+                   EventTypeName.of[TestEvent],
+                   isExternal = false,
+                   headers = headers,
+                 ),
+               ),
+             )
+             .void
+      events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.headers == headers,
+    )
+  }
+
+  test("append defaults to empty headers when none are provided") { store =>
+    for
+      id     <- freshId("student")
+      tag     = Tag("student", id)
+      _      <- appendOne(store, 0L, Set(tag), "hello")
+      events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.headers.isEmpty,
+    )
+  }
+
   test("readFrom skips events at or before the given position") { store =>
     // In Postgres the expectedIndex is the actual globalPosition of the last matching event,
     // not a per-tag counter — so we read it back after each append rather than hardcoding.
