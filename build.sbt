@@ -1,18 +1,32 @@
+import org.typelevel.sbt.gha.{PermissionValue, Permissions}
+
 ThisBuild / tlBaseVersion          := "0.2"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
 ThisBuild / scalaVersion           := "3.8.3"
 ThisBuild / tlJdkRelease           := Some(17)
 ThisBuild / organization           := "io.github.persistent4s"
-ThisBuild / organizationName       := "Bastien Jolidon"
+ThisBuild / organizationName       := "Antonio Jimenez and Bastien Jolidon"
 ThisBuild / startYear              := Some(2026)
 ThisBuild / licenses               := Seq(License.Apache2)
 ThisBuild / developers             := List(
+  tlGitHubDev("antoniojimeneznieto", "Antonio Jimenez"),
   tlGitHubDev("Bjolidon", "Bastien Jolidon"),
 )
-ThisBuild / scalafmtOnCompile        := false // recommended in Scala 3
-ThisBuild / testFrameworks           += new TestFramework("weaver.framework.CatsEffect")
-ThisBuild / Test / logBuffered       := false
-ThisBuild / Test / parallelExecution := false
+ThisBuild / scalafmtOnCompile         := false // recommended in Scala 3
+ThisBuild / testFrameworks            += new TestFramework("weaver.framework.CatsEffect")
+ThisBuild / Test / logBuffered        := false
+ThisBuild / Test / parallelExecution  := false
+ThisBuild / githubWorkflowGeneratedCI := {
+  (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
+    if (job.id == "dependency-submission")
+      job.withPermissions(
+        Some(
+          Permissions.Specify.defaultRestrictive.withContents(PermissionValue.Write),
+        ),
+      )
+    else job
+  }
+}
 
 Global / onChangedBuildSource := ReloadOnSourceChanges
 Global / semanticdbEnabled    := true // for metals
