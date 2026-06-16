@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 persistent4s
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,11 @@
  * limitations under the License.
  */
 
-package persistent4s
+package persistent4s.kafka
 
-import java.util.UUID
+import fs2.Stream
+import persistent4s.{Event, EventEnvelope}
 
-case class Event(id: UUID, streamId: String, eventType: String, payload: String)
+trait EventSubscriber[F[_], A <: Event]:
+
+  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, EventEnvelope[A]]

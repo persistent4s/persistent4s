@@ -74,11 +74,11 @@ jobs:
 
       - name: Make target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
-        run: mkdir -p modules/core/target project/target
+        run: mkdir -p modules/monitoring/target modules/postgres/target modules/kafka/target modules/circe/target modules/core/target modules/testkit/target project/target
 
       - name: Compress target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
-        run: tar cf targets.tar modules/core/target project/target
+        run: tar cf targets.tar modules/monitoring/target modules/postgres/target modules/kafka/target modules/circe/target modules/core/target modules/testkit/target project/target
 
       - name: Upload target directories
         if: github.event_name != 'pull_request' && (startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main')
@@ -160,6 +160,19 @@ jobs:
         os: [ubuntu-22.04]
         java: [temurin@17]
     runs-on: ${{ matrix.os }}
+    permissions:
+      actions: none
+      checks: none
+      contents: write
+      deployments: none
+      id-token: none
+      issues: none
+      packages: read
+      pages: none
+      pull-requests: none
+      repository-projects: none
+      security-events: none
+      statuses: none
     steps:
       - name: Checkout current branch (full)
         uses: actions/checkout@v6
@@ -185,5 +198,5 @@ jobs:
       - name: Submit Dependencies
         uses: scalacenter/sbt-dependency-submission@v2
         with:
-          modules-ignore: root_3
+          modules-ignore: persistent4s-examples_3 root_3 persistent4s-tests_3
           configs-ignore: test scala-tool scala-doc-tool test-internal

@@ -1,55 +1,165 @@
-ThisBuild / tlBaseVersion          := "0.1"
-ThisBuild / tlMimaPreviousVersions := Set("0.1.1")
-ThisBuild / scalaVersion           := "3.8.2"
+import org.typelevel.sbt.gha.{PermissionValue, Permissions}
+
+ThisBuild / tlBaseVersion          := "0.2"
+ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
+ThisBuild / scalaVersion           := "3.8.3"
 ThisBuild / tlJdkRelease           := Some(17)
-ThisBuild / organization           := "io.github.antoniojimeneznieto"
-ThisBuild / organizationName       := "persistent4s"
+ThisBuild / organization           := "io.github.persistent4s"
+ThisBuild / organizationName       := "Antonio Jimenez and Bastien Jolidon"
 ThisBuild / startYear              := Some(2026)
 ThisBuild / licenses               := Seq(License.Apache2)
 ThisBuild / developers             := List(
   tlGitHubDev("antoniojimeneznieto", "Antonio Jimenez"),
+  tlGitHubDev("Bjolidon", "Bastien Jolidon"),
 )
+ThisBuild / scalafmtOnCompile         := false // recommended in Scala 3
+ThisBuild / testFrameworks            += new TestFramework("weaver.framework.CatsEffect")
+ThisBuild / Test / logBuffered        := false
+ThisBuild / Test / parallelExecution  := false
+ThisBuild / githubWorkflowGeneratedCI := {
+  (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
+    if (job.id == "dependency-submission")
+      job.withPermissions(
+        Some(
+          Permissions.Specify.defaultRestrictive.withContents(PermissionValue.Write),
+        ),
+      )
+    else job
+  }
+}
 
 Global / onChangedBuildSource := ReloadOnSourceChanges
 Global / semanticdbEnabled    := true // for metals
 
-val commonSettings = List(
-  scalafmtOnCompile            := false, // recommended in Scala 3
-  testFrameworks               += new TestFramework("weaver.framework.CatsEffect"),
-  Compile / run / fork         := true,
-  Compile / run / javaOptions ++= Seq("--add-exports", "java.base/jdk.internal.vm=ALL-UNNAMED"),
-  libraryDependencies         ++= List(
-    // CE
-    "org.typelevel" %% "cats-effect" % "3.7.0",
-    "co.fs2"        %% "fs2-core"    % "3.12.2",
+// Versions
+val CatsEffectV = "3.7.0"
 
-    // Postgres
-    "org.tpolecat" %% "skunk-core" % "0.6.5",
+val Fs2V = "3.13.0"
 
-    // Circe
-    "io.circe" %% "circe-core"    % "0.14.15",
-    "io.circe" %% "circe-generic" % "0.14.15",
-    "io.circe" %% "circe-parser"  % "0.14.15",
+val SkunkV = "1.0.0"
 
-    // Logging
-    "org.typelevel" %% "log4cats-slf4j" % "2.8.0",
+val CirceV = "0.14.15"
 
-    // Telemetry
-    "org.typelevel" %% "otel4s-core" % "0.13.2",
+val Log4CatsV = "2.8.0"
 
-    // Testing
-    "ch.qos.logback"     % "logback-classic" % "1.5.32" % Test,
-    "org.testcontainers" % "postgresql"      % "1.21.4" % Test,
-    "org.typelevel"     %% "weaver-cats"     % "0.12.0" % Test,
-  ),
-)
+val Otel4sV = "0.16.0"
+
+val LogbackV = "1.5.32"
+
+val TestcontainersV = "1.21.4"
+
+val Fs2KafkaV = "4.0.0"
+
+val WeaverV = "0.12.0"
+
+val Http4sV = "0.23.34"
+
+val Smithy4sV = smithy4s.codegen.BuildInfo.version
+
+val PureconfigV = "0.17.10"
 
 lazy val root = (project in file("."))
   .enablePlugins(NoPublishPlugin)
-  .aggregate(core)
+  .aggregate(core, postgres, circe, kafka, testkit, tests, examples, monitoring)
 
 lazy val core = (project in file("modules/core"))
-  .settings(commonSettings)
-  .settings(name := "persistent4s")
+  .settings(
+    name                 := "persistent4s-core",
+    libraryDependencies ++= List(
+      "org.typelevel" %% "cats-effect"    % CatsEffectV,
+      "co.fs2"        %% "fs2-core"       % Fs2V,
+      "org.typelevel" %% "log4cats-slf4j" % Log4CatsV,
+      "org.typelevel" %% "otel4s-core"    % Otel4sV,
+      "org.typelevel" %% "weaver-cats"    % WeaverV % Test,
+    ),
+  )
 
-addCommandAlias("lint", ";scalafmtAll ;scalafixAll --rules OrganizeImports")
+lazy val postgres = (project in file("modules/postgres"))
+  .dependsOn(core, circe)
+  .settings(
+    name                 := "persistent4s-postgres",
+    libraryDependencies ++= List(
+      "org.tpolecat"          %% "skunk-core"      % SkunkV,
+      "org.tpolecat"          %% "skunk-circe"     % SkunkV,
+      "org.typelevel"         %% "otel4s-core"     % Otel4sV,
+      "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
+      "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
+      "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
+      "org.testcontainers"     % "postgresql"      % TestcontainersV % Test,
+    ),
+  )
+
+lazy val circe = (project in file("modules/circe"))
+  .dependsOn(core)
+  .settings(
+    name                 := "persistent4s-circe",
+    libraryDependencies ++= List(
+      "io.circe"      %% "circe-core"    % CirceV,
+      "io.circe"      %% "circe-generic" % CirceV,
+      "io.circe"      %% "circe-parser"  % CirceV,
+      "org.typelevel" %% "weaver-cats"   % WeaverV % Test,
+    ),
+  )
+
+lazy val kafka = (project in file("modules/kafka"))
+  .dependsOn(core)
+  .settings(
+    name                 := "persistent4s-kafka",
+    libraryDependencies ++= List(
+      "org.typelevel"     %% "fs2-kafka"       % Fs2KafkaV,
+      "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
+      "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
+      "org.testcontainers" % "kafka"           % TestcontainersV % Test,
+    ),
+  )
+
+lazy val testkit = (project in file("modules/testkit"))
+  .settings(
+    name                 := "persistent4s-testkit",
+    libraryDependencies ++= List(
+      "org.typelevel" %% "cats-effect" % CatsEffectV,
+      "org.typelevel" %% "weaver-cats" % WeaverV % Test,
+    ),
+  )
+
+lazy val tests = (project in file("modules/tests"))
+  .dependsOn(core, postgres, circe, kafka, testkit)
+  .enablePlugins(NoPublishPlugin)
+  .settings(
+    name                 := "persistent4s-tests",
+    libraryDependencies ++= List(
+      "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
+      "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
+      "org.testcontainers" % "postgresql"      % TestcontainersV % Test,
+    ),
+  )
+
+lazy val examples = (project in file("modules/examples"))
+  .dependsOn(core, testkit, postgres, circe, monitoring)
+  .enablePlugins(NoPublishPlugin, Smithy4sCodegenPlugin)
+  .settings(
+    name                 := "persistent4s-examples",
+    libraryDependencies ++= List(
+      "com.disneystreaming.smithy4s" %% "smithy4s-http4s"         % Smithy4sV,
+      "com.disneystreaming.smithy4s" %% "smithy4s-http4s-swagger" % Smithy4sV,
+      "org.http4s"                   %% "http4s-ember-server"     % Http4sV,
+      "ch.qos.logback"                % "logback-classic"         % LogbackV,
+    ),
+  )
+
+lazy val monitoring = (project in file("modules/monitoring"))
+  .dependsOn(core, postgres % Test)
+  .settings(
+    name                 := "persistent4s-monitoring",
+    libraryDependencies ++= List(
+      "org.http4s"        %% "http4s-ember-server" % Http4sV,
+      "org.http4s"        %% "http4s-dsl"          % Http4sV,
+      "org.typelevel"     %% "weaver-cats"         % WeaverV         % Test,
+      "ch.qos.logback"     % "logback-classic"     % LogbackV        % Test,
+      "org.testcontainers" % "postgresql"          % TestcontainersV % Test,
+      "org.http4s"        %% "http4s-ember-client" % Http4sV         % Test,
+      "org.typelevel"     %% "otel4s-core"         % Otel4sV,
+    ),
+  )
+
+addCommandAlias("lint", ";scalafmtAll ;scalafmtSbt")
