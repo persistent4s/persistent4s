@@ -171,13 +171,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
           keys.map(k => k -> current.get(k)).toMap
         }
 
-        def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
-          repoStates.toList.traverse_ { case (key, state) =>
-            states.update(_.updated(key, state))
-          }
-
-        def deleteMany(keys: List[String]): IO[Unit] =
-          keys.traverse_(key => states.update(_ - key))
+        def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] =
+          states.update(current => (current -- deletes) ++ upserts)
       }
 
       def name: String = "tracking"
@@ -294,13 +289,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                            keys.map(k => k -> current.get(k)).toMap
                          }
 
-                       def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
-                         repoStates.toList.traverse_ { case (key, state) =>
-                           states.update(_.updated(key, state))
-                         }
-
-                       def deleteMany(keys: List[String]): IO[Unit] =
-                         keys.traverse_(key => states.update(_ - key))
+                       def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] =
+                         states.update(current => (current -- deletes) ++ upserts)
                      }
 
                      def name: String = "tracking"

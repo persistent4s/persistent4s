@@ -19,32 +19,19 @@ package persistent4s
 import cats.Applicative
 import cats.syntax.all.*
 
-/** A convenience base trait for projections that perform side effects (e.g. updating a read model) without needing
-  * keyed state management.
+/** A [[Projection]] that reacts to events with side effects (e.g. updating a read model) without keeping any state.
+  * Implementors provide [[name]], [[filter]], and a single-argument [[handle]]; key resolution and state persistence
+  * are no-ops.
   *
-  * Unlike the full [[Projection]] trait, `StatelessProjection` does not fetch or persist any state between events.
-  * Implementors only need to provide [[name]], [[filter]], and a single-argument [[handle]] that receives the raw
-  * event. All events are routed through a single virtual key (`Unit`), so `fetchState`, `resolveKeys`, and `persist`
-  * are all no-ops.
+  * Delivery is at-least-once, so `handle` may run more than once for the same event after a restart — keep it
+  * idempotent.
   *
-  * Because there is no state, the at-least-once delivery guarantee still applies: `handle` may be called more than once
-  * for the same event after a failure and restart, so implementations should be idempotent.
-  *
-  * @tparam F
-  *   the effect type, such as IO
-  * @tparam A
-  *   the event type, which must extend the Event trait
+  * @tparam F the effect type, such as IO
+  * @tparam A the event type, which must extend the Event trait
   */
-trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A, scala.Unit, scala.Unit] {
+trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A, Unit, Unit] {
 
-  final val repository: Repository[F, Unit, Unit] = new Repository[F, Unit, Unit] {
-    override def findMany(keys: List[Unit]): F[Map[Unit, Option[Unit]]] =
-      Applicative[F].pure(keys.map(_ -> None).toMap)
-
-    override def upsertMany(states: Map[Unit, Unit]): F[Unit] = Applicative[F].unit
-
-    override def deleteMany(keys: List[Unit]): F[Unit] = Applicative[F].unit
-  }
+  final val repository: Repository[F, Unit, Unit] = Repository.empty
 
   override def resolveKeys(event: EventEnvelope[A]): List[Unit] = List(())
 

@@ -16,48 +16,41 @@
 
 package persistent4s
 
-/** A Repository defines how a Projection fetches and persists its state. The projector will call `fetchStates` to get
-  * the current state for relevant keys before processing a batch of events, and will call `upsertMany` and `deleteMany`
-  * after processing a batch to save the updated state. The implementation of the repository is up to the user and can
-  * use any durable storage mechanism, such as a database or a key-value store. The only requirement is that it provides
-  * the specified methods for fetching and persisting state.
+import cats.Applicative
+
+/** Durable storage for a [[Projection]]'s state. Before processing a batch of events the projector calls [[findMany]]
+  * for the affected keys, and afterwards calls [[persist]] with the resulting changes. The backing store is up to the
+  * implementation (SQL database, key-value store, etc.).
   *
   * @tparam F
   *   the effect type, such as IO
   * @tparam K
-  *   the key type for fetching and persisting state
+  *   the state key type
   * @tparam S
-  *   the state type for the projection
+  *   the state value type
   */
 trait Repository[F[_], K, S]:
 
-  /** Fetch the current state for a list of keys. The result is a map from key to an optional value, where None
-    * indicates that no value exists for the key.
+  /** Fetch the current state for the given keys. Keys with no stored state map to `None`.
     *
-    * @param keys
-    *   the list of keys to fetch
-    * @return
-    *   a map from key to an optional value, where None indicates that no value exists for the key
+    * @param keys the keys to look up
     */
   def findMany(keys: List[K]): F[Map[K, Option[S]]]
 
-  /** Persist a batch of updated states. The input is a map from key to value, where each entry represents the new state
-    * for that key. The implementation should upsert these values in durable storage so that they can be retrieved later
-    * by `fetchStates`.
+  /** Apply the state changes from a single batch: upsert each entry in `upserts`, remove each key in `deletes`. The two
+    * should be applied atomically (ideally in one transaction) so a failure never leaves state partially applied.
     *
-    * @param states
-    *   a map from key to value, where each entry represents the new state for that key
-    * @return
-    *   an effect representing the completion of the operation
+    * @param upserts the new state for each key
+    * @param deletes the keys whose state should be removed
     */
-  def upsertMany(states: Map[K, S]): F[Unit]
+  def persist(upserts: Map[K, S], deletes: List[K]): F[Unit]
 
-  /** Delete a batch of keys and their associated state. The implementation should remove these keys from durable
-    * storage so that they are no longer returned by `fetchStates`.
-    *
-    * @param keys
-    *   the list of keys to delete
-    * @return
-    *   an effect representing the completion of the operation
-    */
-  def deleteMany(keys: List[K]): F[Unit]
+object Repository:
+
+  /** A no-op repository for projections that keep no state. */
+  def empty[F[_]: Applicative]: Repository[F, Unit, Unit] =
+    new Repository[F, Unit, Unit]:
+      def findMany(keys: List[Unit]): F[Map[Unit, Option[Unit]]] =
+        Applicative[F].pure(keys.map(_ -> None).toMap)
+      def persist(upserts: Map[Unit, Unit], deletes: List[Unit]): F[Unit] =
+        Applicative[F].unit

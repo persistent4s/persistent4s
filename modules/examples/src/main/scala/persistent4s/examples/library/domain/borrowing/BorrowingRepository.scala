@@ -41,19 +41,24 @@ final class BorrowingRepository[F[_]: Async] private (
         keys.map(k => k -> found.get(k)).toMap
       }
 
-  override def upsertMany(states: Map[(UUID, UUID), BorrowingState]): F[Unit] =
-    if states.isEmpty then Async[F].unit
+  override def persist(upserts: Map[(UUID, UUID), BorrowingState], deletes: List[(UUID, UUID)]): F[Unit] =
+    if upserts.isEmpty && deletes.isEmpty then Async[F].unit
     else
-      states.toList
-        .grouped(MaxUpsertChunkSize)
-        .toList
-        .traverse_(chunk => pool.use(_.execute(upsertManyCommand(chunk.size))(chunk.map(_._2))).void)
-
-  override def deleteMany(keys: List[(UUID, UUID)]): F[Unit] =
-    if keys.isEmpty then Async[F].unit
-    else
-      val (bookIds, memberIds) = keys.unzip
-      pool.use(_.execute(deleteManyCommand(keys.size))((bookIds, memberIds))).void
+      pool.use { session =>
+        session.transaction.use { _ =>
+          val deleteF =
+            if deletes.isEmpty then Async[F].unit
+            else
+              val (bookIds, memberIds) = deletes.unzip
+              session.execute(deleteManyCommand(deletes.size))((bookIds, memberIds)).void
+          val upsertF =
+            upserts.toList
+              .grouped(MaxUpsertChunkSize)
+              .toList
+              .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk.map(_._2)).void)
+          deleteF *> upsertF
+        }
+      }
 
   def find(key: (UUID, UUID)): F[Option[BorrowingState]] =
     pool.use(_.option(findQuery)(key))

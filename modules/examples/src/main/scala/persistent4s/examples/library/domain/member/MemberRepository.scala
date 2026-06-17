@@ -40,17 +40,22 @@ final class MemberRepository[F[_]: Async] private (
         keys.map(k => k -> found.get(k)).toMap
       }
 
-  override def upsertMany(states: Map[UUID, MemberState]): F[Unit] =
-    if states.isEmpty then Async[F].unit
+  override def persist(upserts: Map[UUID, MemberState], deletes: List[UUID]): F[Unit] =
+    if upserts.isEmpty && deletes.isEmpty then Async[F].unit
     else
-      states.toList
-        .grouped(MaxUpsertChunkSize)
-        .toList
-        .traverse_(chunk => pool.use(_.execute(upsertManyCommand(chunk.size))(chunk.map(_._2))).void)
-
-  override def deleteMany(keys: List[UUID]): F[Unit] =
-    if keys.isEmpty then Async[F].unit
-    else pool.use(_.execute(deleteManyCommand(keys.size))(keys)).void
+      pool.use { session =>
+        session.transaction.use { _ =>
+          val deleteF =
+            if deletes.isEmpty then Async[F].unit
+            else session.execute(deleteManyCommand(deletes.size))(deletes).void
+          val upsertF =
+            upserts.toList
+              .grouped(MaxUpsertChunkSize)
+              .toList
+              .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk.map(_._2)).void)
+          deleteF *> upsertF
+        }
+      }
 
   def find(key: UUID): F[Option[MemberState]] =
     pool.use(_.option(findQuery)(key))
