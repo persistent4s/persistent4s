@@ -34,31 +34,24 @@ final case class BorrowingState(
 
 final class BorrowingProjection[F[_]: Async] private (
   protected val repository: Repository[F, (UUID, UUID), BorrowingState],
-) extends Projection[F, LibraryEvent, (UUID, UUID), BorrowingState]:
+) extends EventSourcedProjection[F, LibraryEvent, (UUID, UUID), BorrowingState]:
 
   override val name: String = "borrowing-projection"
 
-  override val filter: Set[EventTypeName] = Set(
-    EventTypeName.of[BookBorrowed],
-    EventTypeName.of[BookReturned],
+  override val handlers = List(
+    onF[BookBorrowed](e => (e.bookId, e.memberId)) { (state, e) =>
+      state match
+        case Some(s) if s.returnedAt.isEmpty =>
+          Async[F].raiseError(new RuntimeException(s"Book ${e.bookId} is already borrowed by member ${e.memberId}"))
+        case _ =>
+          BorrowingState(e.bookId, e.memberId, e.borrowedAt, e.dueDate, None).some.pure[F]
+    },
+    onF[BookReturned](e => (e.bookId, e.memberId)) { (state, e) =>
+      state match
+        case Some(s) => s.copy(returnedAt = Some(e.returnedAt)).some.pure[F]
+        case None    => Async[F].raiseError(new RuntimeException(s"Cannot return non-borrowed book ${e.bookId}"))
+    },
   )
-
-  override def resolveKeys(event: EventEnvelope[LibraryEvent]): List[(UUID, UUID)] = event.payload match
-    case BookBorrowed(bookId, memberId, _, _) => List((bookId, memberId))
-    case BookReturned(bookId, memberId, _)    => List((bookId, memberId))
-    case _                                    => Nil
-
-  override def handle(state: Option[BorrowingState], event: EventEnvelope[LibraryEvent]): F[Option[BorrowingState]] =
-    (state, event.payload) match
-      case (None, BookBorrowed(bookId, memberId, borrowedAt, dueDate)) =>
-        BorrowingState(bookId, memberId, borrowedAt, dueDate, None).some.pure[F]
-      case (Some(borrowingState), BookBorrowed(bookId, memberId, borrowedAt, dueDate))
-          if borrowingState.returnedAt.nonEmpty =>
-        BorrowingState(bookId, memberId, borrowedAt, dueDate, None).some.pure[F]
-      case (Some(borrowingState), BookReturned(bookId, memberId, returnedAt)) =>
-        BorrowingState(bookId, memberId, borrowingState.borrowedAt, borrowingState.dueDate, Some(returnedAt)).some
-          .pure[F]
-      case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
 
 object BorrowingProjection:
 

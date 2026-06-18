@@ -32,31 +32,21 @@ final case class MemberState(
 
 final class MemberProjection[F[_]: Async] private (
   protected val repository: Repository[F, UUID, MemberState],
-) extends Projection[F, LibraryEvent, UUID, MemberState]:
+) extends EventSourcedProjection[F, LibraryEvent, UUID, MemberState]:
 
   override val name: String = "member-projection"
 
-  override val filter: Set[EventTypeName] = Set(
-    EventTypeName.of[MemberRegistered],
-    EventTypeName.of[BookBorrowed],
-    EventTypeName.of[BookReturned],
+  override val handlers = List(
+    on[MemberRegistered](_.memberId) { (_, e) =>
+      MemberState(e.memberId, e.name, e.email, borrowedBooks = 0).some
+    },
+    on[BookBorrowed](_.memberId) { (state, _) =>
+      state.map(s => s.copy(borrowedBooks = s.borrowedBooks + 1))
+    },
+    on[BookReturned](_.memberId) { (state, _) =>
+      state.map(s => s.copy(borrowedBooks = s.borrowedBooks - 1))
+    },
   )
-
-  override def resolveKeys(event: EventEnvelope[LibraryEvent]): List[UUID] = event.payload match
-    case MemberRegistered(memberId, _, _) => List(memberId)
-    case BookBorrowed(_, memberId, _, _)  => List(memberId)
-    case BookReturned(_, memberId, _)     => List(memberId)
-    case _                                => Nil
-
-  override def handle(state: Option[MemberState], event: EventEnvelope[LibraryEvent]): F[Option[MemberState]] =
-    (state, event.payload) match
-      case (None, MemberRegistered(memberId, name, email)) =>
-        MemberState(memberId, name, email, borrowedBooks = 0).some.pure[F]
-      case (Some(s), BookBorrowed(_, memberId, _, _)) =>
-        Some(s.copy(borrowedBooks = s.borrowedBooks + 1)).pure[F]
-      case (Some(s), BookReturned(_, memberId, _)) =>
-        Some(s.copy(borrowedBooks = s.borrowedBooks - 1)).pure[F]
-      case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
 
 object MemberProjection:
 

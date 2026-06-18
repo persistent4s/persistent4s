@@ -33,31 +33,21 @@ final case class BookState(
 
 final class BookProjection[F[_]: Async] private (
   protected val repository: Repository[F, UUID, BookState],
-) extends Projection[F, LibraryEvent, UUID, BookState]:
+) extends EventSourcedProjection[F, LibraryEvent, UUID, BookState]:
 
   override val name: String = "book-projection"
 
-  override val filter: Set[EventTypeName] = Set(
-    EventTypeName.of[BookAdded],
-    EventTypeName.of[BookBorrowed],
-    EventTypeName.of[BookReturned],
+  override val handlers = List(
+    on[BookAdded](_.bookId) { (_, e) =>
+      BookState(e.bookId, e.title, e.author, e.totalCopies, e.totalCopies).some
+    },
+    on[BookBorrowed](_.bookId) { (state, _) =>
+      state.map(s => s.copy(availableCopies = s.availableCopies - 1))
+    },
+    on[BookReturned](_.bookId) { (state, _) =>
+      state.map(s => s.copy(availableCopies = s.availableCopies + 1))
+    },
   )
-
-  override def resolveKeys(event: EventEnvelope[LibraryEvent]): List[UUID] = event.payload match
-    case BookAdded(bookId, _, _, _)    => List(bookId)
-    case BookBorrowed(bookId, _, _, _) => List(bookId)
-    case BookReturned(bookId, _, _)    => List(bookId)
-    case _                             => Nil
-
-  override def handle(state: Option[BookState], event: EventEnvelope[LibraryEvent]): F[Option[BookState]] =
-    (state, event.payload) match
-      case (None, BookAdded(bookId, title, author, totalCopies)) =>
-        BookState(bookId, title, author, totalCopies, totalCopies).some.pure[F]
-      case (Some(s), BookBorrowed(bookId, _, _, _)) =>
-        Some(s.copy(availableCopies = s.availableCopies - 1)).pure[F]
-      case (Some(s), BookReturned(bookId, _, _)) =>
-        Some(s.copy(availableCopies = s.availableCopies + 1)).pure[F]
-      case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
 
 object BookProjection:
 
