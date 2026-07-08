@@ -23,6 +23,8 @@ import cats.effect.Deferred
 import cats.effect.Ref
 import cats.syntax.all.*
 import fs2.Stream
+import fs2.concurrent.Topic
+import java.util.UUID
 import persistent4s.EventStoreNotification.*
 
 /** A [[Projector]] implementation that processes events for distinct keys in parallel within each batch.
@@ -66,9 +68,13 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
     stateCache: Map[K, Option[S]],
     dirtyKeys: Set[K],
     lastProcessedPosition: Option[Long],
+    processedEvents: List[EventEnvelope[A]] = Nil,
   )
 
-  override def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit] = {
+  override def run[K, S](
+    projection: Projection[F, A, K, S],
+    topic: Option[Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])]] = None,
+  ): Stream[F, Unit] = {
 
     def persistProgress(
       progress: BatchProgress[K, S],
@@ -88,7 +94,17 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         _ <- projection.persistStates(statesToPersist)
         _ <- checkpoint.save(next)
         _ <- projectionState.set(next)
+        _ <- publishResults(progress)
       } yield ()
+
+    def publishResults(progress: BatchProgress[K, S]): F[Unit] =
+      topic.traverse_ { t =>
+        progress.processedEvents.traverse_ { event =>
+          val keys = projection.resolveKeys(event)
+          val payload = keys.map(k => k -> progress.stateCache.getOrElse(k, None)).toMap
+          t.publish1((event.metadata.id, Right(payload))).void
+        }
+      }
 
     def processEvent(
       progress: BatchProgress[K, S],
@@ -107,6 +123,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
             stateCache = stateCacheN,
             dirtyKeys = progress.dirtyKeys ++ eventKeys,
             lastProcessedPosition = Some(event.metadata.globalPosition),
+            processedEvents = progress.processedEvents :+ event,
           )
         }
 
@@ -137,6 +154,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
                      stateCache = keyStatesList.toMap,
                      dirtyKeys = keyStatesList.map(_._1).toSet,
                      lastProcessedPosition = Some(batch.last.metadata.globalPosition),
+                     processedEvents = batch,
                    )
                    persistProgress(finalProgress, projectionState)
 
@@ -149,7 +167,11 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
                    batch
                      .foldLeftM(progress0) { (progress, event) =>
                        processEvent(progress, event).handleErrorWith { error =>
-                         persistProgress(progress, projectionState, Some(error)) *> Async[F].raiseError(error)
+                         persistProgress(progress, projectionState, Some(error)) *>
+                           topic.traverse_(_.publish1((event.metadata.id, Left(error))).void) *>
+                           Async[F].raiseError(
+                             error,
+                           )
                        }
                      }
                      .flatMap(progress => persistProgress(progress, projectionState))
