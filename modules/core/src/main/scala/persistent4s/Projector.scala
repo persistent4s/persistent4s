@@ -17,6 +17,8 @@
 package persistent4s
 
 import fs2.Stream
+import fs2.concurrent.Topic
+import java.util.UUID
 
 /** A Projector is responsible for running a Projection. It manages the lifecycle of the projection, including loading
   * the last checkpoint, subscribing to event notifications, and ensuring that events are processed in the correct
@@ -45,8 +47,14 @@ trait Projector[F[_], A <: Event]:
     *
     * @param projection
     *   the projection to run
+    * @param topic
+    *   an optional topic to publish the projection state after a batch is processed. Used by [[SyncCommandHandler]] to
+    *   wait for the projection to catch up before returning from a command.
     */
-  def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit]
+  def run[K, S](
+    projection: Projection[F, A, K, S],
+    topic: Option[Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])]],
+  ): Stream[F, Unit]
 
 object Projector:
 
