@@ -87,7 +87,7 @@ object LibraryModule:
       _                 <- projector.run(bookProj, Some(bookTopic)).compile.drain.background
       _                 <- projector.run(memberProj).compile.drain.background
       _                 <- projector.run(borrowingProj).compile.drain.background
-      addBookSyncHandler = SyncCommandHandler(AddBookHandler, bookTopic, timeout = 5.seconds)
+      addBookSyncHandler = SyncCommandHandler(AddBookHandler, bookTopic, bookProj.filter, timeout = 5.seconds)
     yield new LibraryModule(store, bookProj, memberProj, borrowingProj, bookRepo, memberRepo, borrowingRepo,
       addBookSyncHandler)
 

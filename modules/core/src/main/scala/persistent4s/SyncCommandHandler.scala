@@ -41,6 +41,9 @@ import scala.concurrent.duration.FiniteDuration
   *   the underlying command handler
   * @param topic
   *   the topic a [[Projector]] publishes to after persisting - see [[Projector.run]]
+  * @param filter
+  *   the target projection's event type filter (see Projection.filter): events the command produces outside this set
+  *   are not waited on, since the projection would never publish for them
   * @param timeout
   *   how long to wait for the projection to catch up before failing
   * @param maxQueued
@@ -49,6 +52,7 @@ import scala.concurrent.duration.FiniteDuration
 final case class SyncCommandHandler[F[_], C, S, E <: Event, K, PS](
   handler: CommandHandler[C, S, E],
   topic: Topic[F, (UUID, Either[Throwable, Map[K, Option[PS]]])],
+  filter: Set[EventTypeName],
   timeout: FiniteDuration,
   maxQueued: Int = 256,
 ):
@@ -77,7 +81,7 @@ final case class SyncCommandHandler[F[_], C, S, E <: Event, K, PS](
     topic.subscribeAwait(maxQueued).use { stream =>
       for
         envelopes <- handler.run(command)
-        ids        = envelopes.map(_.metadata.id).toSet
+        ids        = envelopes.filter(e => filter.contains(e.metadata.eventType)).map(_.metadata.id).toSet
         result    <-
           if ids.isEmpty then F.pure(Map.empty[K, Option[PS]])
           else F.timeout(awaitAll(stream, ids), timeout)
