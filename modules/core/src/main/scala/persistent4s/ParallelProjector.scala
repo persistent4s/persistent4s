@@ -16,6 +16,7 @@
 
 package persistent4s
 
+import scala.concurrent.duration.*
 import cats.Applicative
 import cats.Parallel
 import cats.effect.Async
@@ -51,6 +52,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
   checkpoint: ProjectionCheckpoint[F],
   batchSize: Int = 100,
   maxBatchPerPass: Int = 10,
+  publishTimeout: FiniteDuration = 1.second,
 ) extends Projector[F, A]:
 
   final private case class Work(
@@ -102,7 +104,7 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         progress.processedEvents.traverse_ { event =>
           val keys = projection.resolveKeys(event)
           val payload = keys.map(k => k -> progress.stateCache.getOrElse(k, None)).toMap
-          t.publish1((event.metadata.id, Right(payload))).void
+          Async[F].timeoutTo(t.publish1((event.metadata.id, Right(payload))).void, publishTimeout, Applicative[F].unit)
         }
       }
 
@@ -168,7 +170,13 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
                      .foldLeftM(progress0) { (progress, event) =>
                        processEvent(progress, event).handleErrorWith { error =>
                          persistProgress(progress, projectionState, Some(error)) *>
-                           topic.traverse_(_.publish1((event.metadata.id, Left(error))).void) *>
+                           topic.traverse_(t =>
+                             Async[F].timeoutTo(
+                               t.publish1((event.metadata.id, Left(error))).void,
+                               publishTimeout,
+                               Applicative[F].unit,
+                             ),
+                           ) *>
                            Async[F].raiseError(
                              error,
                            )
