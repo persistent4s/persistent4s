@@ -59,7 +59,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       eventFilter: EventFilter,
       expectedIndex: Long,
       evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
-    ): IO[List[A]] =
+    ): IO[List[EventEnvelope[A]]] =
       events.modify { current =>
         val relevant = current.filter(matches(_, eventFilter))
         val actualIdx = relevant.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
@@ -79,13 +79,15 @@ object ParallelProjectorSuite extends SimpleIOSuite:
               evt,
             )
           }
-          (current ++ newEvts, Right(evts.flatten.map(_._5)))
+          (current ++ newEvts, Right(newEvts))
       }.flatMap {
         case Left(e)       => IO.raiseError(e)
         case Right(result) => queue.offer(EventsAppended).as(result.toList)
       }
 
-    def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): IO[List[A]] =
+    def appendUnchecked(
+      events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+    ): IO[List[EventEnvelope[A]]] =
       IO.pure(List.empty) // not needed for these tests
 
     def readFrom(

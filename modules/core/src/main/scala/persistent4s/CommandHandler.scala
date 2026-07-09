@@ -62,12 +62,12 @@ trait CommandHandler[C, S, E <: Event]:
     */
   def run[F[_]: Concurrent](command: C)(using
     eventStore: EventStore[F, E],
-  ): F[List[E]] =
+  ): F[List[EventEnvelope[E]]] =
     runWithRetry(command, maxRetries)
 
   private def runWithRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
     eventStore: EventStore[F, E],
-  ): F[List[E]] =
+  ): F[List[EventEnvelope[E]]] =
     attempt(command).handleErrorWith {
       case _: IndexConflictException if retriesLeft > 0 =>
         runWithRetry(command, retriesLeft - 1)
@@ -77,7 +77,7 @@ trait CommandHandler[C, S, E <: Event]:
 
   private def attempt[F[_]: Concurrent](
     command: C,
-  )(using eventStore: EventStore[F, E]): F[List[E]] =
+  )(using eventStore: EventStore[F, E]): F[List[EventEnvelope[E]]] =
     for
       tags      <- Concurrent[F].pure(tags(command))
       filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)

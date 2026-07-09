@@ -50,14 +50,14 @@ trait EventStore[F[_], A <: Event]:
     *   one or more lists of events to append, each event paired with its tags, type name, and a boolean indicating if
     *   it is external
     * @return
-    *   a F[List[A]] that completes when the events have been written, or fails with [[IndexConflictException]] on
-    *   conflict
+    *   a F[List[EvenEnvelope[A]]] that completes when the events have been written, or fails with
+    *   [[IndexConflictException]] on conflict
     */
   def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
     events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
-  ): F[List[A]]
+  ): F[List[EventEnvelope[A]]]
 
   /** Append events to the event store WITHOUT optimistic concurrency control.
     *
@@ -85,10 +85,9 @@ trait EventStore[F[_], A <: Event]:
     *   one or more lists of events to append, each event paired with its optional id, tags, type name, an `isExternal`
     *   flag and the payload itself. See [[append]] for the per-element semantics.
     * @return
-    *   a `F[Unit]` that completes when the events have been written. May fail at the storage layer if a duplicate
-    *   `event_id` is detected — see the idempotency note above.
+    *   a F[List[EvenEnvelope[A]]] that completes when the events have been written.
     */
-  def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): F[List[A]]
+  def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): F[List[EventEnvelope[A]]]
 
   /** Read events from the event store starting from a specific position, filtering by event types and tags. The
     * returned Stream will emit EventEnvelope[A] instances that match the specified event types and tags. The Stream
