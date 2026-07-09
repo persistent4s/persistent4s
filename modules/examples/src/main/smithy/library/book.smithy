@@ -29,10 +29,12 @@ operation AddBook {
 
     output := {
         @required
-        bookId: String
+        book: BookItem
     }
 
-    errors: [ValidationError]
+    errors: [
+        ValidationError
+    ]
 }
 
 @http(method: "GET", uri: "/books")
@@ -58,7 +60,9 @@ operation GetBook {
         book: BookItem
     }
 
-    errors: [NotFoundError]
+    errors: [
+        NotFoundError
+    ]
 }
 
 list BookList {
