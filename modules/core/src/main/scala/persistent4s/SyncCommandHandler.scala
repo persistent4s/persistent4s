@@ -1,6 +1,23 @@
+/*
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package persistent4s
 
 import cats.effect.Temporal
+import cats.effect.Concurrent
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.Topic
@@ -40,7 +57,7 @@ final case class SyncCommandHandler[F[_], C, S, E <: Event, K, PS](
     * the projection's own error if any of the events fail to process, or with a timeout error if the projection doesn't
     * catch up in time. The events are appended either way - this only gates the return, it cannot undo the write.
     */
-  def runSync(command: C)(using F: Temporal[F], eventStore: EventStore[F, E]): F[Map[K, Option[PS]]] =
+  def runSync(command: C)(using eventStore: EventStore[F, E])(using F: Temporal[F]): F[Map[K, Option[PS]]] =
 
     def awaitAll(
       stream: Stream[F, (UUID, Either[Throwable, Map[K, Option[PS]]])],
@@ -66,3 +83,6 @@ final case class SyncCommandHandler[F[_], C, S, E <: Event, K, PS](
           else F.timeout(awaitAll(stream, ids), timeout)
       yield result
     }
+
+  def run(command: C)(using eventStore: EventStore[F, E])(using F: Concurrent[F]): F[List[EventEnvelope[E]]] =
+    handler.run(command)
