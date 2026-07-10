@@ -1,0 +1,26 @@
+apply plugin: 'java'
+apply plugin: 'maven'
+
+group = 'io.github.persistent4s'
+version = '0.2.3-8-40113ff-SNAPSHOT'
+
+description = """persistent4s-core"""
+
+sourceCompatibility = 1.5
+targetCompatibility = 1.5
+
+
+
+repositories {
+        
+     maven { url "https://repo.maven.apache.org/maven2" }
+}
+dependencies {
+    compile group: 'org.scala-lang', name: 'scala3-library_3', version:'3.8.3'
+    compile group: 'org.typelevel', name: 'cats-effect_3', version:'3.7.0'
+    compile group: 'co.fs2', name: 'fs2-core_3', version:'3.13.0'
+    compile group: 'org.typelevel', name: 'log4cats-slf4j_3', version:'2.8.0'
+    compile group: 'org.typelevel', name: 'otel4s-core_3', version:'0.16.0'
+    testCompile group: 'org.typelevel', name: 'weaver-cats_3', version:'0.12.0'
+    compileOnly group: 'org.typelevel', name: 'scalac-compat-annotation_3', version:'0.1.4'
+}
