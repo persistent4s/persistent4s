@@ -34,6 +34,7 @@ operation AddBook {
 
     errors: [
         ValidationError
+        ProjectionTimeoutError
     ]
 }
 

@@ -41,8 +41,11 @@ class BookServiceImpl(
     yield AddBookOutput(
       BookItem(bookState.bookId.toString(), bookState.title, bookState.author, bookState.totalCopies,
         bookState.availableCopies),
-    )).adaptError { case e =>
-      ValidationError(e.getMessage)
+    )).adaptError {
+      case _: java.util.concurrent.TimeoutException =>
+        ProjectionTimeoutError("The book was created, but its view hasn't caught yet - please retry your read")
+      case e =>
+        ValidationError(e.getMessage)
     }
 
   def getBooks(): IO[GetBooksOutput] =

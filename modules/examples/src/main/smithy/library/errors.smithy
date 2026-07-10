@@ -15,3 +15,10 @@ structure ValidationError {
     @required
     message: String
 }
+
+@error("server")
+@httpError(503)
+structure ProjectionTimeoutError {
+    @required
+    message: String
+}
