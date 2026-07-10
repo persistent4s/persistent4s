@@ -50,7 +50,7 @@ trait EventStore[F[_], A <: Event]:
     *   one or more lists of events to append, each event paired with its tags, type name, and a boolean indicating if
     *   it is external
     * @return
-    *   a F[List[EvenEnvelope[A]]] that completes when the events have been written, or fails with
+    *   a F[List[EventEnvelope[A]]] that completes when the events have been written, or fails with
     *   [[IndexConflictException]] on conflict
     */
   def append(
@@ -77,15 +77,15 @@ trait EventStore[F[_], A <: Event]:
     *
     * At-least-once delivery from a broker means the same event may arrive twice. To make this method idempotent in the
     * face of redelivery, pass the source event's UUID via the tuple's first element. The unique constraint on
-    * `event_id` then rejects duplicates at the storage layer, and the caller can catch that error and treat it as
-    * "already imported" (typically: commit the broker offset and continue). Passing `None` skips this safeguard and is
-    * appropriate only if duplicates are impossible by construction.
+    * `event_id` then makes a duplicate append a silent no-op: the original row is left untouched and its existing
+    * metadata (position, timestamp) is returned rather than a new one being written. Passing `None` skips this
+    * safeguard and is appropriate only if duplicates are impossible by construction.
     *
     * @param events
     *   one or more lists of events to append, each event paired with its optional id, tags, type name, an `isExternal`
     *   flag and the payload itself. See [[append]] for the per-element semantics.
     * @return
-    *   a F[List[EvenEnvelope[A]]] that completes when the events have been written.
+    *   a F[List[EventEnvelope[A]]] that completes when the events have been written.
     */
   def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): F[List[EventEnvelope[A]]]
 
