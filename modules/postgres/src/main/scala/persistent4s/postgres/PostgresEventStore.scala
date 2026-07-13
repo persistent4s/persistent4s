@@ -273,16 +273,17 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     val tagsJson = tagsToJson(tags)
     val payloadJson = parseJson(codec.encode(event)).getOrElse(Json.obj())
     for
-      sequenceNumber *: returnedEventId *: recordedAt *: EmptyTuple <- eventIdOpt match
-                                                                         case Some(eventId) =>
-                                                                           session.unique(insertEventWithIdQuery)(
-                                                                             eventId *: eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
-                                                                           )
-                                                                         case None =>
-                                                                           session.unique(insertEventQuery)(
-                                                                             eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
-                                                                           )
-      _ <- insertEventTags(session, sequenceNumber, tags)
+      result <- eventIdOpt match
+                  case Some(eventId) =>
+                    session.unique(insertEventWithIdQuery)(
+                      eventId *: eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
+                    )
+                  case None =>
+                    session.unique(insertEventQuery)(
+                      eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
+                    )
+      sequenceNumber *: returnedEventId *: recordedAt *: EmptyTuple = result
+      _                                                            <- insertEventTags(session, sequenceNumber, tags)
     yield (sequenceNumber, returnedEventId, recordedAt)
 
   private def insertEventTags(
