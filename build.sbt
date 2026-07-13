@@ -70,7 +70,7 @@ val TestcontainersV = "1.21.4"
 
 val Fs2KafkaV = "4.0.0"
 
-val WeaverV = "0.12.0"
+val WeaverV = "0.13.0"
 
 val Http4sV = "0.23.34"
 
