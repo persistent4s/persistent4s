@@ -19,13 +19,21 @@ ThisBuild / Test / parallelExecution   := false
 ThisBuild / githubWorkflowJavaVersions := Seq(JavaSpec.temurin("17"))
 ThisBuild / githubWorkflowGeneratedCI  := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
-    if (job.id == "dependency-submission")
-      job.withPermissions(
-        Some(
-          Permissions.Specify.defaultRestrictive.withContents(PermissionValue.Write),
-        ),
-      )
-    else job
+    job.id match {
+      case "dependency-submission" =>
+        job.withPermissions(
+          Some(
+            Permissions.Specify.defaultRestrictive
+              .withContents(PermissionValue.Write),
+          ),
+        )
+
+      case "validate-steward" =>
+        job.withJavas(List(JavaSpec.temurin("17")))
+
+      case _ =>
+        job
+    }
   }
 }
 
