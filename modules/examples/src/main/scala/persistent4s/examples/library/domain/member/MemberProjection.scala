@@ -37,14 +37,20 @@ final class MemberProjection[F[_]: Async] private (
   override val name: String = "member-projection"
 
   override val handlers = List(
-    on[MemberRegistered](_.memberId) { (_, e) =>
-      MemberState(e.memberId, e.name, e.email, borrowedBooks = 0).some
+    onF[MemberRegistered](_.memberId) { (state, e) =>
+      state.fold(MemberState(e.memberId, e.name, e.email, borrowedBooks = 0).some.pure[F])(_ =>
+        Async[F].raiseError(new RuntimeException(s"Member ${e.memberId} already exists")),
+      )
     },
-    on[BookBorrowed](_.memberId) { (state, _) =>
-      state.map(s => s.copy(borrowedBooks = s.borrowedBooks + 1))
+    onF[BookBorrowed](_.memberId) { (state, e) =>
+      state.fold(Async[F].raiseError(new RuntimeException(s"State does not exist for member ${e.memberId}")))(s =>
+        s.copy(borrowedBooks = s.borrowedBooks + 1).some.pure[F],
+      )
     },
-    on[BookReturned](_.memberId) { (state, _) =>
-      state.map(s => s.copy(borrowedBooks = s.borrowedBooks - 1))
+    onF[BookReturned](_.memberId) { (state, e) =>
+      state.fold(Async[F].raiseError(new RuntimeException(s"State does not exist for member ${e.memberId}")))(s =>
+        s.copy(borrowedBooks = s.borrowedBooks - 1).some.pure[F],
+      )
     },
   )
 

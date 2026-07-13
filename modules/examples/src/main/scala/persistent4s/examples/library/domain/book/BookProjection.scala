@@ -38,14 +38,20 @@ final class BookProjection[F[_]: Async] private (
   override val name: String = "book-projection"
 
   override val handlers = List(
-    on[BookAdded](_.bookId) { (_, e) =>
-      BookState(e.bookId, e.title, e.author, e.totalCopies, e.totalCopies).some
+    onF[BookAdded](_.bookId) { (state, e) =>
+      state.fold(BookState(e.bookId, e.title, e.author, e.totalCopies, e.totalCopies).some.pure[F])(_ =>
+        Async[F].raiseError(new RuntimeException(s"Book ${e.bookId} already exists")),
+      )
     },
-    on[BookBorrowed](_.bookId) { (state, _) =>
-      state.map(s => s.copy(availableCopies = s.availableCopies - 1))
+    onF[BookBorrowed](_.bookId) { (state, e) =>
+      state.fold(Async[F].raiseError(new RuntimeException(s"State does not exist for book ${e.bookId}")))(s =>
+        s.copy(availableCopies = s.availableCopies - 1).some.pure[F],
+      )
     },
-    on[BookReturned](_.bookId) { (state, _) =>
-      state.map(s => s.copy(availableCopies = s.availableCopies + 1))
+    onF[BookReturned](_.bookId) { (state, e) =>
+      state.fold(Async[F].raiseError(new RuntimeException(s"State does not exist for book ${e.bookId}")))(s =>
+        s.copy(availableCopies = s.availableCopies + 1).some.pure[F],
+      )
     },
   )
 
