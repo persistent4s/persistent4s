@@ -2,7 +2,7 @@ import org.typelevel.sbt.gha.{PermissionValue, Permissions}
 
 ThisBuild / tlBaseVersion          := "0.2"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
-ThisBuild / scalaVersion           := "3.8.3"
+ThisBuild / scalaVersion           := "3.3.8"
 ThisBuild / tlJdkRelease           := Some(17)
 ThisBuild / organization           := "io.github.persistent4s"
 ThisBuild / organizationName       := "Antonio Jimenez and Bastien Jolidon"
