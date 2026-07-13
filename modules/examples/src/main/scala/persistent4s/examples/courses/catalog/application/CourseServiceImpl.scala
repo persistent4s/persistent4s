@@ -40,6 +40,7 @@ class CourseServiceImpl(repository: CourseRepository[IO])(using EventStore[IO, C
         case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
         case e                                       => ValidationError(e.getMessage)
       }
+      .void
 
   def closeCourse(courseId: String): IO[Unit] =
     CloseCourseHandler
@@ -48,6 +49,7 @@ class CourseServiceImpl(repository: CourseRepository[IO])(using EventStore[IO, C
         case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
         case e                                       => ValidationError(e.getMessage)
       }
+      .void
 
   def getCourses(): IO[GetCoursesOutput] =
     repository.getCourses.map(courses => GetCoursesOutput(courses.map(toCourseItem)))

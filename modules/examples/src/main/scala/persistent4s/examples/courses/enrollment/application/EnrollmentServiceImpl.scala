@@ -39,6 +39,7 @@ class EnrollmentServiceImpl(
           NotFoundError(e.getMessage)
         case e => ValidationError(e.getMessage)
       }
+      .void
 
   def dropStudent(studentId: String, courseId: String): IO[Unit] =
     DropStudentHandler
@@ -47,6 +48,7 @@ class EnrollmentServiceImpl(
         case e if e.getMessage.contains("No active enrollment") => NotFoundError(e.getMessage)
         case e                                                  => ValidationError(e.getMessage)
       }
+      .void
 
   def getEnrollments(): IO[GetEnrollmentsOutput] =
     repository.getEnrollments.map(rs => GetEnrollmentsOutput(rs.map(toItem)))
