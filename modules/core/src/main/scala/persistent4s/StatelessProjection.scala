@@ -26,8 +26,10 @@ import cats.syntax.all.*
   * Delivery is at-least-once, so `handle` may run more than once for the same event after a restart — keep it
   * idempotent.
   *
-  * @tparam F the effect type, such as IO
-  * @tparam A the event type, which must extend the Event trait
+  * @tparam F
+  *   the effect type, such as IO
+  * @tparam A
+  *   the event type, which must extend the Event trait
   */
 trait StatelessProjection[F[_]: Applicative, A <: Event] extends Projection[F, A, Unit, Unit] {
 

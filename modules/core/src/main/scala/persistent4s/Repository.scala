@@ -33,15 +33,18 @@ trait Repository[F[_], K, S]:
 
   /** Fetch the current state for the given keys. Keys with no stored state map to `None`.
     *
-    * @param keys the keys to look up
+    * @param keys
+    *   the keys to look up
     */
   def findMany(keys: List[K]): F[Map[K, Option[S]]]
 
   /** Apply the state changes from a single batch: upsert each entry in `upserts`, remove each key in `deletes`. The two
     * should be applied atomically (ideally in one transaction) so a failure never leaves state partially applied.
     *
-    * @param upserts the new state for each key
-    * @param deletes the keys whose state should be removed
+    * @param upserts
+    *   the new state for each key
+    * @param deletes
+    *   the keys whose state should be removed
     */
   def persist(upserts: Map[K, S], deletes: List[K]): F[Unit]
 

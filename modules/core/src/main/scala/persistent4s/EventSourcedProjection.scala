@@ -21,9 +21,9 @@ import cats.syntax.all.*
 
 import scala.reflect.ClassTag
 
-/** A handler for a single event type, registered by an [[EventSourcedProjection]]. It bundles the event type it
-  * applies to, how to resolve the affected keys from a payload, and how to fold that payload into the state. Build one
-  * with [[EventSourcedProjection.on]], [[EventSourcedProjection.onF]] or [[EventSourcedProjection.onMany]].
+/** A handler for a single event type, registered by an [[EventSourcedProjection]]. It bundles the event type it applies
+  * to, how to resolve the affected keys from a payload, and how to fold that payload into the state. Build one with
+  * [[EventSourcedProjection.on]], [[EventSourcedProjection.onF]] or [[EventSourcedProjection.onMany]].
   */
 final class EventHandler[F[_], A <: Event, K, S] private (
   private[persistent4s] val eventType: EventTypeName,

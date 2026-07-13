@@ -30,28 +30,33 @@ object EventSourcedProjectionSuite extends SimpleIOSuite:
   // ---------------------------------------------------------------------------
 
   sealed trait E extends Event
+
   final case class Created(id: String, value: Int) extends E
-  final case class Incremented(id: String)         extends E
-  final case class FannedOut(ids: List[String])    extends E
-  final case class Ignored(id: String)             extends E // intentionally has no handler
+
+  final case class Incremented(id: String) extends E
+
+  final case class FannedOut(ids: List[String]) extends E
+
+  final case class Ignored(id: String) extends E // intentionally has no handler
 
   private val noopRepository: Repository[IO, String, Int] = new Repository[IO, String, Int]:
-    def findMany(keys: List[String]): IO[Map[String, Option[Int]]]            = IO.pure(Map.empty)
+    def findMany(keys: List[String]): IO[Map[String, Option[Int]]] = IO.pure(Map.empty)
     def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] = IO.unit
 
   private val projection: EventSourcedProjection[IO, E, String, Int] =
     new EventSourcedProjection[IO, E, String, Int]:
-      val name                                                = "test"
-      protected val repository: Repository[IO, String, Int]   = noopRepository
+      val name = "test"
+      protected val repository: Repository[IO, String, Int] = noopRepository
       val handlers = List(
-        on[Created](_.id) { (_, e) => e.value.some },
-        on[Incremented](_.id) { (state, _) => state.map(_ + 1) },
-        onMany[FannedOut](_.ids) { (state, _) => IO.pure(state.map(_ + 10)) },
+        on[Created](_.id)((_, e) => e.value.some),
+        on[Incremented](_.id)((state, _) => state.map(_ + 1)),
+        onMany[FannedOut](_.ids)((state, _) => IO.pure(state.map(_ + 10))),
       )
 
   private def env(payload: E): EventEnvelope[E] =
     EventEnvelope(
-      EventMetadata(1L, UUID.randomUUID(), Set.empty, EventTypeName.fromInstance(payload), isExternal = false, Instant.now()),
+      EventMetadata(1L, UUID.randomUUID(), Set.empty, EventTypeName.fromInstance(payload), isExternal = false,
+        Instant.now()),
       payload,
     )
 
