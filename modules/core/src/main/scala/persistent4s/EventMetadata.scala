@@ -17,6 +17,7 @@
 package persistent4s
 
 import java.time.Instant
+import java.util.UUID
 
 /** EventMetadata contains metadata about an event, such as its global position in the event store, its tags, its type,
   * and the timestamp of when the event was created. This metadata is used to provide context about the event and can be
@@ -28,12 +29,16 @@ import java.time.Instant
   *   the tags associated with the event
   * @param eventType
   *   the type of the event
+  * @param isExternal
+  *   whether the event was come from an external domain or not
   * @param timestamp
   *   the timestamp of when the event was created
   */
 final case class EventMetadata(
   globalPosition: Long,
+  id: UUID,
   tags: Set[Tag],
   eventType: EventTypeName,
+  isExternal: Boolean,
   timestamp: Instant,
 )
