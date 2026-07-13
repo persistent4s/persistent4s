@@ -1,4 +1,4 @@
-import org.typelevel.sbt.gha.{PermissionValue, Permissions}
+import org.typelevel.sbt.gha.{JavaSpec, PermissionValue, Permissions}
 
 ThisBuild / tlBaseVersion          := "0.2"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
@@ -12,11 +12,12 @@ ThisBuild / developers             := List(
   tlGitHubDev("antoniojimeneznieto", "Antonio Jimenez"),
   tlGitHubDev("Bjolidon", "Bastien Jolidon"),
 )
-ThisBuild / scalafmtOnCompile         := false // recommended in Scala 3
-ThisBuild / testFrameworks            += new TestFramework("weaver.framework.CatsEffect")
-ThisBuild / Test / logBuffered        := false
-ThisBuild / Test / parallelExecution  := false
-ThisBuild / githubWorkflowGeneratedCI := {
+ThisBuild / scalafmtOnCompile          := false // recommended in Scala 3
+ThisBuild / testFrameworks             += new TestFramework("weaver.framework.CatsEffect")
+ThisBuild / Test / logBuffered         := false
+ThisBuild / Test / parallelExecution   := false
+ThisBuild / githubWorkflowJavaVersions := Seq(JavaSpec.temurin("17"))
+ThisBuild / githubWorkflowGeneratedCI  := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
     if (job.id == "dependency-submission")
       job.withPermissions(
