@@ -83,11 +83,13 @@ object PostgresEventStoreSuite extends IOSuite:
     tags: Set[Tag],
     value: String,
   ): IO[Unit] =
-    store.append(
-      EventFilter(Set.empty, tags),
-      expectedIndex,
-      List((None, tags, EventTypeName.of[TestEvent], false, TestEvent(value))),
-    )
+    store
+      .append(
+        EventFilter(Set.empty, tags),
+        expectedIndex,
+        List((None, tags, EventTypeName.of[TestEvent], false, TestEvent(value))),
+      )
+      .void
 
   private def appendUncheckedOne(
     store: PostgresEventStore[IO, TestEvent],
@@ -95,9 +97,11 @@ object PostgresEventStoreSuite extends IOSuite:
     value: String,
     eventId: Option[UUID] = None,
   ): IO[Unit] =
-    store.appendUnchecked(
-      List((eventId, tags, EventTypeName.of[TestEvent], true, TestEvent(value))),
-    )
+    store
+      .appendUnchecked(
+        List((eventId, tags, EventTypeName.of[TestEvent], true, TestEvent(value))),
+      )
+      .void
 
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
     result match
@@ -247,6 +251,7 @@ object PostgresEventStoreSuite extends IOSuite:
                     0L,
                     List((None, Set(secondTag), EventTypeName.of[TestEvent], false, TestEvent("after"))),
                   )
+                  .void
                   .attempt
     yield expect(isConflict(result))
   }

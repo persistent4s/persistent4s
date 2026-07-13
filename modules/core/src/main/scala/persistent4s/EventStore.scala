@@ -43,13 +43,14 @@ trait EventStore[F[_], A <: Event]:
     *   one or more lists of events to append, each event paired with its tags, type name, and a boolean indicating if
     *   it is external
     * @return
-    *   a F[Unit] that completes when the events have been written, or fails with [[IndexConflictException]] on conflict
+    *   a F[List[A]] that completes when the events have been written, or fails with [[IndexConflictException]] on
+    *   conflict
     */
   def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
     events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
-  ): F[Unit]
+  ): F[List[A]]
 
   /** Append events to the event store WITHOUT optimistic concurrency control.
     *
@@ -75,7 +76,7 @@ trait EventStore[F[_], A <: Event]:
     *   one or more lists of events to append, each event paired with its optional id, tags, type name, an `isExternal`
     *   flag and the payload itself. See [[append]] for the per-element semantics.
     */
-  def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): F[Unit]
+  def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): F[List[A]]
 
   /** Read a snapshot of events from the store starting at `fromPosition` (exclusive). The stream completes once all
     * currently matching events have been emitted — it is a one-shot read, not a live subscription.
