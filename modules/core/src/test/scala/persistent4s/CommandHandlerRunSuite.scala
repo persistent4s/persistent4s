@@ -16,7 +16,6 @@
 
 package persistent4s
 
-import cats.Monad
 import cats.effect.{Async, Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
@@ -33,7 +32,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
   // Minimal in-memory EventStore for testing — no testkit dependency needed
   // ---------------------------------------------------------------------------
 
-  final class InMemoryEventStore[F[_]: Monad: Async, A <: Event] private (
+  final class InMemoryEventStore[F[_]: Async, A <: Event] private (
     store: Ref[F, Vector[EventEnvelope[A]]],
   ) extends EventStore[F, A]:
 
