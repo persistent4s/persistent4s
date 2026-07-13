@@ -28,9 +28,20 @@ ThisBuild / githubWorkflowGeneratedCI  := {
           ),
         )
 
+      // Overwrite the default Java version for the validate-steward job to use Java 17 instead of Java 11.
       case "validate-steward" =>
-        job.withJavas(List(JavaSpec.temurin("17")))
-
+        job
+          .withJavas(List(JavaSpec.temurin("17")))
+          .withSteps(
+            WorkflowStep.Run(
+              List(
+                """echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"""",
+                """echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"""",
+                """"$JAVA_HOME_17_X64/bin/java" -version""",
+              ),
+              name = Some("Select Java 17"),
+            ) :: job.steps,
+          )
       case _ =>
         job
     }
