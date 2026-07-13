@@ -37,6 +37,7 @@ class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore
         case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
         case e                                       => ValidationError(e.getMessage)
       }
+      .void
 
   def returnBook(bookId: String, memberId: String): IO[Unit] =
     ReturnBookHandler
@@ -45,6 +46,7 @@ class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore
         case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
         case e                                       => ValidationError(e.getMessage)
       }
+      .void
 
   def getBorrowings(): IO[GetBorrowingsOutput] =
     repository.getBorrowings.map(borrowings => GetBorrowingsOutput(borrowings.map(toBorrowingItem)))

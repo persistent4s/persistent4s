@@ -20,6 +20,7 @@ import cats.effect.{IO, Ref}
 import fs2.Stream
 import java.time.Instant
 import weaver.SimpleIOSuite
+import java.util.UUID
 
 object CommandHandlerSnapshotSuite extends SimpleIOSuite:
 
@@ -73,22 +74,36 @@ object CommandHandlerSnapshotSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Set[Tag], EventTypeName, TestEvent)]*,
-    ): IO[Unit] =
+      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+    ): IO[List[TestEvent]] =
       eventsRef.modify { current =>
         val relevant = current.filter(matches(_, eventFilter))
         val actualIdx = relevant.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
         if actualIdx != expectedIndex then (current, Left(IndexConflictException(expectedIndex, actualIdx)))
         else
           val lastPos = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvts = evts.flatten.zipWithIndex.map { case ((tags, typeName, evt), i) =>
-            EventEnvelope(EventMetadata(lastPos + i.toLong + 1L, tags, typeName, Instant.now()), evt)
+          val newEvts = evts.flatten.zipWithIndex.map { case ((id, tags, typeName, isExt, evt), i) =>
+            EventEnvelope(
+              EventMetadata(
+                lastPos + i.toLong + 1L,
+                id.getOrElse(UUID.randomUUID()),
+                tags,
+                typeName,
+                isExt,
+                Instant.now(),
+              ),
+              evt,
+            )
           }
-          (current ++ newEvts, Right(()))
+          (current ++ newEvts, Right(newEvts.map(_.payload).toList))
       }.flatMap {
-        case Left(e)  => IO.raiseError(e)
-        case Right(_) => IO.unit
+        case Left(e)     => IO.raiseError(e)
+        case Right(evts) => IO.pure(evts)
       }
+
+    def appendUnchecked(
+      events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+    ): IO[List[TestEvent]] = IO.pure(List.empty)
 
     def readFrom(
       fromPosition: Long,
@@ -209,17 +224,17 @@ object CommandHandlerSnapshotSuite extends SimpleIOSuite:
           _ <- eventStore.append(
                  EventFilter(tags = testTags),
                  0L,
-                 List((testTags, EventTypeName.of[Incremented], Incremented(10))),
+                 List((Some(UUID.randomUUID()), testTags, EventTypeName.of[Incremented], false, Incremented(10))),
                )
           _ <- eventStore.append(
                  EventFilter(tags = testTags),
                  1L,
-                 List((testTags, EventTypeName.of[Incremented], Incremented(10))),
+                 List((Some(UUID.randomUUID()), testTags, EventTypeName.of[Incremented], false, Incremented(10))),
                )
           _ <- eventStore.append(
                  EventFilter(tags = testTags),
                  2L,
-                 List((testTags, EventTypeName.of[Incremented], Incremented(10))),
+                 List((Some(UUID.randomUUID()), testTags, EventTypeName.of[Incremented], false, Incremented(10))),
                )
           // Inject a snapshot with an intentionally wrong state at position 3.
           // Correct total would be 30, but we use 999 to detect if events before the
@@ -229,7 +244,7 @@ object CommandHandlerSnapshotSuite extends SimpleIOSuite:
           _ <- eventStore.append(
                  EventFilter(tags = testTags),
                  3L,
-                 List((testTags, EventTypeName.of[Incremented], Incremented(1))),
+                 List((Some(UUID.randomUUID()), testTags, EventTypeName.of[Incremented], false, Incremented(1))),
                )
           // Run command: load snapshot(999, pos=3), read only the 1 event after pos 3, state=1000
           _ <- handler.run[IO](TestCommand(0, testTags))
@@ -251,12 +266,12 @@ object CommandHandlerSnapshotSuite extends SimpleIOSuite:
           _ <- eventStore.append(
                  EventFilter(tags = testTags),
                  0L,
-                 List((testTags, EventTypeName.of[Incremented], Incremented(5))),
+                 List((Some(UUID.randomUUID()), testTags, EventTypeName.of[Incremented], false, Incremented(5))),
                )
           _ <- eventStore.append(
                  EventFilter(tags = testTags),
                  1L,
-                 List((testTags, EventTypeName.of[Incremented], Incremented(5))),
+                 List((Some(UUID.randomUUID()), testTags, EventTypeName.of[Incremented], false, Incremented(5))),
                )
           // Inject a corrupted snapshot (simulates a stale snapshot after a state schema change)
           _ <- snapshotStore.injectRaw(handler.handlerId, testTags, "not-an-int", 2L)

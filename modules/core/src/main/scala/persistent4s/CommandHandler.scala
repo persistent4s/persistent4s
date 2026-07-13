@@ -72,14 +72,14 @@ trait CommandHandler[C, S, E <: Event]:
     eventStore: EventStore[F, E],
     snapshotStore: SnapshotStore[F],
     codec: SnapshotCodec[S],
-  ): F[Unit] =
+  ): F[List[E]] =
     runWithRetry(command, maxRetries)
 
   private def runWithRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
     eventStore: EventStore[F, E],
     snapshotStore: SnapshotStore[F],
     codec: SnapshotCodec[S],
-  ): F[Unit] =
+  ): F[List[E]] =
     attempt(command).handleErrorWith {
       case _: IndexConflictException if retriesLeft > 0 =>
         runWithRetry(command, retriesLeft - 1)
@@ -93,7 +93,7 @@ trait CommandHandler[C, S, E <: Event]:
     eventStore: EventStore[F, E],
     snapshotStore: SnapshotStore[F],
     codec: SnapshotCodec[S],
-  ): F[Unit] =
+  ): F[List[E]] =
     for
       tags          <- Concurrent[F].pure(tags(command))
       filter         = EventFilter(eventTypes.getOrElse(Set.empty), tags)
@@ -109,10 +109,10 @@ trait CommandHandler[C, S, E <: Event]:
       _ <- validate(state, command) match
              case Left(e)  => Concurrent[F].raiseError(e)
              case Right(_) => Concurrent[F].unit
-      decided = decide(state, command)
-      events  = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
-      _      <- eventStore.append(filter, index, events)
-      _      <-
+      decided         = decide(state, command)
+      events          = decided.map((tags, event) => (None, tags, EventTypeName.fromInstance(event), false, event))
+      appendedEvents <- eventStore.append(filter, index, events)
+      _              <-
         if envelopes.size >= snapshotThreshold then snapshotStore.save[S](handlerId, tags, Snapshot(state, index))
         else Concurrent[F].unit
-    yield ()
+    yield appendedEvents
