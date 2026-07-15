@@ -26,11 +26,13 @@ import persistent4s.EventStore
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.application.*
 import persistent4s.examples.library.domain.LibraryEvent
+import persistent4s.CommandHandlerMetrics
 
 object LibraryRoutes:
 
   def make(module: LibraryModule): Resource[IO, HttpRoutes[IO]] =
     given EventStore[IO, LibraryEvent] = module.store
+    given CommandHandlerMetrics[IO] = module.commandHandlerMetrics
 
     for
       bookRoutes <- SimpleRestJsonBuilder

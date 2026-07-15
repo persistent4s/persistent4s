@@ -19,8 +19,8 @@ package persistent4s
 import cats.effect.IO
 import cats.effect.Ref
 import fs2.Stream
-import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.Counter
 import weaver.SimpleIOSuite
 import java.util.UUID
 
@@ -28,7 +28,7 @@ object CommandHandlerSuite extends SimpleIOSuite:
 
   given Tracer[IO] = Tracer.Implicits.noop
 
-  given Meter[IO] = Meter.Implicits.noop
+  given CommandHandlerMetrics[IO] = CommandHandlerMetrics(Counter.noop[IO, Long])
 
   // ---------------------------------------------------------------------------
   // Test domain

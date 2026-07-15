@@ -40,6 +40,7 @@ import persistent4s.monitoring.MonitoringServer
 
 final class LibraryModule private (
   val store: EventStore[IO, LibraryEvent] & EventNotification[IO],
+  val commandHandlerMetrics: CommandHandlerMetrics[IO],
   val bookProjection: BookProjection[IO],
   val memberProjection: MemberProjection[IO],
   val borrowingProjection: BorrowingProjection[IO],
@@ -54,12 +55,13 @@ object LibraryModule:
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
     for
-      resources  <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
-      store       = resources.eventStore
-      checkpoint  = resources.checkpoint
-      monitoring <- MonitoringServer.make(checkpoint, resources.sendNotification)
-      config     <- Resource.eval(loadConfig(configPath))
-      viewPool   <- Session
+      resources             <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      store                  = resources.eventStore
+      checkpoint             = resources.checkpoint
+      commandHandlerMetrics <- Resource.eval(CommandHandlerMetrics.make[IO])
+      monitoring            <- MonitoringServer.make(checkpoint, resources.sendNotification)
+      config                <- Resource.eval(loadConfig(configPath))
+      viewPool              <- Session
                     .Builder[IO]
                     .withHost(config.host)
                     .withPort(config.port)
@@ -76,7 +78,8 @@ object LibraryModule:
       _             <- projector.run(bookProj).compile.drain.background
       _             <- projector.run(memberProj).compile.drain.background
       _             <- projector.run(borrowingProj).compile.drain.background
-    yield new LibraryModule(store, bookProj, memberProj, borrowingProj, bookRepo, memberRepo, borrowingRepo)
+    yield new LibraryModule(store, commandHandlerMetrics, bookProj, memberProj, borrowingProj, bookRepo, memberRepo,
+      borrowingRepo)
 
   private def loadConfig(configPath: String): IO[PostgresConfig] =
     IO.delay(ConfigSource.default.at(configPath).load[PostgresConfig]).flatMap {

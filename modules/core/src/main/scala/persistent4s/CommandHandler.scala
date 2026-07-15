@@ -19,7 +19,7 @@ package persistent4s
 import cats.effect.Concurrent
 import cats.syntax.all.*
 import org.typelevel.otel4s.Attribute
-import org.typelevel.otel4s.metrics.{Counter, Meter}
+import org.typelevel.otel4s.metrics.Counter
 import org.typelevel.otel4s.trace.Tracer
 
 /** A CommandHandler defines how a command is processed in an event-sourced system. It reads events from the store to
@@ -63,22 +63,16 @@ trait CommandHandler[C, S, E <: Event]:
     * (IndexConflictException), the command is automatically retried with fresh state up to maxRetries times. The
     * command is re-validated against the new state and may still succeed.
     */
-  def run[F[_]: Concurrent: Tracer: Meter](command: C)(using
+  def run[F[_]: Concurrent: Tracer](command: C)(using
     eventStore: EventStore[F, E],
+    metrics: CommandHandlerMetrics[F],
   ): F[List[E]] =
-    for
-      retriesCounter <- Meter[F]
-                          .counter[Long]("persistent4s.commandhandler.retries")
-                          .withDescription("Number of command handler retry attempts on conflict")
-                          .withUnit("{retries}")
-                          .create
-      cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
-      events <- Tracer[F]
-                  .spanBuilder("persistent4s.commandhandler.handle")
-                  .addAttribute(cmdAttr)
-                  .build
-                  .surround(runWithRetry(command, maxRetries, retriesCounter, cmdAttr))
-    yield events
+    val cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
+    Tracer[F]
+      .spanBuilder("peristent4s.commandhandler.handle")
+      .addAttribute(cmdAttr)
+      .build
+      .surround(runWithRetry(command, maxRetries, metrics.retries, cmdAttr))
 
   private def runWithRetry[F[_]: Concurrent](
     command: C,
