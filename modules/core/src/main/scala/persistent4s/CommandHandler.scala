@@ -69,7 +69,7 @@ trait CommandHandler[C, S, E <: Event]:
   ): F[List[E]] =
     val cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
     Tracer[F]
-      .spanBuilder("peristent4s.commandhandler.handle")
+      .spanBuilder("persistent4s.commandhandler.handle")
       .addAttribute(cmdAttr)
       .build
       .surround(runWithRetry(command, maxRetries, metrics.retries, cmdAttr))
