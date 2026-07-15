@@ -49,10 +49,11 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
     events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
   ): F[List[A]] =
     val eventCount = events.flatten.size.toLong
-    val filterAttrs = filterAttributes(eventFilter)
+    val spanAttrs = spanAttributes(eventFilter)
+    val metricAttrs = metricAttributes(eventFilter)
     Tracer[F]
       .spanBuilder("persistent4s.eventstore.append")
-      .addAttributes(filterAttrs*)
+      .addAttributes(spanAttrs*)
       .addAttribute(Attribute("event.count", eventCount))
       .build
       .surround(
@@ -60,12 +61,12 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
           start    <- Async[F].monotonic
           result   <- inner.append(eventFilter, expectedIndex, events*).attempt
           end      <- Async[F].monotonic
-          _        <- appendDuration.record((end - start).toNanos.toDouble / 1e6, filterAttrs*)
+          _        <- appendDuration.record((end - start).toNanos.toDouble / 1e6, metricAttrs*)
           appended <- result match
                         case Right(written) =>
-                          eventsAppended.add(eventCount, filterAttrs*).as(written)
+                          eventsAppended.add(eventCount, metricAttrs*).as(written)
                         case Left(e: IndexConflictException) =>
-                          conflicts.add(1L, filterAttrs*) *> Async[F].raiseError(e)
+                          conflicts.add(1L, metricAttrs*) *> Async[F].raiseError(e)
                         case Left(e) =>
                           Async[F].raiseError(e)
         yield appended,
@@ -81,21 +82,28 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
     eventFilter: EventFilter,
     maxEvents: Option[Int] = None,
   ): Stream[F, EventEnvelope[A]] =
-    val filterAttrs = filterAttributes(eventFilter)
+    val spanAttrs = spanAttributes(eventFilter)
+    val metricAttrs = metricAttributes(eventFilter)
     Stream
       .resource(
         Tracer[F]
           .spanBuilder("persistent4s.eventstore.read_from")
           .addAttribute(Attribute("from_position", fromPosition))
-          .addAttributes(filterAttrs*)
+          .addAttributes(spanAttrs*)
           .build
           .resource,
       )
-      .flatMap(_ => inner.readFrom(fromPosition, eventFilter, maxEvents).evalTap(_ => eventsRead.add(1L, filterAttrs*)))
+      .flatMap(_ => inner.readFrom(fromPosition, eventFilter, maxEvents).evalTap(_ => eventsRead.add(1L, metricAttrs*)))
 
-  private def filterAttributes(f: EventFilter): List[Attribute[String]] =
+  private def spanAttributes(f: EventFilter): List[Attribute[String]] =
     List(
       Attribute("filter.tags", f.tags.map(_.value).mkString(",")),
+      Attribute("filter.event_types", f.eventTypes.map(_.value).mkString(",")),
+    )
+
+  private def metricAttributes(f: EventFilter): List[Attribute[String]] =
+    List(
+      Attribute("filter.tag_categories", f.tags.map(_.category).mkString(",")),
       Attribute("filter.event_types", f.eventTypes.map(_.value).mkString(",")),
     )
 
