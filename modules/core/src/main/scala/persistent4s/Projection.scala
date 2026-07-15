@@ -16,6 +16,10 @@
 
 package persistent4s
 
+import cats.Applicative
+import cats.syntax.all.*
+import scala.reflect.TypeTest
+
 /** A Projection defines how to process events from the event store.
   *
   * @tparam F
@@ -27,7 +31,13 @@ package persistent4s
   * @tparam S
   *   the state type for the projection
   */
-trait Projection[F[_], A <: Event, K, S]:
+trait Projection[F[_]: Applicative, A <: Event, K, S]:
+
+  /** Repository for fetching and persisting projection state. The projector will call `fetchStates` to get the current
+    * state for relevant keys before processing a batch of events, and will call `upsertMany` and `deleteMany` after
+    * processing a batch to save the updated state.
+    */
+  protected val repository: Repository[F, K, S]
 
   /** The name of the projection, used for checkpointing.
     *
@@ -41,13 +51,13 @@ trait Projection[F[_], A <: Event, K, S]:
     */
   def name: String
 
-  /** The filter that determines which events this projection will process. Only events that match the filter will be
-    * passed to the `handle` method.
+  /** The event type filter for this projection. Only events whose type name is included in this set will be processed
+    * by the projection.
     *
     * @return
-    *   the event filter for this projection
+    *   the set of event type names that this projection is interested in
     */
-  def filter: EventFilter
+  def filter: Set[EventTypeName]
 
   /** Resolve keys for a given event. This method is used to determine which keys are affected by an event, and
     * therefore which state entries need to be fetched and updated. An event may affect multiple keys.
@@ -61,16 +71,6 @@ trait Projection[F[_], A <: Event, K, S]:
     *   the keys affected by this event, or an empty list to skip the event without blocking the checkpoint
     */
   def resolveKeys(event: EventEnvelope[A]): List[K]
-
-  /** Fetch the current state for multiple keys. This method will be called before processing a batch of events to get
-    * the current state for all relevant keys.
-    *
-    * @param keys
-    *   the keys for which to fetch the state
-    * @return
-    *   a map of keys to their corresponding state, or `None` if no state exists for a key
-    */
-  def fetchStates(keys: List[K]): F[Map[K, Option[S]]]
 
   /** Handle an incoming event. This method will be called for each event that matches the projection's filter. The
     * projection should perform any necessary processing of the event, such as updating a read model.
@@ -92,6 +92,17 @@ trait Projection[F[_], A <: Event, K, S]:
     */
   def handle(state: Option[S], event: EventEnvelope[A]): F[Option[S]]
 
+  /** Fetch the current state for multiple keys. This method will be called before processing a batch of events to get
+    * the current state for all relevant keys.
+    *
+    * @param keys
+    *   the keys for which to fetch the state
+    * @return
+    *   a map of keys to their corresponding state, or `None` if no state exists for a key
+    */
+  final def fetchStates(keys: List[K]): F[Map[K, Option[S]]] =
+    repository.findMany(keys)
+
   /** Persist the current state for a given key. This method will be called after processing an event to save the
     * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
     * cache. Passing None indicates that the state should be removed for that key.
@@ -101,4 +112,27 @@ trait Projection[F[_], A <: Event, K, S]:
     * @return
     *   a F[Unit] that completes when the state has been persisted
     */
-  def persistStates(states: Map[K, Option[S]]): F[Unit]
+  final def persistStates(states: Map[K, Option[S]]): F[Unit] =
+    val toDelete = states.collect { case (key, None) => key }.toList
+    val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
+    val deleteF = if (toDelete.nonEmpty) repository.deleteMany(toDelete) else Applicative[F].unit
+    val upsertF = if (toUpsert.nonEmpty) repository.upsertMany(toUpsert) else Applicative[F].unit
+    deleteF *> upsertF
+
+  /** View this projection as one over a wider event type `B >: A`. Events that are not actually `A` are ignored (no
+    * key, no state change).
+    */
+  final def widen[B >: A <: Event](using tt: TypeTest[B, A]): Projection[F, B, K, S] =
+    val self = this
+    new Projection[F, B, K, S]:
+      protected val repository: Repository[F, K, S] = self.repository
+      def name: String = self.name
+      def filter: Set[EventTypeName] = self.filter
+      def resolveKeys(e: EventEnvelope[B]): List[K] =
+        e.payload match
+          case tt(a) => self.resolveKeys(EventEnvelope(e.metadata, a))
+          case _     => Nil
+      def handle(state: Option[S], e: EventEnvelope[B]): F[Option[S]] =
+        e.payload match
+          case tt(a) => self.handle(state, EventEnvelope(e.metadata, a))
+          case _     => state.pure

@@ -36,6 +36,7 @@ import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, Borr
 import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
 import persistent4s.EventNotification
 import persistent4s.postgres.{PostgresConfig, PostgresModule}
+import persistent4s.monitoring.MonitoringServer
 
 final class LibraryModule private (
   val store: EventStore[IO, LibraryEvent] & EventNotification[IO],
@@ -53,11 +54,12 @@ object LibraryModule:
 
   def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
     for
-      resources <- PostgresModule.make[IO, LibraryEvent](eventCodec)
-      store      = resources.eventStore
-      checkpoint = resources.checkpoint
-      config    <- Resource.eval(loadConfig(configPath))
-      viewPool  <- Session
+      resources  <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
+      store       = resources.eventStore
+      checkpoint  = resources.checkpoint
+      monitoring <- MonitoringServer.make(checkpoint, resources.sendNotification)
+      config     <- Resource.eval(loadConfig(configPath))
+      viewPool   <- Session
                     .Builder[IO]
                     .withHost(config.host)
                     .withPort(config.port)

@@ -65,7 +65,7 @@ trait CommandHandler[C, S, E <: Event]:
     */
   def run[F[_]: Concurrent: Tracer: Meter](command: C)(using
     eventStore: EventStore[F, E],
-  ): F[Unit] =
+  ): F[List[E]] =
     for
       retriesCounter <- Meter[F]
                           .counter[Long]("persistent4s.commandhandler.retries")
@@ -73,19 +73,19 @@ trait CommandHandler[C, S, E <: Event]:
                           .withUnit("{retries}")
                           .create
       cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
-      _      <- Tracer[F]
-             .spanBuilder("persistent4s.commandhandler.handle")
-             .addAttribute(cmdAttr)
-             .build
-             .surround(runWithRetry(command, maxRetries, retriesCounter, cmdAttr))
-    yield ()
+      events <- Tracer[F]
+                  .spanBuilder("persistent4s.commandhandler.handle")
+                  .addAttribute(cmdAttr)
+                  .build
+                  .surround(runWithRetry(command, maxRetries, retriesCounter, cmdAttr))
+    yield events
 
   private def runWithRetry[F[_]: Concurrent](
     command: C,
     retriesLeft: Int,
     retriesCounter: Counter[F, Long],
     cmdAttr: Attribute[String],
-  )(using eventStore: EventStore[F, E]): F[Unit] =
+  )(using eventStore: EventStore[F, E]): F[List[E]] =
     attempt(command).handleErrorWith {
       case _: IndexConflictException if retriesLeft > 0 =>
         retriesCounter.add(1L, cmdAttr) *> runWithRetry(command, retriesLeft - 1, retriesCounter, cmdAttr)
@@ -95,7 +95,7 @@ trait CommandHandler[C, S, E <: Event]:
 
   private def attempt[F[_]: Concurrent](
     command: C,
-  )(using eventStore: EventStore[F, E]): F[Unit] =
+  )(using eventStore: EventStore[F, E]): F[List[E]] =
     for
       tags      <- Concurrent[F].pure(tags(command))
       filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
@@ -105,7 +105,7 @@ trait CommandHandler[C, S, E <: Event]:
       _         <- validate(state, command) match
              case Left(e)  => Concurrent[F].raiseError(e)
              case Right(_) => Concurrent[F].unit
-      decided = decide(state, command)
-      events  = decided.map((tags, event) => (tags, EventTypeName.fromInstance(event), event))
-      _      <- eventStore.append(filter, index, events)
-    yield ()
+      decided         = decide(state, command)
+      events          = decided.map((tags, event) => (None, tags, EventTypeName.fromInstance(event), false, event))
+      appendedEvents <- eventStore.append(filter, index, events)
+    yield appendedEvents

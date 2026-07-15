@@ -23,6 +23,8 @@ import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 import weaver.SimpleIOSuite
 
+import java.util.UUID
+
 object InstrumentedEventStoreSuite extends SimpleIOSuite:
 
   given Tracer[IO] = Tracer.Implicits.noop
@@ -44,35 +46,60 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Set[Tag], EventTypeName, TestEvent)]*,
-    ): IO[Unit] =
+      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+    ): IO[List[TestEvent]] =
       ref.modify { current =>
         val relevant = current.filter(matches(_, eventFilter))
         val actualIdx = relevant.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
         if actualIdx != expectedIndex then (current, Left(IndexConflictException(expectedIndex, actualIdx)))
         else
           val last = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvts = evts.flatten.zipWithIndex.map { case ((tags, et, ev), i) =>
-            EventEnvelope(EventMetadata(last + i.toLong + 1L, tags, et, java.time.Instant.now()), ev)
+          val newEvts = evts.flatten.zipWithIndex.map { case ((maybeId, tags, et, isExternal, ev), i) =>
+            EventEnvelope(
+              EventMetadata(
+                last + i.toLong + 1L,
+                maybeId.getOrElse(UUID.randomUUID()),
+                tags,
+                et,
+                isExternal,
+                java.time.Instant.now(),
+              ),
+              ev,
+            )
           }
-          (current ++ newEvts, Right(()))
+          (current ++ newEvts, Right(evts.flatten.map(_._5).toList))
       }.flatMap(_.fold(IO.raiseError, IO.pure))
 
-    def readFrom(fromPosition: Long, eventFilter: EventFilter): Stream[IO, EventEnvelope[TestEvent]] =
+    def appendUnchecked(evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*): IO[List[TestEvent]] =
+      IO.pure(List.empty) // not needed for these tests
+
+    def readFrom(
+      fromPosition: Long,
+      eventFilter: EventFilter,
+      maxEvents: Option[Int] = None,
+    ): Stream[IO, EventEnvelope[TestEvent]] =
       Stream
         .eval(ref.get)
         .flatMap(Stream.emits)
         .filter(env => matches(env, eventFilter) && env.metadata.globalPosition > fromPosition)
+        .take(maxEvents.map(_.toLong).getOrElse(Long.MaxValue))
 
   final class ConflictingStore extends EventStore[IO, TestEvent]:
 
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Set[Tag], EventTypeName, TestEvent)]*,
-    ): IO[Unit] = IO.raiseError(IndexConflictException(0L, 1L))
+      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+    ): IO[List[TestEvent]] = IO.raiseError(IndexConflictException(0L, 1L))
 
-    def readFrom(fromPosition: Long, eventFilter: EventFilter): Stream[IO, EventEnvelope[TestEvent]] =
+    def appendUnchecked(evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*): IO[List[TestEvent]] =
+      IO.pure(List.empty) // not needed for these tests
+
+    def readFrom(
+      fromPosition: Long,
+      eventFilter: EventFilter,
+      maxEvents: Option[Int] = None,
+    ): Stream[IO, EventEnvelope[TestEvent]] =
       Stream.empty
 
   test("append delegates to inner store") {
@@ -83,7 +110,7 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       _            <- instrumented.append(
              EventFilter(),
              0L,
-             List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("x"))),
+             List((None, Set.empty, EventTypeName.of[TestEvent.Created], false, TestEvent.Created("x"))),
            )
       stored <- ref.get
     yield expect(stored.size == 1)
@@ -96,7 +123,7 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
                   .append(
                     EventFilter(),
                     0L,
-                    List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("x"))),
+                    List((None, Set.empty, EventTypeName.of[TestEvent.Created], false, TestEvent.Created("x"))),
                   )
                   .attempt
     yield expect(result.left.exists(_.isInstanceOf[IndexConflictException]))
@@ -110,7 +137,7 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       _            <- inner.append(
              EventFilter(),
              0L,
-             List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("a"))),
+             List((None, Set.empty, EventTypeName.of[TestEvent.Created], false, TestEvent.Created("a"))),
            )
       events <- instrumented.readFrom(0L, EventFilter()).compile.toList
     yield expect(events.size == 1 && events.head.payload == TestEvent.Created("a"))
@@ -122,9 +149,17 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       inner         = FakeStore(ref)
       instrumented <- InstrumentedEventStore.make[IO, TestEvent](inner)
       _            <-
-        inner.append(EventFilter(), 0L, List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("a"))))
+        inner.append(
+          EventFilter(),
+          0L,
+          List((None, Set.empty, EventTypeName.of[TestEvent.Created], false, TestEvent.Created("a"))),
+        )
       _ <-
-        inner.append(EventFilter(), 1L, List((Set.empty, EventTypeName.of[TestEvent.Created], TestEvent.Created("b"))))
+        inner.append(
+          EventFilter(),
+          1L,
+          List((None, Set.empty, EventTypeName.of[TestEvent.Created], false, TestEvent.Created("b"))),
+        )
       events <- instrumented.readFrom(1L, EventFilter()).compile.toList
     yield expect(events.size == 1 && events.head.payload == TestEvent.Created("b"))
   }

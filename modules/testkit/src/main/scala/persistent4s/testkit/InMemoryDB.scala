@@ -40,7 +40,7 @@ import cats.syntax.all.*
   *   - [[truncate]] — TRUNCATE
   *
   * @tparam F
-  *   the effect type (needs a [[Sync]] instance, e.g. `cats.effect.IO`)
+  *   the effect type (needs a `Sync` instance, e.g. `cats.effect.IO`)
   * @tparam R
   *   the row type; typically a case class whose fields represent columns
   */
@@ -137,8 +137,8 @@ object Table:
 /** An in-memory database that manages a set of named [[Table]]s, analogous to a PostgreSQL database. Intended for tests
   * and experiments — no data is persisted.
   *
-  * Tables are created with [[createTable]] and dropped with [[dropTable]]. Each table is typed by its row type [[R]],
-  * so all operations on it remain fully type-safe. The returned [[Table]] reference is the primary handle for INSERT /
+  * Tables are created with [[createTable]] and dropped with [[dropTable]]. Each table is typed by its row type `R`, so
+  * all operations on it remain fully type-safe. The returned [[Table]] reference is the primary handle for INSERT /
   * SELECT / UPDATE / DELETE operations.
   *
   * Example usage:
@@ -155,11 +155,11 @@ object Table:
   * }}}
   *
   * @tparam F
-  *   the effect type (needs a [[Sync]] instance, e.g. `cats.effect.IO`)
+  *   the effect type (needs a `Sync` instance, e.g. `cats.effect.IO`)
   */
 final class InMemoryDB[F[_]: Sync] private (tables: Ref[F, Map[String, Table[F, Any]]]):
 
-  /** CREATE TABLE — create a new empty table named `name` with rows of type [[R]].
+  /** CREATE TABLE — create a new empty table named `name` with rows of type `R`.
     *
     * If a table with that name already exists it is replaced.
     */

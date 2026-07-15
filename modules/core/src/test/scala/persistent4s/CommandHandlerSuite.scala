@@ -22,6 +22,7 @@ import fs2.Stream
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 import weaver.SimpleIOSuite
+import java.util.UUID
 
 object CommandHandlerSuite extends SimpleIOSuite:
 
@@ -72,8 +73,8 @@ object CommandHandlerSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Set[Tag], EventTypeName, A)]*,
-    ): IO[Unit] =
+      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+    ): IO[List[A]] =
       ref.modify { current =>
         val relevant = current.filter { env =>
           (eventFilter.tags.isEmpty || env.metadata.tags.exists(eventFilter.tags.contains)) &&
@@ -83,13 +84,30 @@ object CommandHandlerSuite extends SimpleIOSuite:
         if actualIdx != expectedIndex then (current, Left(IndexConflictException(expectedIndex, actualIdx)))
         else
           val last = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvt = evts.flatten.zipWithIndex.map { case ((tags, et, ev), i) =>
-            EventEnvelope(EventMetadata(last + i.toLong + 1L, tags, et, java.time.Instant.now()), ev)
+          val newEvt = evts.flatten.zipWithIndex.map { case ((maybeId, tags, et, isExternal, ev), i) =>
+            EventEnvelope(
+              EventMetadata(
+                last + i.toLong + 1L,
+                maybeId.getOrElse(UUID.randomUUID()),
+                tags,
+                et,
+                isExternal,
+                java.time.Instant.now(),
+              ),
+              ev,
+            )
           }
-          (current ++ newEvt, Right(()))
+          (current ++ newEvt, Right(evts.flatten.map(_._5).toList))
       }.flatMap(_.fold(IO.raiseError, IO.pure))
 
-    def readFrom(fromPosition: Long, eventFilter: EventFilter): Stream[IO, EventEnvelope[A]] =
+    def appendUnchecked(evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): IO[List[A]] =
+      IO.pure(List.empty) // not needed for these tests
+
+    def readFrom(
+      fromPosition: Long,
+      eventFilter: EventFilter,
+      maxEvents: Option[Int] = None,
+    ): Stream[IO, EventEnvelope[A]] =
       Stream.eval(ref.get).flatMap(Stream.emits).filter { env =>
         env.metadata.globalPosition > fromPosition &&
         (eventFilter.tags.isEmpty || env.metadata.tags.exists(eventFilter.tags.contains)) &&
@@ -127,10 +145,18 @@ object CommandHandlerSuite extends SimpleIOSuite:
                         def append(
                           ef: EventFilter,
                           ei: Long,
-                          evts: List[(Set[Tag], EventTypeName, TestEvent)]*,
-                        ): IO[Unit] =
+                          evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+                        ): IO[List[TestEvent]] =
                           attemptsRef.update(_ + 1) *> IO.raiseError(IndexConflictException(0L, 1L))
-                        def readFrom(fp: Long, ef: EventFilter): Stream[IO, EventEnvelope[TestEvent]] =
+                        def appendUnchecked(
+                          evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+                        ): IO[List[TestEvent]] =
+                          IO.pure(List.empty)
+                        def readFrom(
+                          fp: Long,
+                          ef: EventFilter,
+                          maxEvents: Option[Int] = None,
+                        ): Stream[IO, EventEnvelope[TestEvent]] =
                           Stream.eval(storeRef.get).flatMap(Stream.emits)
       given EventStore[IO, TestEvent] = conflictStore
       retryHandler                    = new CommandHandler[TestCmd, Option[String], TestEvent]:

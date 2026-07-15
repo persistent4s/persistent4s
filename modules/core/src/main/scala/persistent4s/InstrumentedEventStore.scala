@@ -23,6 +23,8 @@ import org.typelevel.otel4s.Attribute
 import org.typelevel.otel4s.metrics.{Counter, Histogram, Meter}
 import org.typelevel.otel4s.trace.Tracer
 
+import java.util.UUID
+
 /** Decorates any [[EventStore]] with otel4s spans and metrics.
   *
   * Emits:
@@ -44,8 +46,8 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
   override def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
-    events: List[(Set[Tag], EventTypeName, A)]*,
-  ): F[Unit] =
+    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+  ): F[List[A]] =
     val eventCount = events.flatten.size.toLong
     val filterAttrs = filterAttributes(eventFilter)
     Tracer[F]
@@ -55,23 +57,29 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
       .build
       .surround(
         for
-          start  <- Async[F].monotonic
-          result <- inner.append(eventFilter, expectedIndex, events*).attempt
-          end    <- Async[F].monotonic
-          _      <- appendDuration.record((end - start).toNanos.toDouble / 1e6, filterAttrs*)
-          _      <- result match
-                 case Right(_) =>
-                   eventsAppended.add(eventCount, filterAttrs*)
-                 case Left(e: IndexConflictException) =>
-                   conflicts.add(1L, filterAttrs*) *> Async[F].raiseError(e)
-                 case Left(e) =>
-                   Async[F].raiseError(e)
-        yield (),
+          start    <- Async[F].monotonic
+          result   <- inner.append(eventFilter, expectedIndex, events*).attempt
+          end      <- Async[F].monotonic
+          _        <- appendDuration.record((end - start).toNanos.toDouble / 1e6, filterAttrs*)
+          appended <- result match
+                        case Right(written) =>
+                          eventsAppended.add(eventCount, filterAttrs*).as(written)
+                        case Left(e: IndexConflictException) =>
+                          conflicts.add(1L, filterAttrs*) *> Async[F].raiseError(e)
+                        case Left(e) =>
+                          Async[F].raiseError(e)
+        yield appended,
       )
+
+  override def appendUnchecked(
+    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+  ): F[List[A]] =
+    inner.appendUnchecked(events*)
 
   override def readFrom(
     fromPosition: Long,
     eventFilter: EventFilter,
+    maxEvents: Option[Int] = None,
   ): Stream[F, EventEnvelope[A]] =
     val filterAttrs = filterAttributes(eventFilter)
     Stream
@@ -83,7 +91,7 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
           .build
           .resource,
       )
-      .flatMap(_ => inner.readFrom(fromPosition, eventFilter).evalTap(_ => eventsRead.add(1L, filterAttrs*)))
+      .flatMap(_ => inner.readFrom(fromPosition, eventFilter, maxEvents).evalTap(_ => eventsRead.add(1L, filterAttrs*)))
 
   private def filterAttributes(f: EventFilter): List[Attribute[String]] =
     List(
@@ -125,6 +133,7 @@ object InstrumentedEventStore:
   ): F[EventStore[F, A] & EventNotification[F]] =
     make(inner).map { instrumented =>
       new EventStore[F, A] with EventNotification[F]:
-        export instrumented.{append, readFrom}
-        def notification: fs2.Stream[F, Unit] = inner.notification
+        export instrumented.{append, appendUnchecked, readFrom}
+        def notification(projectionName: String): fs2.Stream[F, EventStoreNotification] =
+          inner.notification(projectionName)
     }

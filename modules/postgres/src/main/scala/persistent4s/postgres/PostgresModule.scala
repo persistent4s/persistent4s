@@ -34,6 +34,7 @@ import persistent4s.Event
 import persistent4s.EventNotification
 import persistent4s.EventStore
 import persistent4s.InstrumentedEventStore
+import persistent4s.EventStoreNotification
 
 sealed trait PostgresModuleError extends Throwable
 
@@ -85,6 +86,7 @@ object PostgresModule:
   final case class Components[F[_], A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: PostgresProjectionCheckpoint[F],
+    sendNotification: EventStoreNotification => F[Unit],
   )
 
   private val defaultConfigPath = "persistent4s.postgres"
@@ -113,12 +115,14 @@ object PostgresModule:
            )
       pool  <- createSessionPool[F](config)
       _     <- Resource.eval(initializeDatabase[F](pool, logger))
+      raw    = PostgresEventStore[F, A](pool, codec)
       store <- Resource.eval(
-                 InstrumentedEventStore.makeWithNotification[F, A](PostgresEventStore[F, A](pool, codec)),
+                 InstrumentedEventStore.makeWithNotification[F, A](raw),
                )
     yield Components(
       store,
       PostgresProjectionCheckpoint.make[F](pool),
+      raw.notify,
     )
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
@@ -143,12 +147,14 @@ object PostgresModule:
            )
       pool  <- createSessionPool[F](config)
       _     <- Resource.eval(initializeDatabase[F](pool, logger))
+      raw    = PostgresEventStore(pool, codec)
       store <- Resource.eval(
-                 InstrumentedEventStore.makeWithNotification[F, A](PostgresEventStore[F, A](pool, codec)),
+                 InstrumentedEventStore.makeWithNotification[F, A](raw),
                )
     yield Components(
       store,
       PostgresProjectionCheckpoint.make[F](pool),
+      raw.notify,
     )
 
   private def loadConfig[F[_]: Sync](configPath: String): F[PostgresConfig] =
@@ -210,10 +216,14 @@ object PostgresModule:
     sql"""
       CREATE TABLE IF NOT EXISTS events (
         sequence_number BIGSERIAL PRIMARY KEY,
+        event_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
         event_type      TEXT        NOT NULL,
         tags            JSONB       NOT NULL DEFAULT '[]',
         payload         JSONB       NOT NULL DEFAULT '{}',
-        recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+        is_external     BOOLEAN     NOT NULL,
+        recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+        CONSTRAINT unique_event_id UNIQUE (event_id)
       )
     """.command
 

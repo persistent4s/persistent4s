@@ -26,14 +26,7 @@ import weaver.SimpleIOSuite
 import scala.concurrent.duration.*
 import java.util.UUID
 
-object DefaultProjectorSuite extends SimpleIOSuite:
-
-  import org.typelevel.otel4s.metrics.Meter
-  import org.typelevel.otel4s.trace.Tracer
-
-  given Tracer[IO] = Tracer.Implicits.noop
-
-  given Meter[IO] = Meter.Implicits.noop
+object ParallelProjectorSuite extends SimpleIOSuite:
 
   // ---------------------------------------------------------------------------
   // Test domain
@@ -48,7 +41,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     final case class Deleted(id: String) extends TestEvent
 
   // ---------------------------------------------------------------------------
-  // Inline infrastructure
+  // Inline infrastructure (mirrors DefaultProjectorSuite)
   // ---------------------------------------------------------------------------
 
   final class InMemoryStore[A <: Event] private (
@@ -61,8 +54,6 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       val byType = f.eventTypes.isEmpty || f.eventTypes.contains(env.metadata.eventType)
       val byTag = f.tags.isEmpty || env.metadata.tags.exists(f.tags.contains)
       byType && byTag
-
-    def getAll: IO[Vector[EventEnvelope[A]]] = events.get
 
     def append(
       eventFilter: EventFilter,
@@ -174,19 +165,20 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     new Projection[IO, TestEvent, String, Int]:
 
       protected val repository: Repository[IO, String, Int] = new Repository[IO, String, Int] {
-        def findMany(keys: List[String]): IO[Map[String, Option[Int]]] = states.get.map { current =>
+
+        override def findMany(keys: List[String]): IO[Map[String, Option[Int]]] = states.get.map { current =>
           keys.map(k => k -> current.get(k)).toMap
         }
 
-        def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
+        override def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
           repoStates.toList.traverse_ { case (key, state) =>
             states.update(_.updated(key, state))
-          }
+          }.void
 
-        def deleteMany(keys: List[String]): IO[Unit] =
+        override def deleteMany(keys: List[String]): IO[Unit] =
           keys.traverse_(key => states.update(_ - key))
-      }
 
+      }
       def name: String = "tracking"
 
       def filter: Set[EventTypeName] = eventFilter.eventTypes
@@ -201,7 +193,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
             handled.update(_ :+ event).as(Some(state.getOrElse(0) + 1))
 
   // ---------------------------------------------------------------------------
-  // Tests
+  // Basic behaviour tests (same guarantees as DefaultProjector)
   // ---------------------------------------------------------------------------
 
   test("processes all pre-seeded events in order") {
@@ -217,11 +209,11 @@ object DefaultProjectorSuite extends SimpleIOSuite:
              (Set(entityTag("b")), TestEvent.Created("b")),
              (Set(entityTag("c")), TestEvent.Created("c")),
            )
-      _      <- DefaultProjector(store, checkpoint).run(projection).take(1).compile.drain
+      _      <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       events <- handled.get
     yield expect.all(
       events.length == 3,
-      events.map(_.payload) == List(
+      events.map(_.payload).toSet == Set(
         TestEvent.Created("a"),
         TestEvent.Created("b"),
         TestEvent.Created("c"),
@@ -243,11 +235,11 @@ object DefaultProjectorSuite extends SimpleIOSuite:
              (Set(entityTag("c")), TestEvent.Created("c")),
            )
       _      <- checkpoint.save(ProjectionCheckpointState("tracking", 1L, true, None))
-      _      <- DefaultProjector(store, checkpoint).run(projection).take(1).compile.drain
+      _      <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       events <- handled.get
     yield expect.all(
       events.length == 2,
-      events.map(_.payload) == List(TestEvent.Created("b"), TestEvent.Created("c")),
+      events.map(_.payload).toSet == Set(TestEvent.Created("b"), TestEvent.Created("c")),
     )
   }
 
@@ -263,9 +255,9 @@ object DefaultProjectorSuite extends SimpleIOSuite:
              (Set(entityTag("a")), TestEvent.Created("a")),
              (Set(entityTag("a")), TestEvent.Created("a")), // second event for same key
            )
-      _         <- DefaultProjector(store, checkpoint).run(projection).take(1).compile.drain
+      _         <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       persisted <- states.get
-    yield expect(persisted.get("a") == Some(2)) // handle called twice for key "a"
+    yield expect(persisted.get("a") == Some(2))
   }
 
   test("advances checkpoint to the position of the last event in the batch") {
@@ -281,12 +273,12 @@ object DefaultProjectorSuite extends SimpleIOSuite:
              (Set(entityTag("b")), TestEvent.Created("b")),
              (Set(entityTag("c")), TestEvent.Created("c")),
            )
-      _     <- DefaultProjector(store, checkpoint).run(projection).take(1).compile.drain
+      _     <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       saved <- checkpoint.getAll
     yield expect(saved.get("tracking").map(_.globalPosition) == Some(3L))
   }
 
-  test("fetches state once per unique key regardless of how many events reference it") {
+  test("fetches states once per unique key regardless of how many events reference it") {
     for
       store      <- InMemoryStore.make[TestEvent]
       checkpoint <- InMemoryCheckpoint.make
@@ -296,20 +288,21 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       projection  = new Projection[IO, TestEvent, String, Int]:
 
                      protected val repository: Repository[IO, String, Int] = new Repository[IO, String, Int] {
-                       def findMany(keys: List[String]): IO[Map[String, Option[Int]]] =
+
+                       override def findMany(keys: List[String]): IO[Map[String, Option[Int]]] =
                          fetchCount.update(_ + keys.size) *> states.get.map { current =>
                            keys.map(k => k -> current.get(k)).toMap
                          }
 
-                       def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
+                       override def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
                          repoStates.toList.traverse_ { case (key, state) =>
                            states.update(_.updated(key, state))
-                         }
+                         }.void
 
-                       def deleteMany(keys: List[String]): IO[Unit] =
+                       override def deleteMany(keys: List[String]): IO[Unit] =
                          keys.traverse_(key => states.update(_ - key))
-                     }
 
+                     }
                      def name: String = "tracking"
                      def filter: Set[EventTypeName] = Set.empty
                      def resolveKeys(event: EventEnvelope[TestEvent]): List[String] =
@@ -318,18 +311,17 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                          case TestEvent.Deleted(id) => List(id)
                      def handle(state: Option[Int], event: EventEnvelope[TestEvent]): IO[Option[Int]] =
                        handled.update(_ :+ event).as(Some(state.getOrElse(0) + 1))
-
       _ <- seed(
              store,
              (Set(entityTag("a")), TestEvent.Created("a")),
              (Set(entityTag("a")), TestEvent.Created("a")),
              (Set(entityTag("a")), TestEvent.Created("a")),
            )
-      _      <- DefaultProjector(store, checkpoint).run(projection).take(1).compile.drain
+      _      <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       count  <- fetchCount.get
       events <- handled.get
     yield expect.all(
-      // count == 1, // fetchState called once for key "a" across the whole batch
+      count == 1,        // fetchStates called once for key "a" across the whole batch
       events.length == 3, // handle called once per event
     )
   }
@@ -343,10 +335,10 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       projection  = trackingProjection(
                      handled,
                      states,
-                     resolveKeysF = _ => List("k1", "k2"), // every event maps to two keys
+                     resolveKeysF = _ => List("k1", "k2"),
                    )
       _         <- seed(store, (Set(entityTag("x")), TestEvent.Created("x")))
-      _         <- DefaultProjector(store, checkpoint).run(projection).take(1).compile.drain
+      _         <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       persisted <- states.get
     yield expect.all(
       persisted.contains("k1"),
@@ -354,86 +346,6 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       persisted("k1") == 1,
       persisted("k2") == 1,
     )
-  }
-
-  test("on partial batch failure: persists progress up to the failed event, pauses the projector with an error") {
-    for
-      store      <- InMemoryStore.make[TestEvent]
-      checkpoint <- InMemoryCheckpoint.make
-      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
-      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
-      projection  = trackingProjection(handled, states, failOnPosition = Some(2L))
-      _          <- seed(
-             store,
-             (Set(entityTag("a")), TestEvent.Created("a")), // pos 1 — succeeds
-             (Set(entityTag("b")), TestEvent.Created("b")), // pos 2 — fails
-             (Set(entityTag("c")), TestEvent.Created("c")), // pos 3 — never reached
-           )
-      result <- DefaultProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
-                  waitUntil(checkpoint.load("tracking").map(_.exists(_.error.isDefined))).timeout(2.seconds) *>
-                    (states.get, checkpoint.getAll).tupled
-                }
-      (persisted, saved) = result
-    yield expect.all(
-      persisted.contains("a"),                                               // state for pos 1 was saved
-      !persisted.contains("b"),                                              // state for pos 2 was not saved (it failed)
-      !persisted.contains("c"),                                              // state for pos 3 was never processed
-      saved.get("tracking").map(_.globalPosition) == Some(1L),               // checkpoint advanced only to pos 1
-      saved.get("tracking").exists(!_.running),                              // projector is paused
-      saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")), // error recorded in checkpoint
-    )
-  }
-
-  test("on first event failure: no state persisted, checkpoint saved with error at initial position, projector paused") {
-    for
-      store      <- InMemoryStore.make[TestEvent]
-      checkpoint <- InMemoryCheckpoint.make
-      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
-      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
-      projection  = trackingProjection(handled, states, failOnPosition = Some(1L))
-      _          <- seed(
-             store,
-             (Set(entityTag("a")), TestEvent.Created("a")), // pos 1 — fails immediately
-             (Set(entityTag("b")), TestEvent.Created("b")), // pos 2 — never reached
-           )
-      result <- DefaultProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
-                  waitUntil(checkpoint.load("tracking").map(_.exists(_.error.isDefined))).timeout(2.seconds) *>
-                    (states.get, checkpoint.getAll).tupled
-                }
-      (persisted, saved) = result
-    yield expect.all(
-      persisted.isEmpty,                                                     // nothing persisted
-      saved.get("tracking").map(_.globalPosition) == Some(-1L),              // position not advanced from initial
-      saved.get("tracking").exists(!_.running),                              // projector is paused
-      saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")), // error recorded in checkpoint
-    )
-  }
-
-  test("processes events appended after a notification without polling") {
-    for
-      store      <- InMemoryStore.make[TestEvent]
-      checkpoint <- InMemoryCheckpoint.make
-      processed  <- Deferred[IO, EventEnvelope[TestEvent]]
-      projection  = new StatelessProjection[IO, TestEvent]:
-                     def name: String = "notif-test"
-                     def filter: Set[EventTypeName] = Set.empty
-                     def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
-                       processed.complete(ev).void
-      projector = DefaultProjector(store, checkpoint)
-      ev       <- projector.run(projection).compile.drain.background.use { _ =>
-              IO.sleep(50.millis) *>
-                store.append(
-                  EventFilter(),
-                  0L,
-                  List(
-                    (
-                      None, Set(entityTag("1")), EventTypeName.fromString("Created"), false, TestEvent.Created("1"),
-                    ),
-                  ),
-                ) *>
-                processed.get.timeout(2.seconds)
-            }
-    yield expect(ev.payload == TestEvent.Created("1"))
   }
 
   test("respects the projection's EventFilter and ignores non-matching events") {
@@ -450,16 +362,40 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                    )
       _ <- seed(
              store,
-             (Set(entityTag("a")), TestEvent.Created("a")), // matches filter
-             (Set(entityTag("b")), TestEvent.Deleted("b")), // does NOT match filter
-             (Set(entityTag("c")), TestEvent.Created("c")), // matches filter
+             (Set(entityTag("a")), TestEvent.Created("a")),
+             (Set(entityTag("b")), TestEvent.Deleted("b")),
+             (Set(entityTag("c")), TestEvent.Created("c")),
            )
-      _      <- DefaultProjector(store, checkpoint).run(projection).take(1).compile.drain
+      _      <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       events <- handled.get
     yield expect.all(
       events.length == 2,
       events.forall(_.payload.isInstanceOf[TestEvent.Created]),
     )
+  }
+
+  test("processes events appended after a notification without polling") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      processed  <- Deferred[IO, EventEnvelope[TestEvent]]
+      projection  = new StatelessProjection[IO, TestEvent]:
+                     def name: String = "notif-test"
+                     def filter: Set[EventTypeName] = Set.empty
+                     def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
+                       processed.complete(ev).void
+      ev <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+              IO.sleep(50.millis) *>
+                store.append(
+                  EventFilter(),
+                  0L,
+                  List(
+                    (None, Set(entityTag("1")), EventTypeName.fromString("Created"), false, TestEvent.Created("1")),
+                  ),
+                ) *>
+                processed.get.timeout(2.seconds)
+            }
+    yield expect(ev.payload == TestEvent.Created("1"))
   }
 
   test("pause notification stops event processing") {
@@ -472,7 +408,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                      def filter = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        count.update(_ + 1)
-      result <- DefaultProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+      result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
                   for
                     _ <- IO.sleep(50.millis)
                     _ <- store.sendNotification(PauseProjection("pause-test"))
@@ -500,7 +436,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                      def filter = Set.empty
                      def handle(ev: EventEnvelope[TestEvent]): IO[Unit] =
                        count.updateAndGet(_ + 1).flatMap(n => if n == 2 then done.complete(()).void else IO.unit)
-      result <- DefaultProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+      result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
                   for
                     _ <- IO.sleep(50.millis)
                     _ <- store.sendNotification(PauseProjection("resume-test"))
@@ -518,8 +454,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                   yield (countWhilePaused, countAfterResume)
                 }
     yield expect.all(
-      result._1 == 0, // not processed while paused
-      result._2 == 2, // processed after resume
+      result._1 == 0,
+      result._2 == 2,
     )
   }
 
@@ -541,10 +477,10 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                        }
       _ <- seed(
              store,
-             (Set(entityTag("a")), TestEvent.Created("a")), // pos 1
-             (Set(entityTag("b")), TestEvent.Created("b")), // pos 2
+             (Set(entityTag("a")), TestEvent.Created("a")),
+             (Set(entityTag("b")), TestEvent.Created("b")),
            )
-      result <- DefaultProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+      result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
                   for
                     _ <- firstPassDone.get.timeout(2.seconds)
                     _ <- store.sendNotification(UpdateCheckpointIndex("reindex-test", 0L))
@@ -552,5 +488,84 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                     n <- count.get
                   yield n
                 }
-    yield expect(result == 4) // 2 from first pass + 2 reprocessed after index reset
+    yield expect(result == 4)
+  }
+
+  // ---------------------------------------------------------------------------
+  // Parallel-specific tests
+  // ---------------------------------------------------------------------------
+
+  test("parallel: events for distinct keys within a batch all produce correct final states") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states)
+      _          <- seed(
+             store,
+             (Set(entityTag("a")), TestEvent.Created("a")), // pos 1 — key "a"
+             (Set(entityTag("b")), TestEvent.Created("b")), // pos 2 — key "b"
+             (Set(entityTag("a")), TestEvent.Created("a")), // pos 3 — key "a"
+             (Set(entityTag("b")), TestEvent.Created("b")), // pos 4 — key "b"
+           )
+      _         <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
+      persisted <- states.get
+    yield expect.all(
+      persisted.get("a") == Some(2), // handle called twice for key "a"
+      persisted.get("b") == Some(2), // handle called twice for key "b"
+    )
+  }
+
+  test("parallel failure: falls back to sequential and persists partial progress up to the failed event, pauses the projector with an error") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states, failOnPosition = Some(2L))
+      _          <- seed(
+             store,
+             (Set(entityTag("a")), TestEvent.Created("a")), // pos 1 — succeeds in both paths
+             (Set(entityTag("b")), TestEvent.Created("b")), // pos 2 — fails; triggers fallback
+             (Set(entityTag("c")), TestEvent.Created("c")), // pos 3 — never reached
+           )
+      result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+                  waitUntil(checkpoint.load("tracking").map(_.exists(_.error.isDefined))).timeout(2.seconds) *>
+                    (states.get, checkpoint.getAll).tupled
+                }
+      (persisted, saved) = result
+    yield expect.all(
+      persisted.contains("a"),                                               // state for pos 1 saved
+      !persisted.contains("b"),                                              // state for pos 2 not saved (failed)
+      !persisted.contains("c"),                                              // pos 3 never processed
+      saved.get("tracking").map(_.globalPosition) == Some(1L),               // checkpoint at pos 1
+      saved.get("tracking").exists(!_.running),                              // projector is paused
+      saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")), // error recorded
+    )
+  }
+
+  test("parallel failure on first event: no state persisted, checkpoint saved with error at initial position, projector paused") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states, failOnPosition = Some(1L))
+      _          <- seed(
+             store,
+             (Set(entityTag("a")), TestEvent.Created("a")), // pos 1 — fails immediately
+             (Set(entityTag("b")), TestEvent.Created("b")), // pos 2 — never reached
+           )
+      result <- ParallelProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+                  waitUntil(checkpoint.load("tracking").map(_.exists(_.error.isDefined))).timeout(2.seconds) *>
+                    (states.get, checkpoint.getAll).tupled
+                }
+      (persisted, saved) = result
+    yield expect.all(
+      persisted.isEmpty,
+      saved.get("tracking").map(_.globalPosition) == Some(-1L),
+      saved.get("tracking").exists(!_.running), // projector is paused
+      saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")),
+    )
   }

@@ -31,20 +31,21 @@ given Meter[IO] = Meter.Implicits.noop
 
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
-import persistent4s.{EventFilter, IndexConflictException, Tag}
+import persistent4s.{EventFilter, EventStoreNotification, IndexConflictException, Tag}
 import weaver.IOSuite
 import persistent4s.EventTypeName
 import persistent4s.Event
+import persistent4s.EventStore
 
 object PostgresEventStoreSuite extends IOSuite:
 
   override def maxParallelism: Int = 1
 
-  type Res = PostgresEventStore[IO, TestEvent]
+  type Res = PostgresModule.Components[IO, TestEvent]
 
   override def sharedResource: Resource[IO, Res] =
     postgresContainerResource.flatMap { container =>
-      PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec).map(_.eventStore)
+      PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec)
     }
 
   final case class TestEvent(value: String) extends Event derives Encoder.AsObject, Decoder
@@ -74,16 +75,30 @@ object PostgresEventStoreSuite extends IOSuite:
     }
 
   private def appendOne(
-    store: PostgresEventStore[IO, TestEvent],
+    store: EventStore[IO, TestEvent],
     expectedIndex: Long,
     tags: Set[Tag],
     value: String,
   ): IO[Unit] =
-    store.append(
-      EventFilter(Set.empty, tags),
-      expectedIndex,
-      List((tags, EventTypeName.of[TestEvent], TestEvent(value))),
-    )
+    store
+      .append(
+        EventFilter(Set.empty, tags),
+        expectedIndex,
+        List((None, tags, EventTypeName.of[TestEvent], false, TestEvent(value))),
+      )
+      .void
+
+  private def appendUncheckedOne(
+    store: EventStore[IO, TestEvent],
+    tags: Set[Tag],
+    value: String,
+    eventId: Option[UUID] = None,
+  ): IO[Unit] =
+    store
+      .appendUnchecked(
+        List((eventId, tags, EventTypeName.of[TestEvent], true, TestEvent(value))),
+      )
+      .void
 
   private def isConflict(result: Either[Throwable, Unit]): Boolean =
     result match
@@ -93,22 +108,23 @@ object PostgresEventStoreSuite extends IOSuite:
   private def freshId(prefix: String): IO[String] =
     IO(s"$prefix-${UUID.randomUUID().toString}")
 
-  test("append stores event with correct payload, tags, and event type") { store =>
-    for
-      id     <- freshId("student")
-      tag     = Tag("student", id)
-      _      <- appendOne(store, 0L, Set(tag), "hello")
-      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
-    yield expect.all(
-      events.length == 1,
-      events.head.payload == TestEvent("hello"),
-      events.head.metadata.tags == Set(tag),
-      events.head.metadata.eventType == EventTypeName.of[TestEvent],
-      events.head.metadata.globalPosition >= 1L,
-    )
+  test("append stores event with correct payload, tags, and event type") {
+    case PostgresModule.Components(store, _, _) =>
+      for
+        id     <- freshId("student")
+        tag     = Tag("student", id)
+        _      <- appendOne(store, 0L, Set(tag), "hello")
+        events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+      yield expect.all(
+        events.length == 1,
+        events.head.payload == TestEvent("hello"),
+        events.head.metadata.tags == Set(tag),
+        events.head.metadata.eventType == EventTypeName.of[TestEvent],
+        events.head.metadata.globalPosition >= 1L,
+      )
   }
 
-  test("readFrom skips events at or before the given position") { store =>
+  test("readFrom skips events at or before the given position") { case PostgresModule.Components(store, _, _) =>
     // In Postgres the expectedIndex is the actual globalPosition of the last matching event,
     // not a per-tag counter — so we read it back after each append rather than hardcoding.
     for
@@ -129,7 +145,7 @@ object PostgresEventStoreSuite extends IOSuite:
     )
   }
 
-  test("readFrom with empty event type filter matches all event types") { store =>
+  test("readFrom with empty event type filter matches all event types") { case PostgresModule.Components(store, _, _) =>
     for
       id     <- freshId("student")
       tag     = Tag("student", id)
@@ -141,7 +157,7 @@ object PostgresEventStoreSuite extends IOSuite:
     )
   }
 
-  test("concurrent appends with the same tag allow only one success") { store =>
+  test("concurrent appends with the same tag allow only one success") { case PostgresModule.Components(store, _, _) =>
     for
       id             <- freshId("student")
       tag             = Tag("student", id)
@@ -170,27 +186,28 @@ object PostgresEventStoreSuite extends IOSuite:
     )
   }
 
-  test("concurrent appends with overlapping tag sets allow only one success") { store =>
-    for
-      studentId      <- freshId("student")
-      courseId       <- freshId("course")
-      studentTag      = Tag("student", studentId)
-      courseTag       = Tag("course", courseId)
-      first           = appendOne(store, 0L, Set(studentTag, courseTag), "enrollment").attempt
-      second          = appendOne(store, 0L, Set(studentTag), "student-update").attempt
-      results        <- (first, second).parTupled
-      matchingEvents <-
-        store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(studentTag))).compile.toList
-      successCount  = List(results._1, results._2).count(_.isRight)
-      conflictCount = List(results._1, results._2).count(isConflict)
-    yield expect.all(
-      successCount == 1,
-      conflictCount == 1,
-      matchingEvents.length == 1,
-    )
+  test("concurrent appends with overlapping tag sets allow only one success") {
+    case PostgresModule.Components(store, _, _) =>
+      for
+        studentId      <- freshId("student")
+        courseId       <- freshId("course")
+        studentTag      = Tag("student", studentId)
+        courseTag       = Tag("course", courseId)
+        first           = appendOne(store, 0L, Set(studentTag, courseTag), "enrollment").attempt
+        second          = appendOne(store, 0L, Set(studentTag), "student-update").attempt
+        results        <- (first, second).parTupled
+        matchingEvents <-
+          store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(studentTag))).compile.toList
+        successCount  = List(results._1, results._2).count(_.isRight)
+        conflictCount = List(results._1, results._2).count(isConflict)
+      yield expect.all(
+        successCount == 1,
+        conflictCount == 1,
+        matchingEvents.length == 1,
+      )
   }
 
-  test("many concurrent appends with distinct tags all succeed") { store =>
+  test("many concurrent appends with distinct tags all succeed") { case PostgresModule.Components(store, _, _) =>
     val numberOfEvents = 50
 
     for
@@ -208,21 +225,22 @@ object PostgresEventStoreSuite extends IOSuite:
     )
   }
 
-  test("appends with fresh tags can start from expected index zero after prior events") { store =>
-    for
-      firstTag  <- freshId("first").map(id => Tag("student", id))
-      secondTag <- freshId("second").map(id => Tag("student", id))
-      _         <- appendOne(store, 0L, Set(firstTag), "before")
-      result    <- appendOne(store, 0L, Set(secondTag), "after").attempt
-      events    <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(secondTag))).compile.toList
-    yield expect.all(
-      events.length == 1,
-      result.isRight,
-      events.head.payload == TestEvent("after"),
-    )
+  test("appends with fresh tags can start from expected index zero after prior events") {
+    case PostgresModule.Components(store, _, _) =>
+      for
+        firstTag  <- freshId("first").map(id => Tag("student", id))
+        secondTag <- freshId("second").map(id => Tag("student", id))
+        _         <- appendOne(store, 0L, Set(firstTag), "before")
+        result    <- appendOne(store, 0L, Set(secondTag), "after").attempt
+        events    <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(secondTag))).compile.toList
+      yield expect.all(
+        events.length == 1,
+        result.isRight,
+        events.head.payload == TestEvent("after"),
+      )
   }
 
-  test("append with empty tags uses all tags for conflict detection") { store =>
+  test("append with empty tags uses all tags for conflict detection") { case PostgresModule.Components(store, _, _) =>
     for
       firstTag  <- freshId("first").map(id => Tag("student", id))
       secondTag <- freshId("second").map(id => Tag("student", id))
@@ -231,8 +249,135 @@ object PostgresEventStoreSuite extends IOSuite:
                   .append(
                     EventFilter(Set.empty, Set.empty),
                     0L,
-                    List((Set(secondTag), EventTypeName.of[TestEvent], TestEvent("after"))),
+                    List((None, Set(secondTag), EventTypeName.of[TestEvent], false, TestEvent("after"))),
                   )
+                  .void
                   .attempt
     yield expect(isConflict(result))
+  }
+
+  test("notify completes without error") { case PostgresModule.Components(_, _, sendNotification) =>
+    sendNotification(EventStoreNotification.PauseProjection("test-proj")).as(success)
+  }
+
+  test("appending with a provided UUID sets isExternal to true") { case PostgresModule.Components(store, _, _) =>
+    for
+      id  <- freshId("external")
+      tag  = Tag("external", id)
+      uuid = UUID.randomUUID()
+      _   <- store.append(
+             EventFilter(Set.empty, Set(tag)),
+             0L,
+             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("external-event"))),
+           )
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.isExternal == true,
+    )
+  }
+
+  test("appending without a provided UUID sets isExternal to false") { case PostgresModule.Components(store, _, _) =>
+    for
+      id     <- freshId("internal")
+      tag     = Tag("internal", id)
+      _      <- appendOne(store, 0L, Set(tag), "internal-event")
+      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.isExternal == false,
+    )
+  }
+
+  test("appending a duplicate UUID is a no-op and returns the original global position") {
+    case PostgresModule.Components(store, _, _) =>
+      for
+        id  <- freshId("dedup")
+        tag  = Tag("dedup", id)
+        uuid = UUID.randomUUID()
+        _   <- store.append(
+               EventFilter(Set.empty, Set(tag)),
+               0L,
+               List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("first"))),
+             )
+        pos1 <- store
+                  .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
+                  .compile
+                  .toList
+                  .map(_.head.metadata.globalPosition)
+        _ <- store.append(
+               EventFilter(Set.empty, Set(tag)),
+               pos1,
+               List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("duplicate"))),
+             )
+        events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+      yield expect.all(
+        events.length == 1,
+        events.head.metadata.globalPosition == pos1,
+        events.head.payload == TestEvent("first"),
+      )
+  }
+
+  test("appendUnchecked stores event with correct payload, tags, event type, and isExternal") {
+    case PostgresModule.Components(store, _, _) =>
+      for
+        id     <- freshId("imported")
+        tag     = Tag("imported", id)
+        _      <- appendUncheckedOne(store, Set(tag), "imported-event")
+        events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+      yield expect.all(
+        events.length == 1,
+        events.head.payload == TestEvent("imported-event"),
+        events.head.metadata.tags == Set(tag),
+        events.head.metadata.eventType == EventTypeName.of[TestEvent],
+        events.head.metadata.isExternal == true,
+        events.head.metadata.globalPosition >= 1L,
+      )
+  }
+
+  test("concurrent appendUnchecked calls with the same tag all succeed (no OCC)") {
+    case PostgresModule.Components(store, _, _) =>
+      // Unlike append, appendUnchecked performs no conflict check, so parallel writes with overlapping tags
+      // do not race — both events land in the store.
+      for
+        id      <- freshId("concurrent")
+        tag      = Tag("imported", id)
+        first    = appendUncheckedOne(store, Set(tag), "first").attempt
+        second   = appendUncheckedOne(store, Set(tag), "second").attempt
+        results <- (first, second).parTupled
+        events  <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+      yield expect.all(
+        results._1.isRight,
+        results._2.isRight,
+        events.length == 2,
+      )
+  }
+
+  test("appendUnchecked with a duplicate UUID is a no-op and returns the original global position") {
+    case PostgresModule.Components(store, _, _) =>
+      for
+        id   <- freshId("dedup-unchecked")
+        tag   = Tag("imported", id)
+        uuid  = UUID.randomUUID()
+        _    <- appendUncheckedOne(store, Set(tag), "first", Some(uuid))
+        pos1 <- store
+                  .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
+                  .compile
+                  .toList
+                  .map(_.head.metadata.globalPosition)
+        _      <- appendUncheckedOne(store, Set(tag), "duplicate", Some(uuid))
+        events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+      yield expect.all(
+        events.length == 1,
+        events.head.metadata.globalPosition == pos1,
+        events.head.payload == TestEvent("first"),
+      )
+  }
+
+  test("appendUnchecked with no events is a no-op") { case PostgresModule.Components(store, _, _) =>
+    for
+      before <- store.readFrom(0L, EventFilter(Set.empty, Set.empty)).compile.toList.map(_.length)
+      _      <- store.appendUnchecked()
+      after  <- store.readFrom(0L, EventFilter(Set.empty, Set.empty)).compile.toList.map(_.length)
+    yield expect(before == after)
   }
