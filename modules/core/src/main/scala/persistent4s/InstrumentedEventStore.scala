@@ -30,6 +30,8 @@ import java.util.UUID
   * Emits:
   *   - span `persistent4s.eventstore.append` per append call
   *   - span `persistent4s.eventstore.read_from` per readFrom stream (open for the stream's lifetime)
+  *   - span `persistent4s.eventstore.append_unchecked` per appendUnchecked call (reuse the same
+  *     `persistent4s.events.appended` counter and `persistent4s.append.duration` histogram as `append`)
   *   - counter `persistent4s.events.appended`
   *   - counter `persistent4s.events.read`
   *   - histogram `persistent4s.append.duration` (ms)
@@ -75,7 +77,22 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
   override def appendUnchecked(
     events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
   ): F[List[A]] =
-    inner.appendUnchecked(events*)
+    val eventCount = events.flatten.size.toLong
+    Tracer[F]
+      .spanBuilder("persistent4s.eventstore.append_unchecked")
+      .addAttributes(Attribute("event.count", eventCount))
+      .build
+      .surround(
+        for
+          start   <- Async[F].monotonic
+          result  <- inner.appendUnchecked(events*).attempt
+          end     <- Async[F].monotonic
+          _       <- appendDuration.record((end - start).toNanos.toDouble / 1e6)
+          written <- result match
+                       case Right(w) => eventsAppended.add(eventCount).as(w)
+                       case Left(e)  => Async[F].raiseError(e)
+        yield written,
+      )
 
   override def readFrom(
     fromPosition: Long,
