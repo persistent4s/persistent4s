@@ -23,7 +23,7 @@ import cats.effect.Ref
 import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.otel4s.Attribute
-import org.typelevel.otel4s.metrics.{Histogram, Meter}
+import org.typelevel.otel4s.metrics.{Counter, Histogram, Meter}
 import org.typelevel.otel4s.trace.Tracer
 import persistent4s.EventStoreNotification.*
 
@@ -85,7 +85,7 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
 
     Stream
       .eval(makeInstruments)
-      .flatMap { (batchSizeHist, batchDurationHist) =>
+      .flatMap { (batchSizeHist, batchDurationHist, pausedCounter) =>
         val projAttr = Attribute("projection.name", projection.name)
 
         def persistProgress(
@@ -269,6 +269,7 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
             next     = current.copy(running = false, error = Some(formatError(error)))
             _       <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
             _       <- projectionState.set(next)
+            _       <- pausedCounter.add(1L, projAttr)
           } yield ()
 
         Stream.eval {
@@ -316,7 +317,7 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
       }
   }
 
-  private def makeInstruments: F[(Histogram[F, Long], Histogram[F, Double])] =
+  private def makeInstruments: F[(Histogram[F, Long], Histogram[F, Double], Counter[F, Long])] =
     (
       Meter[F]
         .histogram[Long]("persistent4s.projector.batch.size")
@@ -327,5 +328,10 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
         .histogram[Double]("persistent4s.projector.batch.duration")
         .withDescription("Time to process one batch")
         .withUnit("ms")
+        .create,
+      Meter[F]
+        .counter[Long]("persistent4s.projector.paused")
+        .withDescription("Number of times a projection was paused due to an unrecoverable error")
+        .withUnit("{pauses}")
         .create,
     ).tupled
