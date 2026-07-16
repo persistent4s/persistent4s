@@ -35,6 +35,8 @@ import persistent4s.EventNotification
 import persistent4s.EventStore
 import persistent4s.InstrumentedEventStore
 import persistent4s.EventStoreNotification
+import persistent4s.ProjectionCheckpoint
+import persistent4s.InstrumentedProjectionCheckpoint
 
 sealed trait PostgresModuleError extends Throwable
 
@@ -85,7 +87,7 @@ object PostgresModule:
   /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
   final case class Components[F[_], A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
-    checkpoint: PostgresProjectionCheckpoint[F],
+    checkpoint: ProjectionCheckpoint[F],
     sendNotification: EventStoreNotification => F[Unit],
   )
 
@@ -119,9 +121,10 @@ object PostgresModule:
       store <- Resource.eval(
                  InstrumentedEventStore.makeWithNotification[F, A](raw),
                )
+      checkpoint <- Resource.eval(InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)))
     yield Components(
       store,
-      PostgresProjectionCheckpoint.make[F](pool),
+      checkpoint,
       raw.notify,
     )
 
@@ -151,9 +154,10 @@ object PostgresModule:
       store <- Resource.eval(
                  InstrumentedEventStore.makeWithNotification[F, A](raw),
                )
+      checkpoint <- Resource.eval(InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)))
     yield Components(
       store,
-      PostgresProjectionCheckpoint.make[F](pool),
+      checkpoint,
       raw.notify,
     )
 
