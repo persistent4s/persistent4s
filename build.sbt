@@ -56,13 +56,13 @@ val CatsEffectV = "3.7.0"
 
 val Fs2V = "3.13.0"
 
-val SkunkV = "1.0.0"
+val SkunkV = "2.0.0-RC2"
 
-val CirceV = "0.14.15"
+val CirceV = "0.14.16"
 
 val Log4CatsV = "2.8.0"
 
-val Otel4sV = "0.16.0"
+val Otel4sV = "1.0.1"
 
 val LogbackV = "1.5.34"
 
@@ -72,7 +72,7 @@ val Fs2KafkaV = "4.0.0"
 
 val WeaverV = "0.13.0"
 
-val Http4sV = "0.23.34"
+val Http4sV = "0.23.36"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 
