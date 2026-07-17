@@ -58,7 +58,7 @@ val Fs2V = "3.13.0"
 
 val SkunkV = "1.0.0"
 
-val CirceV = "0.14.15"
+val CirceV = "0.14.16"
 
 val Log4CatsV = "2.8.0"
 
