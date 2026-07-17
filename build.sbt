@@ -62,7 +62,7 @@ val CirceV = "0.14.15"
 
 val Log4CatsV = "2.8.0"
 
-val Otel4sV = "0.16.0"
+val Otel4sV = "1.0.1"
 
 val LogbackV = "1.5.34"
 
