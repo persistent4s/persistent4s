@@ -30,7 +30,7 @@ object CommandHandlerMetrics:
   def make[F[_]: Meter: Functor]: F[CommandHandlerMetrics[F]] =
     Meter[F]
       .counter[Long]("persistent4s.commandhandler.retries")
-      .withDescription("Number of command handler retry attempts on confilct")
+      .withDescription("Number of command handler retry attempts on conflict")
       .withUnit("{retries}")
       .create
       .map(CommandHandlerMetrics(_))
