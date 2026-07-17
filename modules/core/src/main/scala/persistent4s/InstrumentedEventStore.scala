@@ -59,19 +59,14 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
       .addAttribute(Attribute("event.count", eventCount))
       .build
       .surround(
-        for
-          start    <- Async[F].monotonic
-          result   <- inner.append(eventFilter, expectedIndex, events*).attempt
-          end      <- Async[F].monotonic
-          _        <- appendDuration.record((end - start).toNanos.toDouble / 1e6, metricAttrs*)
-          appended <- result match
-                        case Right(written) =>
-                          eventsAppended.add(eventCount, metricAttrs*).as(written)
-                        case Left(e: IndexConflictException) =>
-                          conflicts.add(1L, metricAttrs*) *> Async[F].raiseError(e)
-                        case Left(e) =>
-                          Async[F].raiseError(e)
-        yield appended,
+        Telemetry.timed(appendDuration, metricAttrs*)(inner.append(eventFilter, expectedIndex, events*)).flatMap {
+          case Right(written) =>
+            eventsAppended.add(eventCount, metricAttrs*).as(written)
+          case Left(e: IndexConflictException) =>
+            conflicts.add(1L, metricAttrs*) *> Async[F].raiseError(e)
+          case Left(e) =>
+            Async[F].raiseError(e)
+        },
       )
 
   override def appendUnchecked(
@@ -83,15 +78,10 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
       .addAttributes(Attribute("event.count", eventCount))
       .build
       .surround(
-        for
-          start   <- Async[F].monotonic
-          result  <- inner.appendUnchecked(events*).attempt
-          end     <- Async[F].monotonic
-          _       <- appendDuration.record((end - start).toNanos.toDouble / 1e6)
-          written <- result match
-                       case Right(w) => eventsAppended.add(eventCount).as(w)
-                       case Left(e)  => Async[F].raiseError(e)
-        yield written,
+        Telemetry.timed(appendDuration)(inner.appendUnchecked(events*)).flatMap {
+          case Right(w) => eventsAppended.add(eventCount).as(w)
+          case Left(e)  => Async[F].raiseError(e)
+        },
       )
 
   override def readFrom(

@@ -161,11 +161,8 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
               .build
               .surround(
                 for
-                  start  <- Async[F].monotonic
-                  result <- body.attempt
-                  end    <- Async[F].monotonic
+                  result <- Telemetry.timed(batchDurationHist, projAttr)(body)
                   _      <- batchSizeHist.record(batchSz, projAttr)
-                  _      <- batchDurationHist.record((end - start).toNanos.toDouble / 1e6, projAttr)
                   _      <- result.fold(Async[F].raiseError, Async[F].pure)
                 yield (),
               )

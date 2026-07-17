@@ -49,12 +49,7 @@ final class InstrumentedProjectionCheckpoint[F[_]: Async: Tracer] private (
       .addAttribute(projAttr)
       .build
       .surround(
-        for
-          start <- Async[F].monotonic
-          _     <- inner.save(state)
-          end   <- Async[F].monotonic
-          _     <- saveDuration.record((end - start).toNanos.toDouble / 1e6, projAttr)
-        yield (),
+        Telemetry.timed(saveDuration, projAttr)(inner.save(state)).flatMap(_.fold(Async[F].raiseError, Async[F].pure)),
       )
 
   override def loadAll(): F[List[ProjectionCheckpointState]] =
