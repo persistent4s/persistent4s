@@ -20,8 +20,8 @@ import cats.effect.*
 import cats.effect.std.Console
 import cats.syntax.all.*
 import fs2.io.net.Network
-import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Histogram, Meter}
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.ConfigSource
@@ -175,14 +175,37 @@ object PostgresModule:
   private def createSessionPool[F[_]: Async: Network: Tracer: Meter: Console](
     config: PostgresConfig,
   ): Resource[F, Resource[F, Session[F]]] =
-    Session
-      .Builder[F]
-      .withHost(config.host)
-      .withPort(config.port)
-      .withUserAndPassword(config.user, config.password)
-      .withDatabase(config.database)
-      .pooled(config.maxConnections)
-      .adaptError { case e => PostgresModuleError.ConnectionFailed(e) }
+    for
+      rawPool <- Session
+                   .Builder[F]
+                   .withHost(config.host)
+                   .withPort(config.port)
+                   .withUserAndPassword(config.user, config.password)
+                   .withDatabase(config.database)
+                   .pooled(config.maxConnections)
+                   .adaptError { case e => PostgresModuleError.ConnectionFailed(e) }
+      waitDuration <- Resource.eval(
+                        Meter[F]
+                          .histogram[Double]("persistent4s.postgres.pool.wait_duration")
+                          .withDescription("Time spent waiting to acquire a session from the connection pool")
+                          .withUnit("ms")
+                          .create,
+                      )
+    yield timedPool(rawPool, waitDuration)
+
+  private def timedPool[F[_]: Async](
+    pool: Resource[F, Session[F]],
+    waitDuration: Histogram[F, Double],
+  ): Resource[F, Session[F]] =
+    Resource.suspend(
+      Async[F].monotonic.map { start =>
+        pool.evalMap { session =>
+          Async[F].monotonic.flatMap { end =>
+            waitDuration.record((end - start).toNanos.toDouble / 1e6).as(session)
+          }
+        }
+      },
+    )
 
   private def initializeDatabase[F[_]: Async](
     pool: Resource[F, Session[F]],
