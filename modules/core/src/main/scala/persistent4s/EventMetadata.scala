@@ -25,6 +25,8 @@ import java.util.UUID
   *
   * @param globalPosition
   *   the global position of the event in the event store
+  * @param id
+  *   the id of the event
   * @param tags
   *   the tags associated with the event
   * @param eventType

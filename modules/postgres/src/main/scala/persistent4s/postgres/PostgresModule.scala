@@ -78,10 +78,13 @@ object PostgresModuleError:
   */
 object PostgresModule:
 
-  /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
+  /** Holds the fully-initialized PostgreSQL event store, projection checkpoint, and snapshot store, sharing the same
+    * connection pool.
+    */
   final case class Components[F[_], A <: Event](
     eventStore: PostgresEventStore[F, A],
     checkpoint: PostgresProjectionCheckpoint[F],
+    snapshotStore: PostgresSnapshotStore[F],
   )
 
   private val defaultConfigPath = "persistent4s.postgres"
@@ -112,7 +115,8 @@ object PostgresModule:
       _    <- Resource.eval(initializeDatabase[F](pool, logger))
     yield Components(
       PostgresEventStore[F, A](pool, codec),
-      PostgresProjectionCheckpoint.make[F](pool),
+      PostgresProjectionCheckpoint[F](pool),
+      PostgresSnapshotStore[F](pool),
     )
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
@@ -139,7 +143,8 @@ object PostgresModule:
       _    <- Resource.eval(initializeDatabase[F](pool, logger))
     yield Components(
       PostgresEventStore[F, A](pool, codec),
-      PostgresProjectionCheckpoint.make[F](pool),
+      PostgresProjectionCheckpoint[F](pool),
+      PostgresSnapshotStore[F](pool),
     )
 
   private def loadConfig[F[_]: Sync](configPath: String): F[PostgresConfig] =
@@ -187,7 +192,8 @@ object PostgresModule:
       session.execute(createEventTypeIndexCommand) *>
       session.execute(createEventTagsTableCommand) *>
       session.execute(createEventTagsSequenceIndexCommand) *>
-      session.execute(PostgresProjectionCheckpoint.createTableCommand).void
+      session.execute(PostgresProjectionCheckpoint.createTableCommand).void *>
+      session.execute(PostgresSnapshotStore.createTableCommand).void
 
   private val checkTableExistsQuery: Query[String, Long] =
     sql"""

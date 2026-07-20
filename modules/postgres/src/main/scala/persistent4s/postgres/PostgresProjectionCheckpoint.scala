@@ -31,7 +31,7 @@ import persistent4s.{ProjectionCheckpoint, ProjectionCheckpointState}
   * @param pool
   *   a resource for obtaining database sessions
   */
-final class PostgresProjectionCheckpoint[F[_]: Async] private (
+final class PostgresProjectionCheckpoint[F[_]: Async](
   pool: Resource[F, Session[F]],
 ) extends ProjectionCheckpoint[F]:
 
@@ -95,6 +95,3 @@ object PostgresProjectionCheckpoint:
         error TEXT
       )
     """.command
-
-  def make[F[_]: Async](pool: Resource[F, Session[F]]): PostgresProjectionCheckpoint[F] =
-    new PostgresProjectionCheckpoint(pool)

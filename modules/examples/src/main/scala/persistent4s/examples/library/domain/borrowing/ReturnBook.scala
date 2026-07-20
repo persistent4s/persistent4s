@@ -16,6 +16,7 @@
 
 package persistent4s.examples.library.domain.borrowing
 
+import io.circe.{Decoder, Encoder}
 import persistent4s.{CommandHandler, EventTypeName, Tag}
 import persistent4s.examples.library.domain.*
 import java.time.OffsetDateTime
@@ -29,7 +30,8 @@ final case class ReturnBook(
 final case class ReturnBookState(
   hasBorrowing: Boolean,
   alreadyReturned: Boolean,
-)
+) derives Encoder,
+      Decoder
 
 object ReturnBookHandler extends CommandHandler[ReturnBook, ReturnBookState, LibraryEvent]:
 

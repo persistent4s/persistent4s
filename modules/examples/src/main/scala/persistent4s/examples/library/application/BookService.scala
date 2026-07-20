@@ -20,12 +20,14 @@ import java.util.UUID
 
 import cats.effect.IO
 
-import persistent4s.EventStore
+import persistent4s.{EventStore, SnapshotStore}
+import persistent4s.circe.CirceSnapshotCodec.given
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
 
-class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, LibraryEvent]) extends BookService[IO]:
+class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, LibraryEvent], SnapshotStore[IO])
+    extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
     (for
