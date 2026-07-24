@@ -76,9 +76,16 @@ final class KafkaRelay[F[_]: Async, A <: Event] private (
     initialDelay: FiniteDuration = 1.second,
     maxDelay: FiniteDuration = 30.seconds,
   ): F[Unit] =
-    runOnce.handleErrorWith { _ =>
-      Temporal[F].sleep(initialDelay) *> run((initialDelay * 2).min(maxDelay), maxDelay)
-    }
+    def loop(delay: FiniteDuration): F[Unit] =
+      Temporal[F].monotonic.flatMap { start =>
+        runOnce.handleErrorWith { _ =>
+          Temporal[F].monotonic.flatMap { end =>
+            val effectiveDelay = if end - start >= maxDelay then initialDelay else delay
+            Temporal[F].sleep(effectiveDelay) *> loop((effectiveDelay * 2).min(maxDelay))
+          }
+        }
+      }
+    loop(initialDelay)
 
 object KafkaRelay:
 
