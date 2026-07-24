@@ -74,8 +74,10 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
             _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
             _ <-
               flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
-                insertEvent(session, eventIdOpt, tags, eventType, isExternal, event)
-                  .flatMap(pos => if !isExternal then enqueueOutbox(session, pos) else Async[F].unit)
+                insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).flatMap {
+                  case (pos, insertedNow) =>
+                    if insertedNow && !isExternal then enqueueOutbox(session, pos) else Async[F].unit
+                }
               }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield flatEvents.map(_._5)
@@ -92,8 +94,10 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
         session.transaction.use { _ =>
           for
             _ <- flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
-                   insertEvent(session, eventIdOpt, tags, eventType, isExternal, event)
-                     .flatMap(pos => if !isExternal then enqueueOutbox(session, pos) else Async[F].unit)
+                   insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).flatMap {
+                     case (pos, insertedNow) =>
+                       if insertedNow && !isExternal then enqueueOutbox(session, pos) else Async[F].unit
+                   }
                  }
             _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield flatEvents.map(_._5)
@@ -248,21 +252,30 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     eventType: EventTypeName,
     isExternal: Boolean,
     event: A,
-  ): F[Long] =
+  ): F[(Long, Boolean)] =
     val tagsJson = tagsToJson(tags)
     for
-      payloadJson    <- encodePayload(event)
-      sequenceNumber <- eventIdOpt match
-                          case Some(eventId) =>
-                            session.unique(insertEventWithIdQuery)(
-                              eventId *: eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
-                            )
-                          case None =>
-                            session.unique(insertEventQuery)(
-                              eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
-                            )
-      _ <- insertEventTags(session, sequenceNumber, tags)
-    yield sequenceNumber
+      payloadJson <- encodePayload(event)
+      result      <- eventIdOpt match
+                  case Some(eventId) =>
+                    session
+                      .option(insertEventWithIdQuery)(
+                        eventId *: eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
+                      )
+                      .flatMap {
+                        case Some(pos) => Async[F].pure((pos, true))
+                        case None      =>
+                          session.unique(selectSequenceNumberByEventIdQuery)(eventId).map((_, false))
+                      }
+                  case None =>
+                    session
+                      .unique(insertEventQuery)(
+                        eventType.value *: tagsJson *: payloadJson *: isExternal *: EmptyTuple,
+                      )
+                      .map((_, true))
+      (sequenceNumber, insertedNow) = result
+      _                            <- if insertedNow then insertEventTags(session, sequenceNumber, tags) else Async[F].unit
+    yield (sequenceNumber, insertedNow)
 
   /** Run the codec and parse its String output into circe `Json`. Both stages have explicit failure channels; either
     * failure is raised into `F` so the surrounding transaction rolls back.
@@ -372,7 +385,7 @@ object PostgresEventStore:
     sql"""
       INSERT INTO events (event_id, event_type, tags, payload, is_external)
       VALUES ($uuid, $text, $jsonb, $jsonb, $bool)
-      ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
+      ON CONFLICT (event_id) DO NOTHING
       RETURNING sequence_number
     """.query(int8)
 
@@ -535,3 +548,10 @@ object PostgresEventStore:
       ORDER BY e.sequence_number ASC
       LIMIT $int4
     """.query(eventDecoder)
+
+  private val selectSequenceNumberByEventIdQuery: Query[UUID, Long] =
+    sql"""
+      SELECT sequence_number
+      FROM events
+      WHERE event_id = $uuid
+    """.query(int8)
