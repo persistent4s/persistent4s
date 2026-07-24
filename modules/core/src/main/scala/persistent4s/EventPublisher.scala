@@ -16,8 +16,6 @@
 
 package persistent4s
 
-import persistent4s.{Event, EventEnvelope}
-
 /** Publishes [[EventEnvelope]]s to a topic. */
 trait EventPublisher[F[_], A <: Event]:
 

@@ -32,9 +32,9 @@ import persistent4s.{Event, EventCodec, EventEnvelope, EventMetadata, EventTypeN
 import persistent4s.EventSubscriber
 import persistent4s.EventPublisher
 
-/** Entry point for the Kafka components: [[publisher]], [[subscriber]], and [[relay]]. Each is independent — build
-  * only what you need. The relay drains any [[Outbox]] implementation, so this module never depends on a specific
-  * event store.
+/** Entry point for the Kafka components: [[publisher]], [[subscriber]], and [[relay]]. Each is independent — build only
+  * what you need. The relay drains any [[Outbox]] implementation, so this module never depends on a specific event
+  * store.
   */
 object KafkaModule:
 
@@ -113,6 +113,10 @@ object KafkaModule:
     * different partitions have no relative order. To order a whole tag scope, key it onto one partition (or use a
     * constant key for total ordering). Under DCB this suffices: causally independent events need no order.
     *
+    * '''Throughput:''' commits happen per record and all partitions are consumed on one stream, so a single subscriber
+    * does not parallelize. To scale, add partitions and run more consumer instances in the same `groupId` (Kafka
+    * rebalances partitions across them) rather than expecting concurrency from one subscriber.
+    *
     * @param fromBeginning
     *   if true and no offset is committed for the group, start at the earliest record; otherwise follow the broker's
     *   `auto.offset.reset`.
@@ -163,7 +167,10 @@ object KafkaModule:
         case Right(envelope) => Async[F].pure(envelope)
         case Left(error)     =>
           Async[F].raiseError(
-            new RuntimeException(s"Failed to decode record with key ${record.key}: ${error.getMessage}", error),
+            new RuntimeException(
+              s"Failed to decode record with key ${Option(record.key).getOrElse("<none>")}: ${error.getMessage}",
+              error,
+            ),
           )
 
     Resource.pure(new EventSubscriber[F, A]:
@@ -184,8 +191,8 @@ object KafkaModule:
             envelopeFromRecord(committable.record).map(envelope => (envelope, committable.offset.commit))
           })
 
-  /** Build a [[KafkaRelay]] draining `outbox` into `topic`. Does not start it — call `.run` (typically in a
-    * background fiber). Run at most one relay per outbox/topic; see [[KafkaRelay]] for the rationale.
+  /** Build a [[KafkaRelay]] draining `outbox` into `topic`. Does not start it — call `.run` (typically in a background
+    * fiber). Run at most one relay per outbox/topic; see [[KafkaRelay]] for the rationale.
     */
   def relay[F[_]: Async: Parallel, A <: Event](
     outbox: Outbox[F, A],

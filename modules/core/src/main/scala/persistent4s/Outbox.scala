@@ -24,7 +24,7 @@ import fs2.Stream
   * the event, so an event either becomes visible together with its outbox entry or not at all. A relay process then
   * streams unpublished entries via [[stream]], publishes them, and acknowledges with [[markPublished]].
   *
-  * The trait deliberately knows nothing abouut the broker. Any broker-specific relay can consume from it.
+  * The trait deliberately knows nothing about the broker. Any broker-specific relay can consume from it.
   *
   * @tparam F
   *   the effect type
