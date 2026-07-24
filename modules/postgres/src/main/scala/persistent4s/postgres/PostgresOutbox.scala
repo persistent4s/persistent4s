@@ -65,7 +65,7 @@ final class PostgresOutbox[F[_]: Async, A <: Event] private (
           Stream
             .eval(session.prepare(selectUnpublishedQuery))
             .flatMap(_.stream(Void, batchSize))
-            .evalMap {
+            .evalMapChunk {
               case globalPosition *: eventId *: eventType *: tags *: payload *: isExternal *: recordedAt *: EmptyTuple =>
                 val eventTypeName = EventTypeName.fromString(eventType)
                 parsePayload(eventTypeName, payload).map { event =>

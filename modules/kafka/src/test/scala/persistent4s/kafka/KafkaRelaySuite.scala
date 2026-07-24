@@ -144,7 +144,7 @@ object KafkaRelaySuite extends SimpleIOSuite:
     yield expect(acks == Vector(10L, 20L, 30L))
   }
 
-  test("stops on first publish failure without acking the failing envelope") {
+  test("a publish failure leaves the whole batch unacked") {
     val pending = List(envelope(1L), envelope(2L), envelope(3L))
     for
       recorded  <- Ref.of[IO, Vector[(String, EventEnvelope[TestEvent])]](Vector.empty)
@@ -158,7 +158,7 @@ object KafkaRelaySuite extends SimpleIOSuite:
     yield expect.all(
       result.isLeft,
       pubs.map(_._2.metadata.globalPosition) == Vector(1L),
-      acks == Vector(1L),
+      acks.isEmpty,
     )
   }
 

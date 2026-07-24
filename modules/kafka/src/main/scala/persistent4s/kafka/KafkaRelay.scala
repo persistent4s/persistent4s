@@ -28,9 +28,9 @@ import persistent4s.EventPublisher
   * A long-running process: start once at startup; `run` only returns if the outbox stream ends or an unrecoverable
   * error escapes. Restart-safe, since progress lives in the outbox table.
   *
-  * '''Single instance:''' run at most one relay per outbox/topic. Two concurrent relays would interleave records on
-  * the partition, breaking ordering and possibly publishing an event twice. Not enforced yet (a future Postgres
-  * advisory lock may make it self-enforcing).
+  * '''Single instance:''' run at most one relay per outbox/topic. Two concurrent relays would interleave records on the
+  * partition, breaking ordering and possibly publishing an event twice. Not enforced yet (a future Postgres advisory
+  * lock may make it self-enforcing).
   *
   * '''Producer:''' the [[EventPublisher]] must use `enable.idempotence=true` (Kafka's default since 3.0), otherwise
   * retries can reorder records within a partition.
@@ -53,14 +53,16 @@ final class KafkaRelay[F[_]: Async, A <: Event] private (
 ):
 
   /** Run the relay once. Returns when the outbox stream completes or fails. On a publish error it fails fast without
-    * acking the failing envelope, so the next run reprocesses it.
+    * acking the failing batch, so the next run reprocesses it.
     */
   def runOnce: F[Unit] =
     outbox
       .stream(batchSize)
-      .evalMap { envelope =>
-        publisher.publish(topic, envelope) *>
-          outbox.markPublished(envelope.metadata.globalPosition)
+      .chunks
+      .evalMap { chunk =>
+        val envelopes = chunk.toList
+        publisher.publish(topic, envelopes) *>
+          outbox.markPublished(envelopes.map(_.metadata.globalPosition))
       }
       .compile
       .drain
