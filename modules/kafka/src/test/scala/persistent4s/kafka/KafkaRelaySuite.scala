@@ -22,6 +22,7 @@ import java.util.UUID
 import scala.concurrent.duration.*
 
 import cats.effect.{IO, Ref}
+import cats.effect.testkit.TestControl
 import cats.syntax.all.*
 import fs2.Stream
 import weaver.SimpleIOSuite
@@ -101,6 +102,27 @@ object KafkaRelaySuite extends SimpleIOSuite:
 
     override def publish(topic: String, envelopes: List[EventEnvelope[TestEvent]]): IO[Unit] =
       envelopes.traverse_(publish(topic, _))
+
+  private val noopPublisher: EventPublisher[IO, TestEvent] =
+    new EventPublisher[IO, TestEvent]:
+      override def publish(topic: String, envelope: EventEnvelope[TestEvent]): IO[Unit] = IO.unit
+      override def publish(topic: String, envelopes: List[EventEnvelope[TestEvent]]): IO[Unit] = IO.unit
+
+  final private class TimedFailingOutbox(
+    runDuration: FiniteDuration,
+    startTimes: Ref[IO, Vector[FiniteDuration]],
+  ) extends Outbox[IO, TestEvent]:
+
+    override def stream(batchSize: Int): Stream[IO, EventEnvelope[TestEvent]] =
+      Stream.exec(IO.monotonic.flatMap(t => startTimes.update(_ :+ t))) ++
+        Stream.exec(IO.sleep(runDuration)) ++
+        Stream.raiseError[IO](new RuntimeException("boom"))
+
+    override def markPublished(globalPosition: Long): IO[Unit] = IO.unit
+
+    override def markPublished(globalPositions: List[Long]): IO[Unit] = IO.unit
+
+    override def notifications: Stream[IO, Unit] = Stream.empty
 
   /** Poll `ref` until its size reaches `n` or `timeout` elapses. */
   private def waitFor[A](ref: Ref[IO, Vector[A]], n: Int, timeout: FiniteDuration = 5.seconds): IO[Unit] =
@@ -208,4 +230,37 @@ object KafkaRelaySuite extends SimpleIOSuite:
            }
       acks <- published.get
     yield expect(acks.toSet == Set(1L, 2L))
+  }
+
+  test("run escalates the backoff (doubling, capped at maxDelay) when runs keep failing immediately") {
+    val initialDelay = 1.second
+    val maxDelay = 8.seconds
+    for
+      startTimes <- IO.ref(Vector.empty[FiniteDuration])
+      outbox      = new TimedFailingOutbox(0.seconds, startTimes)
+      relay       = KafkaRelay[IO, TestEvent](outbox, noopPublisher, topic = "events", batchSize = 10)
+      control    <- TestControl.execute(relay.run(initialDelay, maxDelay))
+      _          <- control.tick
+      _          <- control.nextInterval.flatMap(control.advanceAndTick).replicateA_(8)
+      times      <- startTimes.get
+    yield
+      val gaps = times.zip(times.tail).map((a, b) => (b - a).toSeconds)
+      expect(gaps.take(5) == Vector(1L, 2L, 4L, 8L, 8L))
+  }
+
+  test("run resets the backoff to initialDelay after a run that outlasts maxDelay") {
+    val initialDelay = 1.second
+    val maxDelay = 8.seconds
+    val runDuration = 10.seconds
+    for
+      startTimes <- IO.ref(Vector.empty[FiniteDuration])
+      outbox      = new TimedFailingOutbox(runDuration, startTimes)
+      relay       = KafkaRelay[IO, TestEvent](outbox, noopPublisher, topic = "events", batchSize = 10)
+      control    <- TestControl.execute(relay.run(initialDelay, maxDelay))
+      _          <- control.tick
+      _          <- control.nextInterval.flatMap(control.advanceAndTick).replicateA_(10)
+      times      <- startTimes.get
+    yield
+      val gaps = times.zip(times.tail).map((a, b) => (b - a).toSeconds)
+      expect(gaps.nonEmpty && gaps.forall(_ == (runDuration + initialDelay).toSeconds))
   }
