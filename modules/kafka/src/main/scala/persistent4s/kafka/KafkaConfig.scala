@@ -18,24 +18,19 @@ package persistent4s.kafka
 
 import persistent4s.{Event, EventEnvelope}
 
-/** Caller-supplied configuration for the Kafka publisher.
+/** Configuration for the Kafka publisher.
   *
-  * The destination topic is not part of this config — it is supplied per call via [[EventPublisher.publish]] so a
-  * single publisher can fan out to multiple topics. Partitioning is deliberately left to the caller via [[recordKey]].
-  * For the DCB global-ordering / one-partition case, return a constant key (e.g. the microservice id) so every record
-  * from this service hashes to the same partition.
+  * The topic is passed per call to [[EventPublisher.publish]], so one publisher can fan out to several topics.
+  * [[recordKey]] chooses the partition and hence the ordering scope: events sharing a key are ordered; return a
+  * constant key for total per-service ordering. The publisher forces `enable.idempotence=true` (required for the
+  * ordering guarantee), overriding [[producerProperties]].
   *
   * @param bootstrapServers
   *   comma-separated `host:port` list
   * @param recordKey
-  *   function deriving the Kafka record key from an envelope, applied uniformly across all topics this publisher writes
-  *   to
+  *   derives the Kafka record key from an envelope
   * @param producerProperties
-  *   raw Kafka producer properties merged on top of fs2-kafka defaults (e.g. `acks`, `linger.ms`).
-  *
-  * '''Required setting:''' `enable.idempotence=true` must be set (it is the Kafka client default since 3.0). The
-  * [[KafkaRelay]] ordering guarantee assumes the producer will not reorder records within a partition on retries, which
-  * is only true with idempotence enabled.
+  *   extra producer properties merged on top of fs2-kafka defaults (e.g. `acks`, `linger.ms`)
   */
 final case class KafkaProducerConfig[A <: Event](
   bootstrapServers: String,
@@ -43,18 +38,18 @@ final case class KafkaProducerConfig[A <: Event](
   producerProperties: Map[String, String] = Map.empty,
 )
 
-/** Caller-supplied configuration for the Kafka subscriber.
+/** Configuration for the Kafka subscriber.
   *
-  * The source topic is not part of this config — it is supplied per call via [[EventSubscriber.subscribe]]. The same
-  * `groupId` is used for every subscription created by a single [[EventSubscriber]]; if you need independent
-  * consumer-group identities for different topics, build separate subscribers.
+  * The topic is passed per call to [[EventSubscriber.subscribe]]. All subscriptions from one subscriber share
+  * [[groupId]] (offsets are committed per group and topic-partition); build separate subscribers for independent
+  * consumer-group identities.
   *
   * @param bootstrapServers
   *   comma-separated `host:port` list
   * @param groupId
-  *   consumer group id; durable offset commits are keyed on this (per topic+partition within the group)
+  *   consumer group id
   * @param consumerProperties
-  *   raw Kafka consumer properties merged on top of fs2-kafka defaults
+  *   extra consumer properties merged on top of fs2-kafka defaults
   */
 final case class KafkaConsumerConfig(
   bootstrapServers: String,

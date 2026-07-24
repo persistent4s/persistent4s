@@ -32,10 +32,9 @@ import persistent4s.{Event, EventCodec, EventEnvelope, EventMetadata, EventTypeN
 import persistent4s.EventSubscriber
 import persistent4s.EventPublisher
 
-/** Entry point for building the Kafka-side components of the library.
-  *
-  * Each helper is independent: an application can build only a publisher, only a subscriber, or wire up a full relay.
-  * The module never imports the postgres module — the relay consumes any [[Outbox]] implementation.
+/** Entry point for the Kafka components: [[publisher]], [[subscriber]], and [[relay]]. Each is independent — build
+  * only what you need. The relay drains any [[Outbox]] implementation, so this module never depends on a specific
+  * event store.
   */
 object KafkaModule:
 
@@ -51,16 +50,11 @@ object KafkaModule:
 
   val MetaVersionHeaderName = "persistent4s.metaVersion"
 
-  /** Build a Kafka [[EventPublisher]] backed by an fs2-kafka producer.
+  /** Build a Kafka [[EventPublisher]] backed by an fs2-kafka producer (resource-managed).
     *
-    * Event metadata (id, globalPosition, eventType, tags, timestamp) is serialised as record headers; the payload is
-    * encoded via the supplied [[EventCodec]]. The record key is determined by `config.recordKey`, which controls
-    * partition assignment and therefore per-key ordering.
-    *
-    * The underlying producer is configured with `enable.idempotence=true`, so retries on transient broker errors do not
-    * produce duplicate or reordered records. The producer is released when the resource is finalized.
-    *
-    * Batch publishes pipeline all records in a single request but preserve the order they appear in the input list.
+    * Event metadata is written as record headers and the payload is encoded with `codec`; the record key comes from
+    * `config.recordKey`. The producer runs with `enable.idempotence=true`, so retries never duplicate or reorder
+    * records. Batch publishes are pipelined but keep input order.
     */
   def publisher[F[_]: Async: Parallel, A <: Event](
     config: KafkaProducerConfig[A],
@@ -109,28 +103,19 @@ object KafkaModule:
       }
     }
 
-  /** Build a Kafka [[EventSubscriber]] backed by an fs2-kafka consumer.
+  /** Build a Kafka [[EventSubscriber]] backed by an fs2-kafka consumer (auto-commit disabled).
     *
-    * Auto-commit is disabled; each emitted envelope is paired with its offset's `commit` action so the caller decides
-    * when to acknowledge. Invoking the action only after successful processing gives at-least-once delivery; combining
-    * it with an idempotent downstream write yields effectively-once semantics.
+    * Each envelope is paired with its offset's `commit` action; commit only after processing for at-least-once
+    * delivery, which becomes effectively-once when paired with an idempotent downstream write.
     *
-    * ==Ordering guarantee==
-    *
-    * Within any single tag scope, events are delivered in the order they were appended (ascending `globalPosition`).
-    * This holds because the event store serializes appends that share at least one tag.
-    *
-    * Across disjoint tag scopes, ordering matches the relay's publication order (commit order of the appending
-    * transactions), which is **not** necessarily ascending `globalPosition`. Two independently-tagged events with
-    * positions 5 and 6 may arrive as `(6, 5)` if the writer of 6 committed first. Under DCB, causally independent
-    * events have no defined relative order, so this is acceptable.
-    *
-    * Each call to `subscribe` creates an independent consumer using the `groupId` from [[KafkaConsumerConfig]],
-    * tracking its own offsets per topic.
+    * '''Ordering:''' Kafka orders records only within a partition, and the partition is chosen by the record key
+    * ([[KafkaProducerConfig.recordKey]]). Events sharing a key arrive in ascending `globalPosition`; events on
+    * different partitions have no relative order. To order a whole tag scope, key it onto one partition (or use a
+    * constant key for total ordering). Under DCB this suffices: causally independent events need no order.
     *
     * @param fromBeginning
-    *   if true and no committed offset exists for the consumer group, seek to the earliest offset; otherwise rely on
-    *   the broker's `auto.offset.reset` policy.
+    *   if true and no offset is committed for the group, start at the earliest record; otherwise follow the broker's
+    *   `auto.offset.reset`.
     */
   def subscriber[F[_]: Async, A <: Event](
     config: KafkaConsumerConfig,
@@ -199,12 +184,8 @@ object KafkaModule:
             envelopeFromRecord(committable.record).map(envelope => (envelope, committable.offset.commit))
           })
 
-  /** Build a [[KafkaRelay]] that drains the given outbox into the supplied Kafka `topic`.
-    *
-    * Note: this does NOT start the relay; call `.run` on the returned value (typically forked into a background fiber).
-    *
-    * '''Deployment constraint:''' run at most one relay per service against the same outbox/topic. See [[KafkaRelay]]
-    * for the rationale and the producer-idempotence requirement that backs the ordering guarantee.
+  /** Build a [[KafkaRelay]] draining `outbox` into `topic`. Does not start it — call `.run` (typically in a
+    * background fiber). Run at most one relay per outbox/topic; see [[KafkaRelay]] for the rationale.
     */
   def relay[F[_]: Async: Parallel, A <: Event](
     outbox: Outbox[F, A],
