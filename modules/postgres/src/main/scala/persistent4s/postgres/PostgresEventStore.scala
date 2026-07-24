@@ -312,7 +312,7 @@ object PostgresEventStore:
   /** The PostgreSQL channel name used for NOTIFY/LISTEN event notifications. */
   val NotificationChannel: Identifier =
     Identifier
-      .fromString("persistent4s_events")
+      .fromValue("persistent4s_events")
       .getOrElse(
         sys.error("Invalid channel identifier"),
       )
