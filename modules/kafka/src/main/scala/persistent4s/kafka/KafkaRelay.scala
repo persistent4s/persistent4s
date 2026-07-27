@@ -18,7 +18,7 @@ package persistent4s.kafka
 
 import scala.concurrent.duration.*
 
-import cats.effect.{Async, Temporal}
+import cats.effect.Async
 import cats.syntax.all.*
 import persistent4s.{Event, Outbox}
 import persistent4s.EventPublisher
@@ -70,22 +70,13 @@ final class KafkaRelay[F[_]: Async, A <: Event] private (
   /** Run with exponential-backoff supervision: restart [[runOnce]] after a failure, doubling the delay up to
     * `maxDelay`. Never terminates unless the outbox stream completes.
     *
-    * TODO: log the error and delay before each retry.
+    * TODO: log the error.
     */
   def run(
     initialDelay: FiniteDuration = 1.second,
     maxDelay: FiniteDuration = 30.seconds,
   ): F[Unit] =
-    def loop(delay: FiniteDuration): F[Unit] =
-      Temporal[F].monotonic.flatMap { start =>
-        runOnce.handleErrorWith { _ =>
-          Temporal[F].monotonic.flatMap { end =>
-            val effectiveDelay = if end - start >= maxDelay then initialDelay else delay
-            Temporal[F].sleep(effectiveDelay) *> loop((effectiveDelay * 2).min(maxDelay))
-          }
-        }
-      }
-    loop(initialDelay)
+    Backoff.retryWithBackoff(runOnce, initialDelay, maxDelay)
 
 object KafkaRelay:
 

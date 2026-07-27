@@ -20,6 +20,7 @@ import java.time.Instant
 import java.util.UUID
 
 import scala.util.Try
+import scala.concurrent.duration.*
 
 import cats.Parallel
 import cats.effect.{Async, Resource}
@@ -31,6 +32,9 @@ import io.circe.{Json, parser}
 import persistent4s.{Event, EventCodec, EventEnvelope, EventMetadata, EventTypeName, Outbox, Tag}
 import persistent4s.EventSubscriber
 import persistent4s.EventPublisher
+import persistent4s.MessagePublisher
+import persistent4s.OutgoingMessage
+import persistent4s.MessageOutbox
 
 /** Entry point for the Kafka components: [[publisher]], [[subscriber]], and [[relay]]. Each is independent — build only
   * what you need. The relay drains any [[Outbox]] implementation, so this module never depends on a specific event
@@ -204,3 +208,39 @@ object KafkaModule:
     KafkaModule.publisher[F, A](config, codec).map { publisher =>
       KafkaRelay(outbox, publisher, topic, batchSize)
     }
+
+  /** Build a Kafka [[MessagePublisher]]. Each Message is published to its own topic/key with its header; the producer
+    * runs with `enable.idemporence=true`.
+    */
+  def messagePublisher[F[_]: Async: Parallel](
+    config: KafkaMessageProducerConfig,
+  ): Resource[F, MessagePublisher[F]] =
+    val settings: ProducerSettings[F, String, String] =
+      ProducerSettings[F, String, String]
+        .withBootstrapServers(config.bootstrapServers)
+        .withProperties(config.producerProperties)
+        .withEnableIdempotence(true)
+
+    def toRecord(m: OutgoingMessage): ProducerRecord[String, String] =
+      val headers = m.headers.foldLeft(Headers.empty) { case (hs, (k, v)) => hs.append(Header(k, v)) }
+      ProducerRecord(m.topic, m.key.orNull, m.payload).withHeaders(headers)
+
+    KafkaProducer.resource(settings).map { producer =>
+      new MessagePublisher[F] {
+        override def publish(message: OutgoingMessage): F[Unit] =
+          producer.produceOne_(toRecord(message)).flatten.void
+
+        override def publish(messages: List[OutgoingMessage]): F[Unit] =
+          if messages.isEmpty then Async[F].unit
+          else producer.produce(Chunk.from(messages.map(toRecord))).flatten.void
+      }
+    }
+
+  /** Build a [[MessageRelay]] draining `outbox` to Kafka. Does not start it — call `.run`. */
+  def messageRelay[F[_]: Async: Parallel](
+    outbox: MessageOutbox[F],
+    config: KafkaMessageProducerConfig,
+    batchSize: Int = 128,
+    pollInterval: FiniteDuration = 1.second,
+  ): Resource[F, KafkaMessageRelay[F]] =
+    messagePublisher[F](config).map(pub => KafkaMessageRelay(outbox, pub, batchSize, pollInterval))

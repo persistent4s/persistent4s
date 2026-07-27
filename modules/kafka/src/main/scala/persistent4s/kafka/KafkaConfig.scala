@@ -56,3 +56,11 @@ final case class KafkaConsumerConfig(
   groupId: String,
   consumerProperties: Map[String, String] = Map.empty,
 )
+
+/** Configuration for the Kafka message publisher. Topic and key come from each [[OutgoingMessage]]; the publisher
+  * forces `enable.idempotence=true`, overriding [[producerProperties]].
+  */
+final case class KafkaMessageProducerConfig(
+  bootstrapServers: String,
+  producerProperties: Map[String, String] = Map.empty,
+)
