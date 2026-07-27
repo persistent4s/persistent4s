@@ -71,7 +71,17 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
   ): F[List[A]] =
     runAppend(None, events.flatten.toList, Nil)
 
+  /** Atomic append with optimistic-concurrency check, plus message enqueue in the same transaction. */
   def appendWithMessages(
+    eventFilter: EventFilter,
+    expectedIndex: Long,
+    messages: List[OutgoingMessage],
+    events: List[EventInput]*,
+  ): F[List[A]] =
+    runAppend(Some((eventFilter, expectedIndex)), events.flatten.toList, messages)
+
+  /** Atomic append without OCC, plus message enqueue in the same transaction. */
+  def appendUncheckedWithMessages(
     messages: List[OutgoingMessage],
     events: List[EventInput]*,
   ): F[List[A]] =
