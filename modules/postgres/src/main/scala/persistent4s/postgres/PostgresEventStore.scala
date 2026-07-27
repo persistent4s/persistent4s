@@ -57,52 +57,25 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
 
   import PostgresEventStore.*
 
+  private type EventInput = (Option[UUID], Set[Tag], EventTypeName, Boolean, A)
+
   override def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
-    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+    events: List[EventInput]*,
   ): F[List[A]] =
-    val flatEvents = events.flatten.toList
-    if flatEvents.isEmpty then Async[F].pure(List.empty)
-    else
-      val allTags = eventFilter.tags
-      val eventTypes = eventFilter.eventTypes
-      pool.use { session =>
-        session.transaction.use { _ =>
-          for
-            _ <- acquireAppendLocks(session, allTags)
-            _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
-            _ <-
-              flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
-                insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).flatMap {
-                  case (pos, insertedNow) =>
-                    if insertedNow && !isExternal then enqueueOutbox(session, pos) else Async[F].unit
-                }
-              }
-            _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
-          yield flatEvents.map(_._5)
-        }
-      }
+    runAppend(Some((eventFilter, expectedIndex)), events.flatten.toList, Nil)
 
   override def appendUnchecked(
-    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+    events: List[EventInput]*,
   ): F[List[A]] =
-    val flatEvents = events.flatten.toList
-    if flatEvents.isEmpty then Async[F].pure(List.empty)
-    else
-      pool.use { session =>
-        session.transaction.use { _ =>
-          for
-            _ <- flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
-                   insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).flatMap {
-                     case (pos, insertedNow) =>
-                       if insertedNow && !isExternal then enqueueOutbox(session, pos) else Async[F].unit
-                   }
-                 }
-            _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
-          yield flatEvents.map(_._5)
-        }
-      }
+    runAppend(None, events.flatten.toList, Nil)
+
+  def appendWithMessages(
+    messages: List[OutgoingMessage],
+    events: List[EventInput]*,
+  ): F[List[A]] =
+    runAppend(None, events.flatten.toList, messages)
 
   override def readFrom(
     fromPosition: Long,
@@ -207,6 +180,34 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
   def notify(n: EventStoreNotification): F[Unit] =
     pool.use(_.channel(channelId).notify(PostgresNotification.encode(n)))
 
+  private def runAppend(
+    occ: Option[(EventFilter, Long)],
+    flatEvents: List[EventInput],
+    messages: List[OutgoingMessage],
+  ): F[List[A]] =
+    if flatEvents.isEmpty && messages.isEmpty then Async[F].pure(List.empty)
+    else
+      pool.use { session =>
+        session.transaction.use { _ =>
+          for
+            _ <- occ match
+                   case Some((filter, expectedIndex)) if flatEvents.nonEmpty =>
+                     acquireAppendLocks(session, filter.tags) *>
+                       checkForConflicts(session, filter.tags, filter.eventTypes, expectedIndex)
+                   case _ => Async[F].unit
+            _ <- insertAll(session, flatEvents)
+            _ <- enqueueMessages(session, messages)
+            _ <-
+              if flatEvents.nonEmpty then
+                session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
+              else Async[F].unit
+            _ <-
+              if messages.nonEmpty then session.channel(PostgresMessageOutbox.NotificationChannel).notify("")
+              else Async[F].unit
+          yield flatEvents.map(_._5)
+        }
+      }
+
   private def checkForConflicts(
     session: Session[F],
     tags: Set[Tag],
@@ -277,6 +278,13 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
       _                            <- if insertedNow then insertEventTags(session, sequenceNumber, tags) else Async[F].unit
     yield (sequenceNumber, insertedNow)
 
+  private def insertAll(session: Session[F], flatEvents: List[EventInput]): F[Unit] =
+    flatEvents.traverse_ { case (eventIdOpt, tags, eventType, isExternal, event) =>
+      insertEvent(session, eventIdOpt, tags, eventType, isExternal, event).flatMap { case (pos, insertedNow) =>
+        if insertedNow && !isExternal then enqueueOutbox(session, pos) else Async[F].unit
+      }
+    }
+
   /** Run the codec and parse its String output into circe `Json`. Both stages have explicit failure channels; either
     * failure is raised into `F` so the surrounding transaction rolls back.
     */
@@ -311,6 +319,10 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
   private def enqueueOutbox(session: Session[F], globalPosition: Long): F[Unit] =
     if outboxEnabled then session.execute(PostgresOutbox.insertCommand)(globalPosition).void
     else Async[F].unit
+
+  private def enqueueMessages(session: Session[F], messages: List[OutgoingMessage]): F[Unit] =
+    if messages.isEmpty then Async[F].unit
+    else session.prepare(PostgresMessageOutbox.insertCommand).flatMap(cmd => messages.traverse_(cmd.execute))
 
   private def parsePayload(eventType: EventTypeName, payload: Json): F[A] =
     codec.decode(eventType, payload.noSpaces) match
