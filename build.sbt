@@ -64,7 +64,7 @@ val Log4CatsV = "2.8.0"
 
 val Otel4sV = "1.0.1"
 
-val LogbackV = "1.5.38"
+val LogbackV = "1.6.0"
 
 val TestcontainersV = "1.21.4"
 
