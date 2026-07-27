@@ -211,6 +211,8 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
               if flatEvents.nonEmpty then
                 session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
               else Async[F].unit
+            // Assumes the message relay listens on PostgresMessageOutbox's default channel, as PostgresModule wires
+            // both sides. If the outbox is built with a custom channel, this notify would need to be told about it.
             _ <-
               if messages.nonEmpty then session.channel(PostgresMessageOutbox.NotificationChannel).notify("")
               else Async[F].unit
