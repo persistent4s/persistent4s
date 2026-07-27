@@ -236,7 +236,7 @@ object KafkaModule:
       }
     }
 
-  /** Build a [[MessageRelay]] draining `outbox` to Kafka. Does not start it — call `.run`. */
+  /** Build a [[KafkaMessageRelay]] draining `outbox` to Kafka. Does not start it — call `.run`. */
   def messageRelay[F[_]: Async: Parallel](
     outbox: MessageOutbox[F],
     config: KafkaMessageProducerConfig,
