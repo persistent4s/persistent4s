@@ -26,11 +26,10 @@ trait MessageOutbox[F[_]]:
   /** Enqueue raw messages. */
   def enqueue(messages: List[OutgoingMessage]): F[Unit]
 
-  /** Stream unpublished entries, each an `(id, message)` pair, oldest first. */
-  def stream(batchSize: Int): Stream[F, (Long, OutgoingMessage)]
-
-  /** Mark entries published (removing them). */
-  def markPublished(ids: List[Long]): F[Unit]
+  /** Claim up to `batchSize` unpublished entries, hand them to `publish`, and remove them on success. Returns the
+    * number processed.
+    */
+  def drainBatch(batchSize: Int)(publish: List[(Long, OutgoingMessage)] => F[Unit]): F[Int]
 
   /** Wake-up signal emitted when new entries may be available; `Stream.empty` if the implementation can't signal. */
   def notifications: Stream[F, Unit]

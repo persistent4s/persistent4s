@@ -115,7 +115,7 @@ object PostgresOutboxSuite extends IOSuite:
 
   // ----- tests -----
 
-  test("appending a non-external event enqueus one outbox row at its global position") { case Fixture(store, _, pool) =>
+  test("appending a non-external event enqueue one outbox row at its global position") { case Fixture(store, _, pool) =>
     for
       _         <- truncate(pool)
       _         <- appendLocal(store, Tag("course", "c1"), "created")
