@@ -29,8 +29,10 @@ import persistent4s.EventPublisher
   * error escapes. Restart-safe, since progress lives in the outbox table.
   *
   * '''Single instance:''' run at most one relay per outbox/topic. Two concurrent relays would interleave records on the
-  * partition, breaking ordering and possibly publishing an event twice. Not enforced yet (a future Postgres advisory
-  * lock may make it self-enforcing).
+  * partition, breaking ordering and possibly publishing an event twice. The relay does not enforce this itself; wrap
+  * `run` in a [[persistent4s.LeaderElection]] (e.g. the Postgres lease-based implementation) so every service instance
+  * can run identical code while only the elected leader drains. The elector is advisory — during a stall or partition
+  * two relays may briefly overlap, which the idempotent producer mitigates but does not fully prevent.
   *
   * '''Producer:''' the [[EventPublisher]] must use `enable.idempotence=true` (Kafka's default since 3.0), otherwise
   * retries can reorder records within a partition.

@@ -19,6 +19,7 @@ package persistent4s.postgres
 import cats.effect.*
 import cats.effect.std.Console
 import cats.syntax.all.*
+import cats.effect.std.SecureRandom
 import fs2.io.net.Network
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
@@ -89,6 +90,7 @@ object PostgresModule:
     checkpoint: PostgresProjectionCheckpoint[F],
     outbox: Option[PostgresOutbox[F, A]],
     messageOutbox: Option[PostgresMessageOutbox[F]],
+    leaderElection: PostgresLeaderElection[F],
   )
 
   private val defaultConfigPath = "persistent4s.postgres"
@@ -118,7 +120,8 @@ object PostgresModule:
            )
       pool <- createSessionPool[F](config)
       _    <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox))
-    yield buildComponents[F, A](pool, codec, enableOutbox, enableMessageOutbox)
+      sr   <- Resource.eval(SecureRandom.javaSecuritySecureRandom[F])
+    yield buildComponents[F, A](pool, codec, enableOutbox, enableMessageOutbox, sr)
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
     *
@@ -143,19 +146,23 @@ object PostgresModule:
            )
       pool <- createSessionPool[F](config)
       _    <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox))
-    yield buildComponents[F, A](pool, codec, enableOutbox, enableMessageOutbox)
+      sr   <- Resource.eval(SecureRandom.javaSecuritySecureRandom[F])
+    yield buildComponents[F, A](pool, codec, enableOutbox, enableMessageOutbox, sr)
 
   private def buildComponents[F[_]: Async, A <: Event](
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
     enableOutbox: Boolean,
     enableMessageOutbox: Boolean,
+    secureRandom: SecureRandom[F],
   ): Components[F, A] =
+    given SecureRandom[F] = secureRandom
     Components(
       PostgresEventStore[F, A](pool, codec, outboxEnabled = enableOutbox),
       PostgresProjectionCheckpoint.make[F](pool),
       if enableOutbox then Some(PostgresOutbox[F, A](pool, codec)) else None,
       if enableMessageOutbox then Some(PostgresMessageOutbox[F](pool)) else None,
+      PostgresLeaderElection.make[F](pool),
     )
 
   private def loadConfig[F[_]: Sync](configPath: String): F[PostgresConfig] =
@@ -227,7 +234,8 @@ object PostgresModule:
       session.execute(createEventTagsSequenceIndexCommand) *>
       outboxDdl *>
       outboxMessageDdl *>
-      session.execute(PostgresProjectionCheckpoint.createTableCommand).void
+      session.execute(PostgresProjectionCheckpoint.createTableCommand).void *>
+      session.execute(PostgresLeaderElection.createTableCommand).void
 
   private val checkTableExistsQuery: Query[String, Long] =
     sql"""
