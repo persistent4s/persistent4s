@@ -17,6 +17,7 @@
 package persistent4s.examples.library.infrastructure
 
 import cats.effect.*
+import com.comcast.ip4s.*
 import fs2.io.net.Network
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
@@ -55,12 +56,15 @@ object LibraryModule:
 
   val eventCodec: EventCodec[LibraryEvent] = CirceEventCodec.derived[LibraryEvent]
 
-  def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
+  def make(
+    configPath: String = "persistent4s.postgres",
+    monitoringPort: Port = port"9595",
+  ): Resource[IO, LibraryModule] =
     for
       resources  <- PostgresModule.make[IO, LibraryEvent](eventCodec, configPath)
       store       = resources.eventStore
       checkpoint  = resources.checkpoint
-      monitoring <- MonitoringServer.make(checkpoint, store.notify)
+      monitoring <- MonitoringServer.make(checkpoint, store.notify, monitoringPort)
       config     <- Resource.eval(loadConfig(configPath))
       viewPool   <- Session
                     .Builder[IO]
@@ -75,10 +79,15 @@ object LibraryModule:
       bookProj      <- Resource.eval(BookProjection.make[IO](bookRepo))
       memberProj    <- Resource.eval(MemberProjection.make[IO](memberRepo))
       borrowingProj <- Resource.eval(BorrowingProjection.make[IO](borrowingRepo))
-      projector      = DefaultProjector[IO, LibraryEvent](store, checkpoint)
-      _             <- projector.run(bookProj).compile.drain.background
-      _             <- projector.run(memberProj).compile.drain.background
-      _             <- projector.run(borrowingProj).compile.drain.background
+
+      // Each projection's background loop runs under leader election. With several instances of this
+      // service pointed at the same database, only the elected leader drives a given projection, so they
+      // never race the shared checkpoint; another instance takes over automatically if the leader stops.
+      leader    = resources.leaderElection
+      projector = DefaultProjector[IO, LibraryEvent](store, checkpoint)
+      _        <- leader.runAsLeader("book-projection")(projector.run(bookProj).compile.drain).background
+      _        <- leader.runAsLeader("member-projection")(projector.run(memberProj).compile.drain).background
+      _        <- leader.runAsLeader("borrowing-projection")(projector.run(borrowingProj).compile.drain).background
     yield new LibraryModule(store, bookProj, memberProj, borrowingProj, bookRepo, memberRepo, borrowingRepo)
 
   private def loadConfig(configPath: String): IO[PostgresConfig] =

@@ -58,13 +58,6 @@ import persistent4s.LeaderElection
   * therefore a direct trade between failover latency and tolerance for local pauses.
   *
   * `task` is started from scratch each time leadership is acquired; it is not resumed.
-  *
-  * ==Operational note==
-  *
-  * Consider setting `statement_timeout` on the pool's sessions as a second line of defence. The client-side
-  * `renewTimeout` below bounds how long a renewal is waited on, but cancelling a query still waits for the connection's
-  * finalizer, which a black-holed socket can delay. The watchdog does not depend on cancellation working, which is why
-  * safety rests on it rather than on the timeout.
   */
 final class PostgresLeaderElection[F[_]: Async: SecureRandom] private (
   pool: Resource[F, Session[F]],
