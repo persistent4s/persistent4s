@@ -84,16 +84,24 @@ object SagaDecision:
     messages: List[OutgoingMessage] = Nil,
   ): SagaDecision[A, S] = SagaDecision(SagaOutcome.Continue(data, timeout), events, messages)
 
-/** Headers the runner attaches to every saga request message. The partner must echo `SagaName` and `SagaId` on its
-  * reply so the runner can route it back to the right saga and instance
+/** Headers the runner attaches to every saga request message. The partner must echo [[Name]] and [[Id]] back on its
+  * reply so the runner can route it to the right saga and instance, and must publish that reply to [[ReplyTo]].
   */
 object SagaHeaders:
 
-  val SagaName = "persistent4s.sagaName"
+  val Name = "persistent4s.sagaName"
 
-  val SagaId = "persistent4s.sagaId"
+  val Id = "persistent4s.sagaId"
 
+  /** De-duplication key for the command being sent. A partner that may receive the same command twice — the outbox
+    * guarantees at-least-once — should treat a repeat of this key as already handled.
+    */
   val IdempotencyKey = "persistent4s.idempotencyKey"
+
+  /** Topic the partner must publish its reply to. Carrying the address on the message keeps a partner from hardcoding
+    * any one caller's topology, so several services can send it the same command and each get answered.
+    */
+  val ReplyTo = "persistent4s.replyTo"
 
 /** Deterministic identifiers, so that replaying a trigger event or redelivering a reply produces the same ids and
   * results in a no-op.

@@ -19,6 +19,8 @@ package persistent4s
 import java.time.Instant
 import java.util.UUID
 
+import scala.concurrent.duration.FiniteDuration
+
 /** Lifecycle state of a saga instance. Only `Pending` instances accept replies or fire deadlines */
 enum SagaStatus:
 
@@ -28,7 +30,10 @@ object SagaStatus:
 
   def fromString(s: String): Option[SagaStatus] = SagaStatus.values.find(_.toString == s)
 
-/** A persisted saga instance with its state. */
+/** A persisted saga instance, as read back from a [[SagaRepository]]. `data` is the instance state still serialized:
+  * one table holds the instances of every saga, so the row cannot be generic in the state type and the runner decodes
+  * it with the owning saga's [[Saga.stateCodec]].
+  */
 final case class SagaRecord(
   id: UUID,
   sagaName: String,
@@ -37,19 +42,32 @@ final case class SagaRecord(
   step: Int,
   data: String,
   deadline: Option[Instant],
+  createdAt: Instant,
+  updatedAt: Instant,
 )
 
 /** Durable storage for saga instances. */
 trait SagaRepository[F[_]]:
 
-  /** Insert `record` and enqueue `message` in one transaction, so an instance is never pending without its request
-    * having been enqueued, and a request is never sent without a row to route the reply to.
+  /** Insert a new instance — [[SagaStatus.Pending]] at step 0 — and enqueue `messages` in one transaction, so an
+    * instance is never pending without its request having been enqueued, and a request is never sent without a row to
+    * route the reply to.
     *
+    * @param timeout
+    *   how long the instance may stay pending
     * @return
-    *   false if an instance with that id already exists
+    *   false if an instance with that id already exists, i.e. the trigger event is being replayed
     */
-  def start(record: SagaRecord, messages: List[OutgoingMessage]): F[Boolean]
+  def start(
+    id: UUID,
+    sagaName: String,
+    key: String,
+    data: String,
+    timeout: Option[FiniteDuration],
+    messages: List[OutgoingMessage],
+  ): F[Boolean]
 
+  /** Load an instance by id, or `None` if no such instance exists. */
   def find(id: UUID): F[Option[SagaRecord]]
 
   /** Move an instance forward, conditional on it still being [[SagaStatus.Pending]] at `expectedStep`. Both halves of
@@ -65,7 +83,7 @@ trait SagaRepository[F[_]]:
     status: SagaStatus,
     step: Int,
     data: String,
-    deadline: Option[Instant],
+    timeout: Option[FiniteDuration],
   ): F[Boolean]
 
   /** Claim up to `limit` pending instances of `sagaName` whose deadline has passed and hand them to `handle`.
