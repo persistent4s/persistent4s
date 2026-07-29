@@ -50,12 +50,8 @@ private def consume[F[_]: Async](
       store.appendUnchecked(
         List(
           PendingEvent(
-            payload = envelope.payload,
-            tags = envelope.metadata.tags,
-            eventType = envelope.metadata.eventType,
-            isExternal = true,
-            id = Some(envelope.metadata.id),
-            headers = envelope.metadata.headers,
+            payload = envelope.payload, tags = envelope.metadata.tags, eventType = envelope.metadata.eventType,
+            isExternal = true, id = Some(envelope.metadata.id), headers = envelope.metadata.headers,
           ),
         ),
       ) *>
