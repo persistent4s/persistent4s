@@ -52,10 +52,12 @@ trait SagaRepository[F[_]]:
 
   def find(id: UUID): F[Option[SagaRecord]]
 
-  /** Move an instance forward.
+  /** Move an instance forward, conditional on it still being [[SagaStatus.Pending]] at `expectedStep`. Both halves of
+    * that condition matter: a terminal outcome does not have to bump the step, so a redelivered reply can arrive with a
+    * matching `expectedStep` on an already-`Completed` instance and must not be applied twice.
     *
     * @return
-    *   false if the instance had already moved past `expectedStep`
+    *   false if the instance was no longer pending at `expectedStep`, i.e. this reply or deadline is a duplicate
     */
   def advance(
     id: UUID,

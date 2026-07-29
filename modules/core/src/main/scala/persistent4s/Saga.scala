@@ -106,8 +106,8 @@ object SagaId:
   def event(id: UUID, step: Int, ordinal: Int): UUID =
     UUID.nameUUIDFromBytes(s"$id:$step:$ordinal".getBytes(StandardCharsets.UTF_8))
 
-/** A saga coordinates work that cannot be comitted in a single local transaction: it reacts to a trigger event in this
-  * service's own log by sending a command message to antoher service, waits for that service's reply, and then either
+/** A saga coordinates work that cannot be committed in a single local transaction: it reacts to a trigger event in this
+  * service's own log by sending a command message to another service, waits for that service's reply, and then either
   * completes or compensates.
   *
   * @tparam A

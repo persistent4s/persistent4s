@@ -16,8 +16,6 @@
 
 package persistent4s
 
-import java.util.UUID
-
 /** Capability of an [[EventStore]] that can enqueue [[OutgoingMessage]]s into a [[MessageOutbox]] in the same
   * transaction that appends events, so the events and the messages they cause become visible together or not at all.
   */
@@ -28,11 +26,11 @@ trait TransactionalMessages[F[_], A <: Event]:
     eventFilter: EventFilter,
     expectedIndex: Long,
     messages: List[OutgoingMessage],
-    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+    events: List[PendingEvent[A]]*,
   ): F[List[A]]
 
   /** [[EventStore.appendUnchecked]] plus an atomic message enqueue. */
   def appendUncheckedWithMessages(
     messages: List[OutgoingMessage],
-    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+    events: List[PendingEvent[A]]*,
   ): F[List[A]]
