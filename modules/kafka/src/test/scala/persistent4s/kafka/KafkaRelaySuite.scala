@@ -45,7 +45,7 @@ object KafkaRelaySuite extends SimpleIOSuite:
       EventMetadata(
         globalPosition = globalPosition, id = UUID.randomUUID(), tags = Set.empty,
         eventType = EventTypeName.fromString("TestEvent"), isExternal = false,
-        timestamp = Instant.parse("2026-01-01T00:00:00Z"),
+        timestamp = Instant.parse("2026-01-01T00:00:00Z"), headers = Map.empty,
       ),
       TestEvent(s"e$globalPosition"),
     )

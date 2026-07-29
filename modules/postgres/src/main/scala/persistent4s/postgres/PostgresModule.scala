@@ -254,6 +254,7 @@ object PostgresModule:
         tags            JSONB       NOT NULL DEFAULT '[]',
         payload         JSONB       NOT NULL DEFAULT '{}',
         is_external     BOOLEAN     NOT NULL,
+        headers         JSONB       NOT NULL DEFAULT '{}',
         recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
 
         CONSTRAINT unique_event_id UNIQUE (event_id)

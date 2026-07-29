@@ -166,7 +166,9 @@ object KafkaModule:
         timestampStr <- header(TimestampHeaderName, headers)
         timestamp    <- Try(Instant.parse(timestampStr)).toEither
         payload      <- codec.decode(eventTypeName, record.value)
-      yield EventEnvelope(EventMetadata(position, eventId, tags, eventTypeName, true, timestamp), payload)
+      // Only the reserved persistent4s.* headers travel over Kafka today, so author-supplied event headers cannot be
+      // reconstructed here. Transporting them is a follow-up on the publisher/subscriber pair.
+      yield EventEnvelope(EventMetadata(position, eventId, tags, eventTypeName, true, timestamp, Map.empty), payload)
       decodedMessage match
         case Right(envelope) => Async[F].pure(envelope)
         case Left(error)     =>

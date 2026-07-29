@@ -27,7 +27,7 @@ import skunk.implicits.*
 import weaver.IOSuite
 
 import persistent4s.circe.CirceEventCodec
-import persistent4s.{Event, EventFilter, EventTypeName, MessageCodec, OutgoingMessage, Tag}
+import persistent4s.{Event, EventFilter, EventTypeName, MessageCodec, OutgoingMessage, PendingEvent, Tag}
 import io.circe.Decoder
 
 object PostgresMessageOutboxSuite extends IOSuite:
@@ -113,8 +113,8 @@ object PostgresMessageOutboxSuite extends IOSuite:
 
   private val filter = EventFilter(Set.empty, Set(tag))
 
-  private def testEvent(v: String): (Option[java.util.UUID], Set[Tag], EventTypeName, Boolean, TestEvent) =
-    (None, Set(tag), EventTypeName.of[TestEvent], false, TestEvent(v))
+  private def testEvent(v: String): PendingEvent[TestEvent] =
+    PendingEvent(TestEvent(v), Set(tag), EventTypeName.of[TestEvent], isExternal = false)
 
   // ----- tests -----
 
