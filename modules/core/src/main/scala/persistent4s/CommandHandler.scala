@@ -18,6 +18,7 @@ package persistent4s
 
 import cats.effect.Concurrent
 import cats.syntax.all.*
+import scala.annotation.unused
 
 /** A CommandHandler defines how a command is processed in an event-sourced system. It reads events from the store to
   * build the current state, validates the command against that state, and decides which new events to produce.
@@ -53,6 +54,9 @@ trait CommandHandler[C, S, E <: Event]:
     */
   def decide(state: S, command: C): List[(Set[Tag], E)]
 
+  /** Additional metadata to attach to every event produced by this command. Override to add. Defaults to none. */
+  def headers(@unused command: C): Map[String, String] = Map.empty
+
   /** Maximum number of retry attempts on optimistic concurrency conflicts. Override to customize. Default is 3. */
   def maxRetries: Int = 3
 
@@ -87,7 +91,11 @@ trait CommandHandler[C, S, E <: Event]:
       _         <- validate(state, command) match
              case Left(e)  => Concurrent[F].raiseError(e)
              case Right(_) => Concurrent[F].unit
-      decided         = decide(state, command)
-      events          = decided.map((tags, event) => (None, tags, EventTypeName.fromInstance(event), false, event))
+      decided      = decide(state, command)
+      eventHeaders = headers(command)
+      events       = decided.map((tags, event) =>
+                 PendingEvent(payload = event, tags = tags, eventType = EventTypeName.fromInstance(event),
+                   isExternal = false, id = None, headers = eventHeaders),
+               )
       appendedEvents <- eventStore.append(filter, index, events)
     yield appendedEvents

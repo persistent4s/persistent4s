@@ -24,6 +24,7 @@ import persistent4s.kafka.{KafkaConsumerConfig, KafkaModule}
 import persistent4s.EventSubscriber
 import persistent4s.EventCodec
 import persistent4s.EventStore
+import persistent4s.PendingEvent
 import persistent4s.examples.courses.enrollment.domain.SchoolEvent
 
 object CatalogEventConsumer:
@@ -48,8 +49,13 @@ private def consume[F[_]: Async](
     .evalMap { case (envelope, offset) =>
       store.appendUnchecked(
         List(
-          (
-            Some(envelope.metadata.id), envelope.metadata.tags, envelope.metadata.eventType, true, envelope.payload,
+          PendingEvent(
+            payload = envelope.payload,
+            tags = envelope.metadata.tags,
+            eventType = envelope.metadata.eventType,
+            isExternal = true,
+            id = Some(envelope.metadata.id),
+            headers = envelope.metadata.headers,
           ),
         ),
       ) *>

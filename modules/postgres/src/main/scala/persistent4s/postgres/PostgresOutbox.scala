@@ -66,11 +66,14 @@ final class PostgresOutbox[F[_]: Async, A <: Event] private (
             .eval(session.prepare(selectUnpublishedQuery))
             .flatMap(_.stream(Void, batchSize))
             .evalMapChunk {
-              case globalPosition *: eventId *: eventType *: tags *: payload *: isExternal *: recordedAt *: EmptyTuple =>
+              case globalPosition *: eventId *: eventType *: tags *: payload *: isExternal *: headers *: recordedAt *:
+                  EmptyTuple =>
                 val eventTypeName = EventTypeName.fromString(eventType)
                 parsePayload(eventTypeName, payload).map { event =>
                   EventEnvelope(
-                    EventMetadata(globalPosition, eventId, tags, eventTypeName, isExternal, recordedAt.toInstant),
+                    EventMetadata(
+                      globalPosition, eventId, tags, eventTypeName, isExternal, recordedAt.toInstant, headers,
+                    ),
                     event,
                   )
                 }
@@ -140,7 +143,7 @@ object PostgresOutbox:
 
   private val selectUnpublishedQuery: Query[Void, PostgresEventStore.EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.headers, e.recorded_at
       FROM event_outbox o
       JOIN events e ON e.sequence_number = o.global_position
       ORDER BY o.global_position ASC
