@@ -49,7 +49,10 @@ final case class KafkaProducerConfig[A <: Event](
   * @param groupId
   *   consumer group id
   * @param consumerProperties
-  *   extra consumer properties merged on top of fs2-kafka defaults
+  *   extra consumer properties merged on top of fs2-kafka defaults. Two are not yours to set: `enable.auto.commit` is
+  *   forced to `false` (the subscriber hands you an explicit acknowledge action instead) and `auto.offset.reset` is
+  *   determined by the `fromBeginning` argument of each `subscribe` call. Both are applied after this map, so values
+  *   given here for them are silently ignored.
   */
 final case class KafkaConsumerConfig(
   bootstrapServers: String,

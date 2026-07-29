@@ -35,6 +35,8 @@ import persistent4s.EventPublisher
 import persistent4s.MessagePublisher
 import persistent4s.OutgoingMessage
 import persistent4s.MessageOutbox
+import persistent4s.IncomingMessage
+import persistent4s.MessageSubscriber
 
 /** Entry point for the Kafka components: [[publisher]], [[subscriber]], and [[relay]]. Each is independent — build only
   * what you need. The relay drains any [[Outbox]] implementation, so this module never depends on a specific event
@@ -122,8 +124,11 @@ object KafkaModule:
     * rebalances partitions across them) rather than expecting concurrency from one subscriber.
     *
     * @param fromBeginning
-    *   if true and no offset is committed for the group, start at the earliest record; otherwise follow the broker's
-    *   `auto.offset.reset`.
+    *   sets `auto.offset.reset` — `earliest` when true, `latest` when false — and so takes effect only where that
+    *   property does: when the group has no committed offset for a partition. Once an offset is committed the
+    *   subscription always resumes from it, whichever value was passed. This is applied after
+    *   [[KafkaConsumerConfig.consumerProperties]] and therefore overrides any `auto.offset.reset` set there; fs2-kafka
+    *   otherwise defaults the property to `none`, which fails a group that has nothing committed.
     */
   def subscriber[F[_]: Async, A <: Event](
     config: KafkaConsumerConfig,
@@ -217,15 +222,18 @@ object KafkaModule:
   def messagePublisher[F[_]: Async: Parallel](
     config: KafkaMessageProducerConfig,
   ): Resource[F, MessagePublisher[F]] =
-    val settings: ProducerSettings[F, String, String] =
-      ProducerSettings[F, String, String]
+    // Keys are Option[String], not String: fs2-kafka's String serializer calls getBytes on its input, so a keyless
+    // message passed as a raw null throws. Its Option serializer maps None to null bytes, which is what Kafka wants for
+    // "no key, assign a partition yourself".
+    val settings: ProducerSettings[F, Option[String], String] =
+      ProducerSettings[F, Option[String], String]
         .withBootstrapServers(config.bootstrapServers)
         .withProperties(config.producerProperties)
         .withEnableIdempotence(true)
 
-    def toRecord(m: OutgoingMessage): ProducerRecord[String, String] =
+    def toRecord(m: OutgoingMessage): ProducerRecord[Option[String], String] =
       val headers = m.headers.foldLeft(Headers.empty) { case (hs, (k, v)) => hs.append(Header(k, v)) }
-      ProducerRecord(m.topic, m.key.orNull, m.payload).withHeaders(headers)
+      ProducerRecord(m.topic, m.key, m.payload).withHeaders(headers)
 
     KafkaProducer.resource(settings).map { producer =>
       new MessagePublisher[F] {
@@ -237,6 +245,43 @@ object KafkaModule:
           else producer.produce(Chunk.from(messages.map(toRecord))).flatten.void
       }
     }
+
+  /** Build a Kafka [[MessageSubscriber]] backed by an fs2-kafka consumer. The notes on [[subscriber]] apply unchanged —
+    * auto-commit is off, `fromBeginning` decides `auto.offset.reset`, and one subscriber does not parallelize.
+    */
+  def messageSubscriber[F[_]: Async](
+    config: KafkaConsumerConfig,
+  ): Resource[F, MessageSubscriber[F]] =
+    // Option[String] keys for the same reason as messagePublisher, mirrored: fs2-kafka's String deserializer would fail
+    // on the null bytes of a keyless record, while its Option deserializer decodes them to None.
+    val baseSettings: ConsumerSettings[F, Option[String], String] =
+      ConsumerSettings[F, Option[String], String]
+        .withBootstrapServers(config.bootstrapServers)
+        .withGroupId(config.groupId)
+        .withProperties(config.consumerProperties)
+        .withEnableAutoCommit(false)
+
+    def toMessage(record: ConsumerRecord[Option[String], String]): IncomingMessage =
+      IncomingMessage(
+        topic = record.topic,
+        key = record.key,
+        payload = record.value,
+        headers = record.headers.toChain.toList.map(h => h.key -> h.as[String]).toMap,
+      )
+
+    Resource.pure(
+      new MessageSubscriber[F]:
+
+        override def subscribe(topic: String, fromBeginning: Boolean): Stream[F, (IncomingMessage, F[Unit])] =
+          val settings =
+            if fromBeginning then baseSettings.withAutoOffsetReset(AutoOffsetReset.Earliest)
+            else baseSettings.withAutoOffsetReset(AutoOffsetReset.Latest)
+          KafkaConsumer
+            .stream(settings)
+            .subscribeTo(topic)
+            .records
+            .map(committable => (toMessage(committable.record), committable.offset.commit)),
+    )
 
   /** Build a [[KafkaMessageRelay]] draining `outbox` to Kafka. Does not start it — call `.run`. */
   def messageRelay[F[_]: Async: Parallel](
