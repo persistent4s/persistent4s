@@ -60,7 +60,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
+      evts: List[PendingEvent[A]]*,
     ): IO[List[A]] =
       events.modify { current =>
         val relevant = current.filter(matches(_, eventFilter))
@@ -68,26 +68,27 @@ object DefaultProjectorSuite extends SimpleIOSuite:
         if actualIdx != expectedIndex then (current, Left(new IndexConflictException(expectedIndex, actualIdx)))
         else
           val lastPos = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvts = evts.flatten.zipWithIndex.map { case ((maybeId, tags, eventType, isExternal, evt), i) =>
+          val newEvts = evts.flatten.zipWithIndex.map { case (pending, i) =>
             EventEnvelope(
               EventMetadata(
                 lastPos + i.toLong + 1L,
-                maybeId.getOrElse(UUID.randomUUID()),
-                tags,
-                eventType,
-                isExternal,
+                pending.id.getOrElse(UUID.randomUUID()),
+                pending.tags,
+                pending.eventType,
+                pending.isExternal,
                 java.time.Instant.now(),
+                pending.headers,
               ),
-              evt,
+              pending.payload,
             )
           }
-          (current ++ newEvts, Right(evts.flatten.map(_._5)))
+          (current ++ newEvts, Right(evts.flatten.map(_.payload)))
       }.flatMap {
         case Left(e)       => IO.raiseError(e)
         case Right(result) => queue.offer(EventsAppended).as(result.toList)
       }
 
-    def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): IO[List[A]] =
+    def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[A]] =
       IO.pure(List.empty) // not needed for these tests
 
     def readFrom(
@@ -144,7 +145,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       store.append(
         EventFilter(),
         i.toLong,
-        List((None, tags, EventTypeName.fromInstance(event), false, event)),
+        List(PendingEvent(event, tags, EventTypeName.fromInstance(event), false, None, Map.empty)),
       )
     }
 
@@ -419,9 +420,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                   EventFilter(),
                   0L,
                   List(
-                    (
-                      None, Set(entityTag("1")), EventTypeName.fromString("Created"), false, TestEvent.Created("1"),
-                    ),
+                    PendingEvent(TestEvent.Created("1"), Set(entityTag("1")), EventTypeName.fromString("Created"),
+                      false, None, Map.empty),
                   ),
                 ) *>
                 processed.get.timeout(2.seconds)

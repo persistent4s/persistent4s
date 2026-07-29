@@ -78,7 +78,7 @@ object KafkaModuleSuite extends IOSuite:
       EventMetadata(
         globalPosition = globalPosition, id = UUID.randomUUID(), tags = tags,
         eventType = EventTypeName.fromString("TestEvent"), isExternal = false,
-        timestamp = Instant.parse("2026-01-01T00:00:00Z"),
+        timestamp = Instant.parse("2026-01-01T00:00:00Z"), headers = Map.empty,
       ),
       TestEvent(value),
     )

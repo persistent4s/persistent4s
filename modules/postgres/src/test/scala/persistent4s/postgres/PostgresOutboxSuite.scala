@@ -31,7 +31,7 @@ import skunk.implicits.*
 import weaver.IOSuite
 
 import persistent4s.circe.CirceEventCodec
-import persistent4s.{Event, EventTypeName, Tag}
+import persistent4s.{Event, EventTypeName, PendingEvent, Tag}
 
 object PostgresOutboxSuite extends IOSuite:
 
@@ -103,7 +103,13 @@ object PostgresOutboxSuite extends IOSuite:
     value: String,
     id: Option[UUID] = None,
   ): IO[Unit] =
-    store.appendUnchecked(List((id, Set(tag), EventTypeName.of[TestEvent], false, TestEvent(value)))).void
+    store
+      .appendUnchecked(
+        List(
+          PendingEvent(TestEvent(value), Set(tag), EventTypeName.of[TestEvent], isExternal = false, id = id),
+        ),
+      )
+      .void
 
   private def appendExternal(
     store: PostgresEventStore[IO, TestEvent],
@@ -111,7 +117,13 @@ object PostgresOutboxSuite extends IOSuite:
     value: String,
     id: UUID,
   ): IO[Unit] =
-    store.appendUnchecked(List((Some(id), Set(tag), EventTypeName.of[TestEvent], true, TestEvent(value)))).void
+    store
+      .appendUnchecked(
+        List(
+          PendingEvent(TestEvent(value), Set(tag), EventTypeName.of[TestEvent], isExternal = true, id = Some(id)),
+        ),
+      )
+      .void
 
   // ----- tests -----
 
