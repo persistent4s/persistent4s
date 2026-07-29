@@ -16,34 +16,30 @@
 
 package persistent4s
 
-import java.time.Instant
 import java.util.UUID
 
-/** EventMetadata contains metadata about an event, such as its global position in the event store, its tags, its type,
-  * and the timestamp of when the event was created. This metadata is used to provide context about the event and can be
-  * used for filtering and querying events in the event store.
+/** A PendingEvent is an event that is about to be appended to the event store, together with the author-supplied
+  * context the store needs to persist it. Unlike [[EventMetadata]], it carries no store-assigned fields
+  * (globalPosition, timestamp) — those are assigned at commit time.
   *
-  * @param globalPosition
-  *   the global position of the event in the event store
-  * @param id
-  *   the UUID of the event
+  * @param payload
+  *   the actual event data
   * @param tags
   *   the tags associated with the event
   * @param eventType
   *   the type of the event
   * @param isExternal
-  *   whether the event was come from an external domain or not
-  * @param timestamp
-  *   the timestamp of when the event was created
+  *   whether the event comes from an external domain
+  * @param id
+  *   an optional caller-supplied UUID
   * @param headers
   *   arbitrary author-supplied key-value metadata
   */
-final case class EventMetadata(
-  globalPosition: Long,
-  id: UUID,
+final case class PendingEvent[A <: Event](
+  payload: A,
   tags: Set[Tag],
   eventType: EventTypeName,
   isExternal: Boolean,
-  timestamp: Instant,
-  headers: Map[String, String],
+  id: Option[UUID] = None,
+  headers: Map[String, String] = Map.empty,
 )
