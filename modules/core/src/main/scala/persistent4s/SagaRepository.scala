@@ -88,6 +88,9 @@ trait SagaRepository[F[_]]:
 
   /** Claim up to `limit` pending instances of `sagaName` whose deadline has passed and hand them to `handle`.
     *
+    * Claiming pushes each instance's deadline into the future, which both hides it from a concurrent claimer and makes
+    * it reclaimable if the handler dies.
+    *
     * @return
     *   the number of instances handed over
     */

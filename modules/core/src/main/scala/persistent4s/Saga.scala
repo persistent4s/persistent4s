@@ -44,7 +44,7 @@ final case class SagaStart[S](
 /** Where a saga instance goes after handling a reply or a deadline. */
 enum SagaOutcome[+S]:
 
-  case Continue(data: S, timeout: Option[FiniteDuration] = None)
+  case Continue(data: S, timeout: Option[FiniteDuration])
 
   case Completed
 
