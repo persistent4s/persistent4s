@@ -26,18 +26,34 @@ import scala.concurrent.duration.FiniteDuration
   */
 final case class SagaContext(id: UUID, sagaName: String, key: String, step: Int)
 
-/** What a saga does when it recognises a trigger event: which instance to create, with what state, and which command
-  * message(s) to send.
+/** A command a saga wants to send, still typed. The runner encodes it with [[Saga.requestCodec]] and stamps the
+  * [[SagaHeaders]] onto it, so a saga never serializes anything itself — its decision functions are pure and would have
+  * nowhere to report an encoding failure.
+  *
+  * @param key
+  *   partition key for the request; drives per-key ordering at the broker
+  * @param headers
+  *   extra headers to send alongside the saga's own; the saga headers win on a clash
+  */
+final case class SagaRequest[+Req](
+  topic: String,
+  key: Option[String],
+  payload: Req,
+  headers: Map[String, String] = Map.empty,
+)
+
+/** What a saga does when it recognises a trigger event: which instance to create, with what state, and which command(s)
+  * to send.
   *
   * @param key
   *   correlation key, unique per instance within this saga.
   * @param timeout
   *   how long to wait for a reply before [[Saga.onTimeout]] fires; `None` waits forever
   */
-final case class SagaStart[S](
+final case class SagaStart[S, +Req](
   key: String,
   data: S,
-  request: List[OutgoingMessage],
+  request: List[SagaRequest[Req]],
   timeout: Option[FiniteDuration] = None,
 )
 
@@ -52,37 +68,37 @@ enum SagaOutcome[+S]:
 
   case Failed(reason: String)
 
-/** The events to append and messages to send as a result of a reply or a timeout, plus the instance's next state. */
-final case class SagaDecision[A <: Event, +S](
+/** The events to append and commands to send as a result of a reply or a timeout, plus the instance's next state. */
+final case class SagaDecision[A <: Event, +S, +Req](
   outcome: SagaOutcome[S],
   events: List[(Set[Tag], A)],
-  messages: List[OutgoingMessage],
+  messages: List[SagaRequest[Req]],
 )
 
 object SagaDecision:
 
-  def completed[A <: Event](
+  def completed[A <: Event, Req](
     events: List[(Set[Tag], A)] = Nil,
-    messages: List[OutgoingMessage] = Nil,
-  ): SagaDecision[A, Nothing] = SagaDecision(SagaOutcome.Completed, events, messages)
+    messages: List[SagaRequest[Req]] = Nil,
+  ): SagaDecision[A, Nothing, Req] = SagaDecision(SagaOutcome.Completed, events, messages)
 
-  def compensated[A <: Event](
+  def compensated[A <: Event, Req](
     events: List[(Set[Tag], A)] = Nil,
-    messages: List[OutgoingMessage] = Nil,
-  ): SagaDecision[A, Nothing] = SagaDecision(SagaOutcome.Compensated, events, messages)
+    messages: List[SagaRequest[Req]] = Nil,
+  ): SagaDecision[A, Nothing, Req] = SagaDecision(SagaOutcome.Compensated, events, messages)
 
-  def failed[A <: Event](
+  def failed[A <: Event, Req](
     reason: String,
     events: List[(Set[Tag], A)] = Nil,
-    messages: List[OutgoingMessage] = Nil,
-  ): SagaDecision[A, Nothing] = SagaDecision(SagaOutcome.Failed(reason), events, messages)
+    messages: List[SagaRequest[Req]] = Nil,
+  ): SagaDecision[A, Nothing, Req] = SagaDecision(SagaOutcome.Failed(reason), events, messages)
 
-  def continue[A <: Event, S](
+  def continue[A <: Event, S, Req](
     data: S,
-    timeout: Option[FiniteDuration] = None,
+    timeout: Option[FiniteDuration],
     events: List[(Set[Tag], A)] = Nil,
-    messages: List[OutgoingMessage] = Nil,
-  ): SagaDecision[A, S] = SagaDecision(SagaOutcome.Continue(data, timeout), events, messages)
+    messages: List[SagaRequest[Req]] = Nil,
+  ): SagaDecision[A, S, Req] = SagaDecision(SagaOutcome.Continue(data, timeout), events, messages)
 
 /** Headers the runner attaches to every saga request message. The partner must echo [[Name]] and [[Id]] back on its
   * reply so the runner can route it to the right saga and instance, and must publish that reply to [[ReplyTo]].
@@ -103,6 +119,30 @@ object SagaHeaders:
     */
   val ReplyTo = "persistent4s.replyTo"
 
+  /** Build the reply to a saga request: `payload` addressed to the topic the request nominated, carrying back the
+    * correlation headers [[SagaRunner]] needs to route it to the right saga and instance.
+    *
+    * `None` when `request` did not come from a saga — no [[ReplyTo]], [[Name]] or [[Id]] — in which case there is
+    * nobody to answer and the caller should treat the command as fire-and-forget.
+    *
+    * `payload` is already encoded, unlike [[SagaRequest]]: a partner answers inside an effect and can report an
+    * encoding failure itself, whereas a saga's decision functions are pure and cannot.
+    *
+    * @param key
+    *   partition key for the reply; defaults to the request's own, keeping one saga's traffic on one partition
+    */
+  def reply(request: IncomingMessage, payload: String, key: Option[String] = None): Option[OutgoingMessage] =
+    for
+      replyTo <- request.headers.get(ReplyTo)
+      name    <- request.headers.get(Name)
+      id      <- request.headers.get(Id)
+    yield OutgoingMessage(
+      topic = replyTo,
+      key = key.orElse(request.key),
+      payload = payload,
+      headers = Map(Name -> name, Id -> id),
+    )
+
 /** Deterministic identifiers, so that replaying a trigger event or redelivering a reply produces the same ids and
   * results in a no-op.
   */
@@ -122,10 +162,12 @@ object SagaId:
   *   the event type of this service's event store
   * @tparam S
   *   state carried by an instance between its request and the reply
-  * @tparam R
+  * @tparam Req
+  *   the command(s) this saga sends. A multi-step saga makes this a sealed trait covering everything it can ask for.
+  * @tparam Rep
   *   the reply payload this saga expects
   */
-trait Saga[A <: Event, S, R]:
+trait Saga[A <: Event, S, Req, Rep]:
 
   /** The name of this saga.
     *
@@ -139,16 +181,19 @@ trait Saga[A <: Event, S, R]:
   def triggers: Set[EventTypeName]
 
   /** Decide whether `event` starts an instance. Returning `None` skips it and the checkpoint still advances past it. */
-  def start(event: EventEnvelope[A]): Option[SagaStart[S]]
+  def start(event: EventEnvelope[A]): Option[SagaStart[S, Req]]
 
   /** Interpret the partner's reply for a pending instance. */
-  def onReply(ctx: SagaContext, state: S, reply: R): SagaDecision[A, S]
+  def onReply(ctx: SagaContext, state: S, reply: Rep): SagaDecision[A, S, Req]
 
   /** Decide what to do when a pending instance passes its deadline — normally a compensation. */
-  def onTimeout(ctx: SagaContext, state: S): SagaDecision[A, S]
+  def onTimeout(ctx: SagaContext, state: S): SagaDecision[A, S, Req]
 
   /** Serializes [[S]]; the runner persists instance state as text. */
   def stateCodec: MessageCodec[S]
 
-  /** Decodes reply payloads into [[R]]. */
-  def replyCodec: MessageCodec[R]
+  /** Encodes the commands this saga sends. */
+  def requestCodec: MessageCodec[Req]
+
+  /** Decodes reply payloads into [[Rep]]. */
+  def replyCodec: MessageCodec[Rep]
