@@ -247,12 +247,12 @@ object SagaRunnerSuite extends IOSuite:
 
   test("a trigger event starts an instance and enqueues its request with the saga headers") { fixture =>
     for
-      _        <- truncate(fixture)
-      _        <- append(fixture, OrderPlaced("o1"))
-      _        <- runTrigger(fixture)
-      record   <- instanceOf(fixture, "o1")
-      rows     <- outboxRows(fixture)
-      expected  = SagaId.instance(TestSaga.name, "o1")
+      _       <- truncate(fixture)
+      _       <- append(fixture, OrderPlaced("o1"))
+      _       <- runTrigger(fixture)
+      record  <- instanceOf(fixture, "o1")
+      rows    <- outboxRows(fixture)
+      expected = SagaId.instance(TestSaga.name, "o1")
     yield
       val (topic, key, payload, headers) = rows.head
       expect.all(
@@ -342,14 +342,14 @@ object SagaRunnerSuite extends IOSuite:
   test("a reply naming another saga is left untouched") { fixture =>
     val id = SagaId.instance(TestSaga.name, "o1")
     for
-      _      <- truncate(fixture)
-      _      <- append(fixture, OrderPlaced("o1"))
-      _      <- runTrigger(fixture)
-      acked  <- Ref.of[IO, List[IncomingMessage]](Nil)
-      _      <- runner(fixture, List(reply(id, accepted, sagaName = "some-other-saga")), acked)
-                  .replyLoop(TestSaga)
-                  .compile
-                  .drain
+      _     <- truncate(fixture)
+      _     <- append(fixture, OrderPlaced("o1"))
+      _     <- runTrigger(fixture)
+      acked <- Ref.of[IO, List[IncomingMessage]](Nil)
+      _     <- runner(fixture, List(reply(id, accepted, sagaName = "some-other-saga")), acked)
+             .replyLoop(TestSaga)
+             .compile
+             .drain
       record <- instanceOf(fixture, "o1")
       count  <- eventCount(fixture)
     yield expect.all(record.exists(_.status == SagaStatus.Pending), count == 1L)
@@ -385,14 +385,14 @@ object SagaRunnerSuite extends IOSuite:
   test("a redelivered reply for a settled instance changes nothing") { fixture =>
     val id = SagaId.instance(TestSaga.name, "o1")
     for
-      _      <- truncate(fixture)
-      _      <- append(fixture, OrderPlaced("o1"))
-      _      <- runTrigger(fixture)
-      acked  <- Ref.of[IO, List[IncomingMessage]](Nil)
-      _      <- runner(fixture, List(reply(id, accepted), reply(id, accepted)), acked)
-                  .replyLoop(TestSaga)
-                  .compile
-                  .drain
+      _     <- truncate(fixture)
+      _     <- append(fixture, OrderPlaced("o1"))
+      _     <- runTrigger(fixture)
+      acked <- Ref.of[IO, List[IncomingMessage]](Nil)
+      _     <- runner(fixture, List(reply(id, accepted), reply(id, accepted)), acked)
+             .replyLoop(TestSaga)
+             .compile
+             .drain
       record <- instanceOf(fixture, "o1")
       events <- storedEvents(fixture)
       seen   <- acked.get
@@ -408,9 +408,9 @@ object SagaRunnerSuite extends IOSuite:
       _     <- truncate(fixture)
       acked <- Ref.of[IO, List[IncomingMessage]](Nil)
       _     <- runner(fixture, List(reply(SagaId.instance(TestSaga.name, "ghost"), accepted)), acked)
-                 .replyLoop(TestSaga)
-                 .compile
-                 .drain
+             .replyLoop(TestSaga)
+             .compile
+             .drain
       count <- eventCount(fixture)
       seen  <- acked.get
     yield expect.all(count == 0L, seen.size == 1)
