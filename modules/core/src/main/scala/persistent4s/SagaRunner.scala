@@ -124,7 +124,7 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
       moved <- repository.advance(record.id, record.step, status, nextStep, data, timeout)
       _     <-
         if !moved then
-          Logger[F].debug(s"saga '${saga.name}' instance ${record.id} was already advanced, decision discarded")
+          Logger[F].warn(s"saga '${saga.name}' instance ${record.id} was already advanced, decision discarded")
         else
           decision.outcome match
             // The reason is the one thing an operator wants when they find a Failed instance, and it is not persisted.
@@ -141,7 +141,7 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
     requests: List[SagaRequest[Req]],
   ): F[List[OutgoingMessage]] =
     requests.zipWithIndex.traverse { case (request, ordinal) =>
-      saga.requestCodec.encode(request.payload) match
+      saga.requestEncoder.encode(request.payload) match
         case Left(error) =>
           Async[F].raiseError(
             new RuntimeException(s"saga '${saga.name}' failed to encode a request: ${error.getMessage}", error),
@@ -155,7 +155,7 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
               headers = request.headers ++ Map(
                 SagaHeaders.Name           -> saga.name,
                 SagaHeaders.Id             -> id.toString,
-                SagaHeaders.IdempotencyKey -> s"$id:$step:$ordinal",
+                SagaHeaders.IdempotencyKey -> SagaRequestRef.idempotencyKey(id, step, ordinal),
                 SagaHeaders.ReplyTo        -> replyTopic,
               ),
             ),
@@ -213,9 +213,16 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
     record: SagaRecord,
     message: IncomingMessage,
   ): F[Unit] =
-    (saga.stateCodec.decode(record.data), saga.replyCodec.decode(message.payload)) match
+    (saga.stateCodec.decode(record.data), saga.replyDecoder.decode(message.payload)) match
       case (Right(state), Right(reply)) =>
-        applyDecision(saga, record, saga.onReply(contextOf(saga.name, record), state, reply))
+        val envelope = SagaReply(
+          payload = reply,
+          // Absent when the partner hand-rolled its reply instead of using `SagaHeaders.reply`, or echoed a key that is
+          // not one of this instance's. A saga with a single request never needs it; a fan-out does.
+          answering = message.headers.get(SagaHeaders.InReplyTo).flatMap(SagaRequestRef.parse(_, record.id)),
+          headers = message.headers,
+        )
+        applyDecision(saga, record, saga.onReply(contextOf(saga.name, record), state, envelope))
       case (Left(error), _) =>
         Logger[F].error(error)(
           s"saga '${saga.name}' could not decode the stored state of instance ${record.id}; " +
