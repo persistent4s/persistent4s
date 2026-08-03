@@ -57,6 +57,18 @@ trait CommandHandler[C, S, E <: Event]:
   /** Additional metadata to attach to every event produced by this command. Override to add. Defaults to none. */
   def headers(@unused command: C): Map[String, String] = Map.empty
 
+  /** Messages to enqueue in the same transaction that appends this command's events, so an event and the message it
+    * causes become visible together or not at all. Only [[runWithMessages]] consults this; [[run]] ignores it.
+    *
+    * `outcome` is `Left` when [[validate]] rejected the command. A handler answering another service has to be able to
+    * reply precisely when it writes nothing.
+    */
+  def messages(
+    @unused state: S,
+    @unused command: C,
+    @unused outcome: Either[Throwable, List[E]],
+  ): List[OutgoingMessage] = Nil
+
   /** Maximum number of retry attempts on optimistic concurrency conflicts. Override to customize. Default is 3. */
   def maxRetries: Int = 3
 
@@ -69,6 +81,17 @@ trait CommandHandler[C, S, E <: Event]:
   ): F[List[E]] =
     runWithRetry(command, maxRetries)
 
+  /** [[run]] plus [[messages]], appended and enqueued atomically.
+    *
+    * A rejection comes back as a `Left` rather than raised, unlike in [[run]]: the rejection may have emitted a message
+    * of its own, and that message is committed, so the caller has to be able to tell "rejected, and answered" from
+    * "failed, redeliver me" without one exception standing for both.
+    */
+  def runWithMessages[F[_]: Concurrent](command: C)(using
+    eventStore: EventStore[F, E] & TransactionalMessages[F, E],
+  ): F[Either[Throwable, List[E]]] =
+    runWithMessagesRetry(command, maxRetries)
+
   private def runWithRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
     eventStore: EventStore[F, E],
   ): F[List[E]] =
@@ -79,23 +102,65 @@ trait CommandHandler[C, S, E <: Event]:
         Concurrent[F].raiseError(e)
     }
 
+  private def runWithMessagesRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
+    eventStore: EventStore[F, E] & TransactionalMessages[F, E],
+  ): F[Either[Throwable, List[E]]] =
+    attemptWithMessages(command).handleErrorWith {
+      case _: IndexConflictException if retriesLeft > 0 =>
+        runWithMessagesRetry(command, retriesLeft - 1)
+      case e =>
+        Concurrent[F].raiseError(e)
+    }
+
+  /** Read this command's scope and fold it into a state, returning that state alongside the filter that defines the
+    * scope and the index to append against — the same filter has to be handed back to the append, or the concurrency
+    * check would guard something other than what was read.
+    */
+  private def loadState[F[_]: Concurrent](command: C)(using
+    eventStore: EventStore[F, E],
+  ): F[(EventFilter, Long, S)] =
+    val filter = EventFilter(eventTypes.getOrElse(Set.empty), tags(command))
+    eventStore.readFrom(0L, filter).compile.toList.map { envelopes =>
+      val state = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
+      val index = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
+      (filter, index, state)
+    }
+
+  private def pendingEvents(command: C, decided: List[(Set[Tag], E)]): List[PendingEvent[E]] =
+    val eventHeaders = headers(command)
+    decided.map((tags, event) =>
+      PendingEvent(payload = event, tags = tags, eventType = EventTypeName.fromInstance(event), isExternal = false,
+        id = None, headers = eventHeaders),
+    )
+
   private def attempt[F[_]: Concurrent](
     command: C,
   )(using eventStore: EventStore[F, E]): F[List[E]] =
-    for
-      tags      <- Concurrent[F].pure(tags(command))
-      filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
-      envelopes <- eventStore.readFrom(0L, filter).compile.toList
-      state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
-      index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-      _         <- validate(state, command) match
-             case Left(e)  => Concurrent[F].raiseError(e)
-             case Right(_) => Concurrent[F].unit
-      decided      = decide(state, command)
-      eventHeaders = headers(command)
-      events       = decided.map((tags, event) =>
-                 PendingEvent(payload = event, tags = tags, eventType = EventTypeName.fromInstance(event),
-                   isExternal = false, id = None, headers = eventHeaders),
-               )
-      appendedEvents <- eventStore.append(filter, index, events)
-    yield appendedEvents
+    loadState(command).flatMap { case (filter, index, state) =>
+      validate(state, command) match
+        case Left(error) => Concurrent[F].raiseError(error)
+        case Right(_)    => eventStore.append(filter, index, pendingEvents(command, decide(state, command)))
+    }
+
+  private def attemptWithMessages[F[_]: Concurrent](
+    command: C,
+  )(using eventStore: EventStore[F, E] & TransactionalMessages[F, E]): F[Either[Throwable, List[E]]] =
+    loadState(command).flatMap { case (filter, index, state) =>
+      validate(state, command) match
+        case Left(rejection) =>
+          // No events, so there is no local invariant to protect and `appendWithMessages` skips the conflict check —
+          // the rejection's message is enqueued on its own.
+          eventStore
+            .appendWithMessages(filter, index, messages(state, command, Left(rejection)))
+            .as(Left(rejection))
+        case Right(_) =>
+          val decided = decide(state, command)
+          eventStore
+            .appendWithMessages(
+              filter,
+              index,
+              messages(state, command, Right(decided.map(_._2))),
+              pendingEvents(command, decided),
+            )
+            .map(Right(_))
+    }
