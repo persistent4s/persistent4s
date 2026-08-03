@@ -138,7 +138,7 @@ object SagaHeaders:
       id      <- request.headers.get(Id)
     yield OutgoingMessage(
       topic = replyTo,
-      key = key.orElse(request.key),
+      key = Some(key.getOrElse(id)),
       payload = payload,
       headers = Map(Name -> name, Id -> id),
     )

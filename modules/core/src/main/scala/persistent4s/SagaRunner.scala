@@ -124,7 +124,7 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
       moved <- repository.advance(record.id, record.step, status, nextStep, data, timeout)
       _     <-
         if !moved then
-          Logger[F].debug(s"saga '${saga.name}' instance ${record.id} was already advanced, decision discarded")
+          Logger[F].warn(s"saga '${saga.name}' instance ${record.id} was already advanced, decision discarded")
         else
           decision.outcome match
             // The reason is the one thing an operator wants when they find a Failed instance, and it is not persisted.
