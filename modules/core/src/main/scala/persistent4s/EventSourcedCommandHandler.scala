@@ -39,13 +39,13 @@ final case class UnregisteredCommandEvent(eventClass: String)
       s"No event schema is registered for emitted event $eventClass; declare an on[Event] transition or ignore it",
     )
 
-private final case class EventDescription(
+final private case class EventDescription(
   eventType: EventTypeName,
   version: Int,
   scopes: Set[ScopeId],
 )
 
-private final case class RetryableCommandAppendConflict(conflict: IndexConflictException)
+final private case class RetryableCommandAppendConflict(conflict: IndexConflictException)
     extends RuntimeException(conflict)
 
 /** A typed state transition registered by an [[EventSourcedCommandHandler]]. */
@@ -92,23 +92,23 @@ object CommandEventHandler:
             ),
     )
 
-private final case class CommandScopeResolver[C](
+final private case class CommandScopeResolver[C](
   name: String,
   resolve: C => List[ScopeId],
 )
 
-private final case class ResolvedCommandSelection(
+final private case class ResolvedCommandSelection(
   scopes: List[ScopeId],
   tags: Set[Tag],
   scopeBased: Boolean,
 )
 
-private final case class CommandEmission[A <: Event](
+final private case class CommandEmission[A <: Event](
   explicitTags: Option[Set[Tag]],
   event: A,
 )
 
-private final case class CommandSnapshotDefinition[C, S](
+final private case class CommandSnapshotDefinition[C, S](
   id: SnapshotId,
   version: Int,
   every: Int,
@@ -143,8 +143,7 @@ final class CommandBehavior[C, S, A <: Event, R] private[persistent4s] (
       val resolved = scopes.flatMap(_.resolve(command)).distinct
       require(resolved.nonEmpty, "Command behavior resolved no scope keys")
       ResolvedCommandSelection(resolved, resolved.iterator.map(_.toTag).toSet, scopeBased = true)
-    else
-      ResolvedCommandSelection(Nil, resolveLegacyTags.fold(Set.empty[Tag])(_(command)), scopeBased = false)
+    else ResolvedCommandSelection(Nil, resolveLegacyTags.fold(Set.empty[Tag])(_(command)), scopeBased = false)
 
   private[persistent4s] def evolve(command: C, state: S, event: A): S =
     handlers.find(_.accepts(event)).fold(state)(_.evolve(command, state, event))
@@ -186,10 +185,15 @@ final class CommandBehavior[C, S, A <: Event, R] private[persistent4s] (
 final class CommandBehaviorCollector[C, S, A <: Event, R] private[persistent4s] ():
 
   private val eventHandlers = ListBuffer.empty[CommandEventHandler[C, S, A]]
+
   private val commandScopes = ListBuffer.empty[CommandScopeResolver[C]]
+
   private var resolveTags: Option[C => Set[Tag]] = None
+
   private var rejection: PartialFunction[(S, C), R] = PartialFunction.empty
+
   private var emitEvents: Option[(S, C) => List[CommandEmission[A]]] = None
+
   private var snapshotDefinition: Option[CommandSnapshotDefinition[C, S]] = None
 
   private[persistent4s] def add(handler: CommandEventHandler[C, S, A]): Unit =
@@ -258,18 +262,15 @@ final class CommandBehaviorCollector[C, S, A <: Event, R] private[persistent4s] 
     require(duplicateEventTypes.isEmpty, s"Duplicate command event handlers: ${duplicateEventTypes.mkString(", ")}")
 
     new CommandBehavior(
-      initial,
-      resolveTags,
-      commandScopes.toList,
-      allHandlers,
-      rejection,
+      initial, resolveTags, commandScopes.toList, allHandlers, rejection,
       emitEvents.getOrElse(throw new IllegalArgumentException("Command behavior must declare an emitter")),
       snapshotDefinition,
     )
 
 /** The staged definition returned by [[EventSourcedCommandHandler.on]]. Event selection is fail-closed: when the
   * command and event share exactly one typed scope, that scope is matched automatically; when they share none, the
-  * handler must opt in with [[allEvents]]; and when they share several, it must choose with [[within]] or [[withinAll]].
+  * handler must opt in with [[allEvents]]; and when they share several, it must choose with [[within]] or
+  * [[withinAll]].
   */
 final class CommandEventHandlerDefinition[C, S, A <: Event, R, E <: A] private[persistent4s] (
   collector: CommandBehaviorCollector[C, S, A, R],
@@ -299,7 +300,10 @@ final class CommandEventHandlerDefinition[C, S, A <: Event, R, E <: A] private[p
   def within[K](scope: Scope[K]): CommandEventHandlerDefinition[C, S, A, R, E] =
     require(!acceptsAllEvents, "Cannot combine allEvents with within")
     require(collector.hasScope(scope.name), s"Command behavior must declare scope ${scope.name} before using within")
-    require(schema.scopeNames.contains(scope.name), s"Event ${schema.eventType.value} does not declare scope ${scope.name}")
+    require(
+      schema.scopeNames.contains(scope.name),
+      s"Event ${schema.eventType.value} does not declare scope ${scope.name}",
+    )
     updated(
       nextAccepts = (command, event) =>
         accepts(command, event) &&
@@ -408,9 +412,7 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   ): Unit =
     collector.addScopes(definition, keys)
 
-  /** Legacy escape hatch. New handlers should use [[scope]] so consistency boundaries have one stable typed
-    * definition.
-    */
+  /** Legacy escape hatch. New handlers should use [[scope]] so consistency boundaries have one stable typed definition. */
   final protected def tags(resolve: C => Set[Tag])(using collector: CommandBehaviorCollector[C, S, A, R]): Unit =
     collector.setTags(resolve)
 
@@ -540,15 +542,15 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   final def run[F[_]: Concurrent](command: C)(using runtime: CommandRuntime[F, A]): F[Either[R, List[A]]] =
     suspend(behavior.selection(command)).flatMap(selection => runWithRetry(command, selection, maxRetries))
 
-  /** Execute a command and translate only its typed domain rejection into an application error. Existing failed
-    * effects (storage, decoding and concurrency failures) pass through unchanged.
+  /** Execute a command and translate only its typed domain rejection into an application error. Existing failed effects
+    * (storage, decoding and concurrency failures) pass through unchanged.
     */
   final def runOrRaise[F[_]: Concurrent](command: C)(mapRejection: R => Throwable)(using
     runtime: CommandRuntime[F, A],
   ): F[List[A]] =
     run(command).flatMap(_.leftMap(mapRejection).liftTo[F])
 
-  private final case class ReplayStart(
+  final private case class ReplayStart(
     state: S,
     globalPosition: Long,
     eventCount: Long,
@@ -578,29 +580,29 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     val fingerprint = filterFingerprint(behavior.eventSchemas, selection.tags)
 
     for
-      start     <- loadSnapshot(command, selection, filter, fingerprint)
-      envelopes <- runtime.eventStore.readFrom(start.globalPosition, filter).compile.toList
-      state     <- suspend(envelopes.foldLeft(start.state)((current, event) => behavior.evolve(command, current, event)))
-      index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(start.globalPosition)
-      eventCount = start.eventCount + envelopes.size
-      _         <- saveSnapshotIfDue(command, selection, fingerprint, start.eventCount, state, index, eventCount)
+      start      <- loadSnapshot(command, selection, filter, fingerprint)
+      envelopes  <- runtime.eventStore.readFrom(start.globalPosition, filter).compile.toList
+      state      <- suspend(envelopes.foldLeft(start.state)((current, event) => behavior.evolve(command, current, event)))
+      index       = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(start.globalPosition)
+      eventCount  = start.eventCount + envelopes.size
+      _          <- saveSnapshotIfDue(command, selection, fingerprint, start.eventCount, state, index, eventCount)
       validation <- suspend(behavior.validate(state, command))
-      result <- validation match
+      result     <- validation match
                   case Left(rejection) => Concurrent[F].pure(Left(rejection))
                   case Right(_)        =>
                     for
                       decided <- suspend(behavior.decide(state, command, selection))
                       events  <- suspend(
-                                   decided.map { (tags, event) =>
-                                     val description = behavior.describe(event)
-                                     val declared = EventStorageSchema(description.eventType, description.version)
-                                     runtime.eventStore.storageSchema(event).foreach { storage =>
-                                       if storage != declared then
-                                         throw EventSchemaMismatch(declared, storage, event.getClass.getName)
-                                     }
-                                     (None, tags, description.eventType, false, event)
-                                   },
-                                 )
+                                  decided.map { (tags, event) =>
+                                    val description = behavior.describe(event)
+                                    val declared = EventStorageSchema(description.eventType, description.version)
+                                    runtime.eventStore.storageSchema(event).foreach { storage =>
+                                      if storage != declared then
+                                        throw EventSchemaMismatch(declared, storage, event.getClass.getName)
+                                    }
+                                    (None, tags, description.eventType, false, event)
+                                  },
+                                )
                       appended <- runtime.eventStore
                                     .append(filter, index, events)
                                     .adaptError { case conflict: IndexConflictException =>
@@ -664,11 +666,11 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
             payload <- suspend(definition.codec.encode(state))
             key     <- suspend(definition.key(command, selection))
             _       <- store.save(
-                         definition.id,
-                         key,
-                         definition.version,
-                         StoredCommandSnapshot(globalPosition, eventCount, fingerprint, payload),
-                       )
+                   definition.id,
+                   key,
+                   definition.version,
+                   StoredCommandSnapshot(globalPosition, eventCount, fingerprint, payload),
+                 )
           yield ()
 
         definition.failureMode match

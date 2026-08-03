@@ -373,8 +373,7 @@ object PostgresDerivationSuite extends SimpleIOSuite:
       expect.all(
         validErrors.isEmpty,
         computedSelectorErrors.exists(_.message.contains("must select exactly one state field directly")),
-        storedSelectorErrors.exists(_.message.contains("must be an inline lambda")),
-        wrongValueErrors.nonEmpty,
+        storedSelectorErrors.exists(_.message.contains("must be an inline lambda")), wrongValueErrors.nonEmpty,
         scalarNullErrors.nonEmpty,
       ),
     )

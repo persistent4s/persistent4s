@@ -50,5 +50,5 @@ trait AtomicRepository[F[_], K, S] extends Repository[F, K, S]:
     */
   def persistAtomically(commit: ProjectionCommit[K, S]): F[Unit]
 
-  private[persistent4s] final override def atomicPersist(commit: ProjectionCommit[K, S]): Option[F[Unit]] =
+  final override private[persistent4s] def atomicPersist(commit: ProjectionCommit[K, S]): Option[F[Unit]] =
     Some(persistAtomically(commit))

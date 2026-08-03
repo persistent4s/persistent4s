@@ -20,9 +20,8 @@ import skunk.AppliedFragment
 
 /** An immutable, parameterized `AND` query over a derived PostgreSQL state.
   *
-  * Build one with [[DerivedPostgresRepository.filterBy]], optionally append conditions with [[and]], then call
-  * [[run]]. Conditions supplied as absent frontend inputs are omitted; when every condition is omitted, `run` loads
-  * every row.
+  * Build one with [[DerivedPostgresRepository.filterBy]], optionally append conditions with [[and]], then call [[run]].
+  * Conditions supplied as absent frontend inputs are omitted; when every condition is omitted, `run` loads every row.
   */
 final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
   private[postgres] val repository: DerivedPostgresRepository[F, K, S],
@@ -71,7 +70,7 @@ final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
   private def copy(plan: PostgresFilterPlan): PostgresFilterQuery[F, K, S] =
     new PostgresFilterQuery(repository, plan)
 
-private[postgres] final case class PostgresFilterPlan(
+final private[postgres] case class PostgresFilterPlan(
   clauses: List[PostgresFilterClause] = Nil,
   matchesNothing: Boolean = false,
 ):
@@ -82,5 +81,6 @@ private[postgres] final case class PostgresFilterPlan(
   def noMatches: PostgresFilterPlan =
     copy(matchesNothing = true)
 
-private[postgres] final case class PostgresFilterClause(alternatives: List[AppliedFragment]):
+final private[postgres] case class PostgresFilterClause(alternatives: List[AppliedFragment]):
+
   require(alternatives.nonEmpty, "A PostgreSQL filter clause must have at least one predicate alternative")

@@ -35,7 +35,7 @@ final case class ProjectionTerminatedUnexpectedly(projectionName: String)
 final case class ProjectionExecutionFailed(projectionName: String, cause: Throwable)
     extends RuntimeException(s"Projection $projectionName failed: ${cause.getMessage}", cause)
 
-private[persistent4s] final case class RegisteredProjection[F[_]](
+final private[persistent4s] case class RegisteredProjection[F[_]](
   name: String,
   stream: Stream[F, Unit],
 )
@@ -83,19 +83,17 @@ final class ProjectionRuntime[F[_]: Async, A <: Event] private (
     * exposed by the returned [[RunningProjections]].
     */
   def startAll(configure: ProjectionRegistrations[F, A] => Unit): Resource[F, RunningProjections[F]] =
-    Resource
-      .eval {
-        Async[F].delay {
-          val registrations = new ProjectionRegistrations(projector)
-          configure(registrations)
-          validate(registrations.result)
-        }
+    Resource.eval {
+      Async[F].delay {
+        val registrations = new ProjectionRegistrations(projector)
+        configure(registrations)
+        validate(registrations.result)
       }
-      .flatMap { registrations =>
-        Resource
-          .make(Async[F].start(run(registrations)))(_.cancel)
-          .map(new RunningProjections(_))
-      }
+    }.flatMap { registrations =>
+      Resource
+        .make(Async[F].start(run(registrations)))(_.cancel)
+        .map(new RunningProjections(_))
+    }
 
   private def validate(registrations: List[RegisteredProjection[F]]): List[RegisteredProjection[F]] =
     require(registrations.nonEmpty, "At least one projection must be registered")
@@ -114,9 +112,8 @@ final class ProjectionRuntime[F[_]: Async, A <: Event] private (
       .covary[F]
       .map { registration =>
         registration.stream
-          .handleErrorWith(error =>
-            Stream.raiseError[F](ProjectionExecutionFailed(registration.name, error)),
-          ) ++ Stream.raiseError[F](ProjectionTerminatedUnexpectedly(registration.name))
+          .handleErrorWith(error => Stream.raiseError[F](ProjectionExecutionFailed(registration.name, error))) ++ Stream
+          .raiseError[F](ProjectionTerminatedUnexpectedly(registration.name))
       }
       .parJoinUnbounded
       .compile

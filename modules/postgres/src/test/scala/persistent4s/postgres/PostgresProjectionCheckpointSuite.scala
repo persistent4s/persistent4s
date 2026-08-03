@@ -19,8 +19,10 @@ package persistent4s.postgres
 import java.util.UUID
 
 import cats.effect.{IO, Resource}
-import org.testcontainers.containers.PostgreSQLContainer
+
 import persistent4s.ProjectionCheckpointState
+
+import org.testcontainers.containers.PostgreSQLContainer
 import skunk.Session
 import weaver.IOSuite
 

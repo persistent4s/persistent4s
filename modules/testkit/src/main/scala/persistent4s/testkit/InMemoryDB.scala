@@ -16,8 +16,7 @@
 
 package persistent4s.testkit
 
-import cats.effect.Ref
-import cats.effect.Sync
+import cats.effect.{Ref, Sync}
 import cats.syntax.all.*
 
 /** A thread-safe, in-memory table holding rows of type [[R]], analogous to a PostgreSQL table. Intended for tests and

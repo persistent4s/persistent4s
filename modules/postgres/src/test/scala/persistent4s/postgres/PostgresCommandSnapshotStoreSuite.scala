@@ -80,11 +80,11 @@ object PostgresCommandSnapshotStoreSuite extends IOSuite:
       snapshotId <- freshSnapshotId("round-trip")
       key        <- freshKey("entity")
       expected    = StoredCommandSnapshot(
-                      globalPosition = 42L,
-                      eventCount = 17L,
-                      filterFingerprint = "book-added,book-borrowed",
-                      payload = "{\"exists\":true}",
-                    )
+                   globalPosition = 42L,
+                   eventCount = 17L,
+                   filterFingerprint = "book-added,book-borrowed",
+                   payload = "{\"exists\":true}",
+                 )
       _      <- snapshots.save(snapshotId, key, version = 3, expected)
       loaded <- snapshots.load(snapshotId, key, version = 3)
     yield expect(loaded.contains(expected))
@@ -95,17 +95,17 @@ object PostgresCommandSnapshotStoreSuite extends IOSuite:
       snapshotId <- freshSnapshotId("monotonic")
       key        <- freshKey("entity")
       newer       = StoredCommandSnapshot(
-                      globalPosition = 100L,
-                      eventCount = 25L,
-                      filterFingerprint = "new-filter",
-                      payload = "new-state",
-                    )
-      older       = StoredCommandSnapshot(
-                      globalPosition = 99L,
-                      eventCount = 99L,
-                      filterFingerprint = "stale-filter",
-                      payload = "stale-state",
-                    )
+                globalPosition = 100L,
+                eventCount = 25L,
+                filterFingerprint = "new-filter",
+                payload = "new-state",
+              )
+      older = StoredCommandSnapshot(
+                globalPosition = 99L,
+                eventCount = 99L,
+                filterFingerprint = "stale-filter",
+                payload = "stale-state",
+              )
       _      <- snapshots.save(snapshotId, key, version = 1, newer)
       _      <- snapshots.save(snapshotId, key, version = 1, older)
       loaded <- snapshots.load(snapshotId, key, version = 1)
@@ -117,9 +117,9 @@ object PostgresCommandSnapshotStoreSuite extends IOSuite:
       snapshotId <- freshSnapshotId("delete")
       key        <- freshKey("entity")
       snapshot    = StoredCommandSnapshot(12L, 4L, "filter", "state")
-      _      <- snapshots.save(snapshotId, key, version = 2, snapshot)
-      before <- snapshots.load(snapshotId, key, version = 2)
-      _      <- snapshots.delete(snapshotId, key, version = 2)
-      after  <- snapshots.load(snapshotId, key, version = 2)
+      _          <- snapshots.save(snapshotId, key, version = 2, snapshot)
+      before     <- snapshots.load(snapshotId, key, version = 2)
+      _          <- snapshots.delete(snapshotId, key, version = 2)
+      after      <- snapshots.load(snapshotId, key, version = 2)
     yield expect.all(before.contains(snapshot), after.isEmpty)
   }

@@ -25,8 +25,8 @@ trait ScopeKeyEncoder[-K]:
 
   def encode(key: K): String
 
-/** Stable decoding for scope keys. It is used when infrastructure metadata needs to recover the typed key, for
-  * example when a projection is keyed directly by an event's declared scope.
+/** Stable decoding for scope keys. It is used when infrastructure metadata needs to recover the typed key, for example
+  * when a projection is keyed directly by an event's declared scope.
   */
 trait ScopeKeyDecoder[+K]:
 
@@ -88,8 +88,8 @@ object ScopeId:
   private def validName(name: String): Boolean =
     name.nonEmpty && !name.contains(':')
 
-/** A typed, stable scope definition. A scope identifies the event history and consistency boundary for one key.
-  * Define it once and resolve it with a correctly typed key:
+/** A typed, stable scope definition. A scope identifies the event history and consistency boundary for one key. Define
+  * it once and resolve it with a correctly typed key:
   *
   * {{{
   * val books = Scope[UUID]("library.book")

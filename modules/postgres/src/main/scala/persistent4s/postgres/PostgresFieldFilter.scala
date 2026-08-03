@@ -38,8 +38,8 @@ final class PostgresFieldFilter[F[_], K, S <: Product, A] private[postgres] (
 
   /** Conditionally match a non-optional state field. `None` omits this condition; `Some(value)` matches the value.
     *
-    * This overload is intended for optional API/search inputs such as `Option[Int]`. SQL-null matching remains
-    * explicit through [[isNull]].
+    * This overload is intended for optional API/search inputs such as `Option[Int]`. SQL-null matching remains explicit
+    * through [[isNull]].
     */
   @targetName("isOptionalInput")
   def is(value: Option[A])(using NotGiven[A <:< Option[Any]]): PostgresFilterQuery[F, K, S] =

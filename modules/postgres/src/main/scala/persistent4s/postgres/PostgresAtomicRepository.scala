@@ -38,7 +38,7 @@ abstract class PostgresAtomicRepository[F[_]: Async, K, S](
   protected val table: PostgresRepositoryTable[F, K, S]
 
   /** Run an additional repository query with a pooled session. */
-  protected final def useSession[A](f: Session[F] => F[A]): F[A] = pool.use(f)
+  final protected def useSession[A](f: Session[F] => F[A]): F[A] = pool.use(f)
 
   final override def findMany(keys: List[K]): F[Map[K, Option[S]]] =
     val distinctKeys = keys.distinct

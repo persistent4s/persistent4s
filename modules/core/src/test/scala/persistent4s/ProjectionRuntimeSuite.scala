@@ -50,11 +50,10 @@ object ProjectionRuntimeSuite extends SimpleIOSuite:
     )
 
   test("duplicate projection names fail before startup across heterogeneous projections") {
-    runtime(_ => Stream.never[IO])
-      .startAll { registered =>
-        registered.run(projection[String, Int]("duplicate"))
-        registered.run(projection[UUID, String]("duplicate"))
-      }
+    runtime(_ => Stream.never[IO]).startAll { registered =>
+      registered.run(projection[String, Int]("duplicate"))
+      registered.run(projection[UUID, String]("duplicate"))
+    }
       .use(_ => IO.unit)
       .attempt
       .map {
@@ -100,11 +99,10 @@ object ProjectionRuntimeSuite extends SimpleIOSuite:
                     (Stream.eval(started.complete(()).void) ++ Stream.never[IO])
                       .onFinalize(stopped.complete(()).void)
 
-      _ <- runtime(streamFor)
-             .startAll { registered =>
-               registered.run(projection[String, Int]("first"))
-               registered.run(projection[UUID, String]("second"))
-             }
+      _ <- runtime(streamFor).startAll { registered =>
+             registered.run(projection[String, Int]("first"))
+             registered.run(projection[UUID, String]("second"))
+           }
              .use(_ => (firstStarted.get, secondStarted.get).parTupled.void)
 
       _ <- (firstStopped.get, secondStopped.get).parTupled.timeout(2.seconds)

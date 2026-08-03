@@ -51,8 +51,8 @@ final case class InvalidEventVersion(
     )
 
 /** Ordered JSON transformations for evolving stored payloads of event `E`. Each step transforms exactly one schema
-  * version into the next. Upcasters operate on JSON before the current Circe `Decoder[E]` runs, so old event classes
-  * do not need to remain in the domain model.
+  * version into the next. Upcasters operate on JSON before the current Circe `Decoder[E]` runs, so old event classes do
+  * not need to remain in the domain model.
   */
 final class JsonEventUpcaster[E] private (
   private val steps: Map[Int, Json => Either[Throwable, Json]],
@@ -71,7 +71,7 @@ final class JsonEventUpcaster[E] private (
         if version == currentVersion then Right(currentPayload)
         else
           steps.get(version) match
-            case None => Left(MissingEventUpcast(eventType, version, currentVersion))
+            case None       => Left(MissingEventUpcast(eventType, version, currentVersion))
             case Some(step) =>
               try step(currentPayload).flatMap(next => loop(version + 1, next))
               catch case NonFatal(error) => Left(error)

@@ -34,6 +34,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
   final case class TestState(exists: Boolean, value: Int)
 
   enum TestRejection:
+
     case Missing, Blocked
 
   sealed trait TestEvent extends Event
@@ -53,12 +54,15 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
   final case class MultiScoped(ids: List[String]) extends TestEvent
 
   private object Expected:
+
     final case class Same(id: String) extends TestEvent
 
   private object Actual:
+
     final case class Same(id: String) extends TestEvent
 
   private val EntityScope = Scope[String]("test.entity")
+
   private val OwnerScope = Scope[String]("test.owner")
 
   private given createdSchema: EventSchema[Created] =
@@ -88,6 +92,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     EventSchema[Expected.Same]("test.expected-same")
 
   private given testStateSnapshotCodec: SnapshotCodec[TestState] with
+
     def encode(state: TestState): String =
       s"${state.exists}:${state.value}"
 
@@ -99,7 +104,9 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
           Left(new IllegalArgumentException(s"Invalid test snapshot: $payload"))
 
   private val missing = TestRejection.Missing
+
   private val blocked = TestRejection.Blocked
+
   private val snapshotId = SnapshotId("test-command")
 
   private val subject = new EventSourcedCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
@@ -118,7 +125,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       on[Observed].within(EntityScope).ignore
 
       reject:
-        case (state, _) if !state.exists       => missing
+        case (state, _) if !state.exists     => missing
         case (_, command) if command.blocked => blocked
 
       snapshot(snapshotId, every = 2)
@@ -154,15 +161,18 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       payload,
     )
 
-  private final class RecordingStore(
+  final private class RecordingStore(
     history: List[EventEnvelope[TestEvent]],
     readFailure: Option[Throwable] = None,
     schema: TestEvent => Option[EventStorageSchema] = _ => None,
   ) extends EventStore[IO, TestEvent]:
 
     var readFromPosition: Option[Long] = None
+
     var readFilter: Option[EventFilter] = None
+
     var readCount: Int = 0
+
     var appended: Option[
       (EventFilter, Long, List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]),
     ] = None
@@ -202,11 +212,14 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     ): IO[List[TestEvent]] =
       IO.pure(events.toList.flatten.map(_._5))
 
-  private final class RecordingSnapshotStore(initial: Option[StoredCommandSnapshot]) extends CommandSnapshotStore[IO]:
+  final private class RecordingSnapshotStore(initial: Option[StoredCommandSnapshot]) extends CommandSnapshotStore[IO]:
 
     var current: Option[StoredCommandSnapshot] = initial
+
     var loaded: Option[(SnapshotId, String, Int)] = None
+
     var saved: Option[(SnapshotId, String, Int, StoredCommandSnapshot)] = None
+
     var deleted: Option[(SnapshotId, String, Int)] = None
 
     def load(snapshotId: SnapshotId, key: String, version: Int): IO[Option[StoredCommandSnapshot]] =
@@ -223,7 +236,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       current = None
       IO.unit
 
-  private final class FailingSnapshotStore(error: Throwable) extends CommandSnapshotStore[IO]:
+  final private class FailingSnapshotStore(error: Throwable) extends CommandSnapshotStore[IO]:
 
     def load(snapshotId: SnapshotId, key: String, version: Int): IO[Option[StoredCommandSnapshot]] =
       IO.raiseError(error)
@@ -327,7 +340,9 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
 
   pureTest("the first matching typed rejection wins") {
     expect(subject.validate(subject.initial, TestCommand("a", blocked = true)) == Left(missing)) and
-      expect(subject.validate(TestState(exists = true, value = 1), TestCommand("a", blocked = true)) == Left(blocked)) and
+      expect(
+        subject.validate(TestState(exists = true, value = 1), TestCommand("a", blocked = true)) == Left(blocked),
+      ) and
       expect(subject.validate(TestState(exists = true, value = 1), TestCommand("a")) == Right(()))
   }
 
@@ -392,8 +407,8 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       accepted <- acceptedRuntime.execute(subject, TestCommand("a"))
       rejected <- rejectedRuntime.executeUnit(subject, TestCommand("a"))
       raised   <- rejectedRuntime
-                    .executeOrRaise(subject, TestCommand("a"))(_ => mapped)
-                    .attempt
+                  .executeOrRaise(subject, TestCommand("a"))(_ => mapped)
+                  .attempt
     yield expect(accepted == Right(List(Incremented("a", 3)))) and
       expect(rejected == Left(TestRejection.Missing)) and
       expect(raised == Left(mapped))
@@ -410,7 +425,9 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     val store = new RecordingStore(Nil)
     openFilterHandler
       .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
-      .map(result => expect(result == Right(List(LegacyObserved("a")))) and expect(store.readFilter.exists(_.eventTypes.isEmpty)))
+      .map(result =>
+        expect(result == Right(List(LegacyObserved("a")))) and expect(store.readFilter.exists(_.eventTypes.isEmpty)),
+      )
   }
 
   pureTest("explicitly tagged unscoped emissions can differ from legacy command tags") {
@@ -498,12 +515,14 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     val failingStore = new RecordingStore(Nil, readFailure = Some(infrastructureFailure))
 
     for
-      rejected <- subject.run[IO](TestCommand("a"))(
-                    using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(rejectingStore),
+      rejected <- subject.run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime.eventStoreOnly(rejectingStore),
                   )
       failed <- subject
-                  .run[IO](TestCommand("a"))(
-                    using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(failingStore),
+                  .run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime.eventStoreOnly(failingStore),
                   )
                   .attempt
     yield expect(rejected == Left(TestRejection.Missing)) and expect(failed == Left(infrastructureFailure))
@@ -584,11 +603,13 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     val rejectedStore = new RecordingStore(Nil)
 
     for
-      accepted <- subject.run[IO](TestCommand("a"))(
-                    using summon[Concurrent[IO]], CommandRuntime(acceptedStore, Some(snapshots)),
+      accepted <- subject.run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime(acceptedStore, Some(snapshots)),
                   )
-      rejected <- subject.run[IO](TestCommand("a"))(
-                    using summon[Concurrent[IO]], CommandRuntime(rejectedStore, Some(snapshots)),
+      rejected <- subject.run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime(rejectedStore, Some(snapshots)),
                   )
     yield expect(accepted == Right(List(Incremented("a", 4)))) and
       expect(rejected == Left(TestRejection.Missing))
@@ -638,8 +659,9 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     val store = new RecordingStore(Nil)
 
     scopeViolationHandler
-      .run[IO](TestCommand("a"))(
-        using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store),
+      .run[IO](TestCommand("a"))(using
+        summon[Concurrent[IO]],
+        CommandRuntime.eventStoreOnly(store),
       )
       .attempt
       .map {

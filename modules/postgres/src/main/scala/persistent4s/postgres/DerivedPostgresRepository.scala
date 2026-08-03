@@ -125,11 +125,10 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
         }
 
       useSession { session =>
-        predicateCombinations
-          .traverse { predicates =>
-            val applied = mapping.filterQuery(predicates)
-            session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
-          }
+        predicateCombinations.traverse { predicates =>
+          val applied = mapping.filterQuery(predicates)
+          session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
+        }
           .map(_.flatten.distinctBy(mapping.keyOf))
       }
 

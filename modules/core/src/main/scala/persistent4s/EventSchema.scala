@@ -21,8 +21,8 @@ import scala.reflect.ClassTag
 /** Stable storage identity and current schema version for an event type `E`.
   *
   * Unlike [[EventTypeName.of]], the identifier is not derived from a Scala class name and therefore survives class and
-  * package renames. Versions start at `1` and are incremented whenever persisted payloads require an upcast before
-  * they can be decoded as the current event type.
+  * package renames. Versions start at `1` and are incremented whenever persisted payloads require an upcast before they
+  * can be decoded as the current event type.
   *
   * Aliases allow an existing stored identifier to be migrated to a stable identifier without rewriting old rows.
   */
@@ -56,7 +56,9 @@ final case class EventSchema[E] private (
   /** Declare that this event belongs to several keys in the same durable scope. */
   def scopedByMany[K](scope: Scope[K])(keys: E => IterableOnce[K]): EventSchema[E] =
     require(!scopeResolvers.contains(scope.name), s"Event ${eventType.value} already declares scope ${scope.name}")
-    copy(scopeResolvers = scopeResolvers.updated(scope.name, event => keys(event).iterator.map(scope(_)).toList.distinct))
+    copy(scopeResolvers =
+      scopeResolvers.updated(scope.name, event => keys(event).iterator.map(scope(_)).toList.distinct),
+    )
 
   /** Resolve one declared scope by its stable name. */
   def resolveScope(scopeName: String, event: E): Option[ScopeId] =

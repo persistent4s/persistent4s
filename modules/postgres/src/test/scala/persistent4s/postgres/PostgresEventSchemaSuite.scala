@@ -78,6 +78,7 @@ object PostgresEventSchemaSuite extends IOSuite:
   private type Container = PostgreSQLContainer[Nothing]
 
   private val StableEventType = "library.value-changed"
+
   private val stableEventType = EventTypeName.fromString(StableEventType)
 
   private val eventCodec = CirceEventCodec.derived[VersionedEvent]
@@ -148,7 +149,7 @@ object PostgresEventSchemaSuite extends IOSuite:
     val wrongType = EventTypeName.fromString("another.value-changed")
 
     for
-      tag <- IO(Tag("schema-mismatch", UUID.randomUUID().toString))
+      tag    <- IO(Tag("schema-mismatch", UUID.randomUUID().toString))
       result <- resources.store
                   .appendUnchecked(
                     List((None, Set(tag), wrongType, false, ValueChanged("invalid"): VersionedEvent)),
@@ -172,7 +173,7 @@ object PostgresEventSchemaSuite extends IOSuite:
     val store = PostgresEventStore[IO, VersionedEvent](resources.sessions, malformedCodec)
 
     for
-      tag <- IO(Tag("malformed-json", UUID.randomUUID().toString))
+      tag    <- IO(Tag("malformed-json", UUID.randomUUID().toString))
       result <- store
                   .appendUnchecked(
                     List(
@@ -202,12 +203,12 @@ object PostgresEventSchemaSuite extends IOSuite:
         .pooled(4)
         .use { legacyPool =>
           for
-            _ <- legacyPool.use(_.execute(createLegacyEventsTable))
+            _      <- legacyPool.use(_.execute(createLegacyEventsTable))
             result <- PostgresModule.makeWithConfig[IO, VersionedEvent](config, eventCodec).use { components =>
                         for
                           columnCount <- components.sessions.use(_.unique(eventVersionColumnCount))
-                          tag = Tag("upgraded-schema", UUID.randomUUID().toString)
-                          _ <- components.eventStore.appendUnchecked(
+                          tag          = Tag("upgraded-schema", UUID.randomUUID().toString)
+                          _           <- components.eventStore.appendUnchecked(
                                  List(
                                    (
                                      None,
@@ -222,7 +223,9 @@ object PostgresEventSchemaSuite extends IOSuite:
                                       .readFrom(0L, EventFilter(Set(stableEventType), Set(tag)))
                                       .compile
                                       .toList
-                        yield expect(columnCount == 1L) and expect(events.headOption.exists(_.metadata.eventVersion == 2))
+                        yield expect(columnCount == 1L) and expect(
+                          events.headOption.exists(_.metadata.eventVersion == 2),
+                        )
                       }
           yield result
         }

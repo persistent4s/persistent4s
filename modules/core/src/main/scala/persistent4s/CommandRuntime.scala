@@ -28,8 +28,7 @@ object SnapshotId:
     require(value.nonEmpty, "Snapshot id must not be empty")
     value
 
-  extension (id: SnapshotId)
-    def value: String = id
+  extension (id: SnapshotId) def value: String = id
 
 /** Serialization for command state snapshots. Snapshot formats are deliberately independent from event formats. */
 trait SnapshotCodec[S]:

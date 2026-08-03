@@ -17,7 +17,9 @@
 package persistent4s.monitoring
 
 import cats.effect.IO
+
 import persistent4s.ProjectionCheckpointState
+
 import weaver.SimpleIOSuite
 
 object HtmlRendererSuite extends SimpleIOSuite:

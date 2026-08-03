@@ -123,7 +123,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
 
   test("derived filters support equality, booleans, and chunked IN values") { resources =>
     val marker = UUID.randomUUID().toString
-    val ids    = List.fill(5)(UUID.randomUUID())
+    val ids = List.fill(5)(UUID.randomUUID())
     val states = ids.zipWithIndex.map { case (id, index) =>
       id -> ScalarState(
         id,
@@ -143,7 +143,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
       selected   <- resources.scalar.filterBy(_.rowId).in((ids ++ List(ids.head, missing, ids(1))).iterator).run
       emptyInput <- resources.scalar.filterBy(_.rowId).in(Iterator.empty).run
     yield
-      val activeIds   = active.iterator.map(_.rowId).filter(ids.contains).toSet
+      val activeIds = active.iterator.map(_.rowId).filter(ids.contains).toSet
       val inactiveIds = inactive.iterator.map(_.rowId).filter(ids.contains).toSet
       val selectedById = selected.iterator.map(state => state.rowId -> state).toMap
 
@@ -159,7 +159,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
 
   test("derived filters distinguish nullable equality, null, not-null, and mixed IN values") { resources =>
     val marker = UUID.randomUUID().toString
-    val ids    = List.fill(5)(UUID.randomUUID())
+    val ids = List.fill(5)(UUID.randomUUID())
     val notes = List(
       None,
       Some(s"nullable-$marker-1"),
@@ -167,9 +167,13 @@ object DerivedPostgresRepositorySuite extends IOSuite:
       Some(s"nullable-$marker-3"),
       Some(s"nullable-$marker-other"),
     )
-    val states = ids.zip(notes).zipWithIndex.map { case ((id, note), index) =>
-      id -> ScalarState(id, s"nullable-filter-$marker-$index", note, index, active = false)
-    }.toMap
+    val states = ids
+      .zip(notes)
+      .zipWithIndex
+      .map { case ((id, note), index) =>
+        id -> ScalarState(id, s"nullable-filter-$marker-$index", note, index, active = false)
+      }
+      .toMap
     val mixedValues = List(None, notes(1), notes(2), notes(3), None)
 
     for
@@ -193,7 +197,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
 
   test("lazy filters combine predicates and distinguish absent, empty, false, and NULL inputs") { resources =>
     val marker = UUID.randomUUID().toString
-    val ids    = List.fill(6)(UUID.randomUUID())
+    val ids = List.fill(6)(UUID.randomUUID())
     val states = ids.zipWithIndex.map { case (id, index) =>
       id -> ScalarState(
         id,
@@ -206,7 +210,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
     val names = ids.map(states(_).displayName)
 
     for
-      _ <- resources.scalar.persist(states, Nil)
+      _        <- resources.scalar.persist(states, Nil)
       inactive <- resources.scalar
                     .filterBy(_.displayName)
                     .in(Some(names))
@@ -226,7 +230,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
                         .in(Option.empty[List[String]])
                         .run
       expectedAll <- resources.scalar.all
-      allOmitted <- resources.scalar
+      allOmitted  <- resources.scalar
                       .filterBy(_.displayName)
                       .in(Option.empty[List[String]])
                       .and(_.active)

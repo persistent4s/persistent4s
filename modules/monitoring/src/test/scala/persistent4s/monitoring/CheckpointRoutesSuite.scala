@@ -17,9 +17,11 @@
 package persistent4s.monitoring
 
 import cats.effect.{IO, Ref}
+
+import persistent4s.{EventStoreNotification, ProjectionCheckpointState}
+
 import org.http4s.*
 import org.http4s.implicits.*
-import persistent4s.{EventStoreNotification, ProjectionCheckpointState}
 import weaver.SimpleIOSuite
 
 object CheckpointRoutesSuite extends SimpleIOSuite:

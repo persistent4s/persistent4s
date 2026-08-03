@@ -17,8 +17,10 @@
 package persistent4s.postgres
 
 import cats.effect.IO
+
 import persistent4s.EventStoreNotification
 import persistent4s.EventStoreNotification.*
+
 import weaver.SimpleIOSuite
 
 object PostgresNotificationSuite extends SimpleIOSuite:

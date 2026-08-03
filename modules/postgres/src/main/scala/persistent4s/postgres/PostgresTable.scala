@@ -129,7 +129,7 @@ final class PostgresTable[K, S <: Product] private (
     scalaFieldName: String,
     codec: Codec[A],
   ): Query[A, S] =
-    val column      = filterColumn(scalaFieldName, codec)
+    val column = filterColumn(scalaFieldName, codec)
     val placeholder = codec.sql.runA(1).value
 
     Query(
@@ -151,10 +151,10 @@ final class PostgresTable[K, S <: Product] private (
       s"PostgreSQL IN filter contains [$size] values, exceeding the parameter limit for this field codec",
     )
 
-    val column       = filterColumn(scalaFieldName, codec)
-    val encoder      = codec.list(size)
+    val column = filterColumn(scalaFieldName, codec)
+    val encoder = codec.list(size)
     val placeholders = encoder.sql.runA(1).value
-    val predicate    =
+    val predicate =
       if includeNull then s"($column IN ($placeholders) OR $column IS NULL)"
       else s"$column IN ($placeholders)"
 
@@ -205,10 +205,10 @@ final class PostgresTable[K, S <: Product] private (
   ): AppliedFragment =
     require(values.nonEmpty, "A generated PostgreSQL IN filter requires at least one value")
 
-    val column    = filterColumn(scalaFieldName, codec)
-    val encoder   = codec.list(values.size)
-    val open      = if includeNull then s"($column IN (" else s"$column IN ("
-    val close     = if includeNull then s") OR $column IS NULL)" else ")"
+    val column = filterColumn(scalaFieldName, codec)
+    val encoder = codec.list(values.size)
+    val open = if includeNull then s"($column IN (" else s"$column IN ("
+    val close = if includeNull then s") OR $column IS NULL)" else ")"
     val predicate = Fragment[List[A]](
       List(Left(open), Right(encoder.sql), Left(close)),
       encoder,

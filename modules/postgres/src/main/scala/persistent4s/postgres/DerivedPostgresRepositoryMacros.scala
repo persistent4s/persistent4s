@@ -26,7 +26,7 @@ private object DerivedPostgresRepositoryMacros:
     postgresField: Expr[PostgresField[A]],
   )(using Quotes): Expr[PostgresFieldFilter[F, K, S, A]] =
     val fieldName = selectedField(selector, "A PostgreSQL filter")
-    val optional  = isOptional[A]
+    val optional = isOptional[A]
 
     '{ $repository.filterField(${ Expr(fieldName) }, $postgresField, ${ Expr(optional) }) }
 
@@ -36,7 +36,7 @@ private object DerivedPostgresRepositoryMacros:
     postgresField: Expr[PostgresField[A]],
   )(using Quotes): Expr[PostgresFieldFilter[F, K, S, A]] =
     val fieldName = selectedField(selector, "A PostgreSQL AND filter")
-    val optional  = isOptional[A]
+    val optional = isOptional[A]
 
     '{ $query.filterField(${ Expr(fieldName) }, $postgresField, ${ Expr(optional) }) }
 

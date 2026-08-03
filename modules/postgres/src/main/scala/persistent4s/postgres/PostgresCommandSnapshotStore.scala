@@ -61,8 +61,7 @@ final class PostgresCommandSnapshotStore[F[_]: Async] private[postgres] (
 
 object PostgresCommandSnapshotStore:
 
-  private val loadQuery
-    : Query[String *: String *: Int *: EmptyTuple, StoredCommandSnapshot] =
+  private val loadQuery: Query[String *: String *: Int *: EmptyTuple, StoredCommandSnapshot] =
     sql"""
       SELECT global_position, event_count, filter_fingerprint, payload
       FROM command_snapshots
@@ -71,8 +70,7 @@ object PostgresCommandSnapshotStore:
         AND snapshot_version = $int4
     """.query(int8 *: int8 *: text *: text).to[StoredCommandSnapshot]
 
-  private val saveCommand
-    : Command[String *: String *: Int *: Long *: Long *: String *: String *: EmptyTuple] =
+  private val saveCommand: Command[String *: String *: Int *: Long *: Long *: String *: String *: EmptyTuple] =
     sql"""
       INSERT INTO command_snapshots (
         snapshot_id,

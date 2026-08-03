@@ -18,12 +18,13 @@ package persistent4s.monitoring
 
 import cats.effect.Async
 import cats.syntax.all.*
+
+import persistent4s.{EventStoreNotification, ProjectionCheckpointState}
+
 import org.http4s.*
 import org.http4s.dsl.Http4sDsl
-import org.http4s.headers.`Content-Type`
-import org.http4s.headers.Location
+import org.http4s.headers.{Location, `Content-Type`}
 import org.http4s.implicits.*
-import persistent4s.{EventStoreNotification, ProjectionCheckpointState}
 
 final class CheckpointRoutes[F[_]: Async](
   loadAll: F[List[ProjectionCheckpointState]],

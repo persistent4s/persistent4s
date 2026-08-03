@@ -51,16 +51,18 @@ object PostgresAtomicRepositorySuite extends IOSuite:
         .withDatabase(config.database)
         .pooled(config.maxConnections)
         .flatMap { pool =>
-          Resource.eval(
-            pool.use { session =>
-              session.execute(PostgresProjectionCheckpoint.createTableCommand).void *>
-                session.execute(createStateTable).void
-            },
-          ).as(Resources(pool, PostgresProjectionCheckpoint.make(pool)))
+          Resource
+            .eval(
+              pool.use { session =>
+                session.execute(PostgresProjectionCheckpoint.createTableCommand).void *>
+                  session.execute(createStateTable).void
+              },
+            )
+            .as(Resources(pool, PostgresProjectionCheckpoint.make(pool)))
         }
     }
 
-  private final class TestRepository(
+  final private class TestRepository(
     pool: Resource[IO, Session[IO]],
     failAfterWrite: Boolean = false,
   ) extends PostgresAtomicRepository[IO, String, Int](pool):
@@ -78,15 +80,18 @@ object PostgresAtomicRepositorySuite extends IOSuite:
           } *> (if failAfterWrite then IO.raiseError(new RuntimeException("write failed")) else IO.unit),
       )
 
-  private final class RecordingRepository(
+  final private class RecordingRepository(
     pool: Resource[IO, Session[IO]],
     existing: Map[String, Int] = Map.empty,
     batchSize: Int = 2,
   ) extends PostgresAtomicRepository[IO, String, Int](pool):
 
     var fetchCalls: List[List[String]] = Nil
+
     var deleteCalls: List[List[String]] = Nil
+
     var upsertCalls: List[List[(String, Int)]] = Nil
+
     var operations: List[String] = Nil
 
     protected val table: PostgresRepositoryTable[IO, String, Int] =
@@ -109,14 +114,15 @@ object PostgresAtomicRepositorySuite extends IOSuite:
         batchSize = batchSize,
       )
 
-  private final case class EmbeddedState(id: String, value: Int)
+  final private case class EmbeddedState(id: String, value: Int)
 
-  private final class RowsRepository(
+  final private class RowsRepository(
     pool: Resource[IO, Session[IO]],
     existing: List[EmbeddedState],
   ) extends PostgresAtomicRepository[IO, String, EmbeddedState](pool):
 
     var fetchCalls: List[List[String]] = Nil
+
     var upsertCalls: List[List[EmbeddedState]] = Nil
 
     protected val table: PostgresRepositoryTable[IO, String, EmbeddedState] =
@@ -170,16 +176,16 @@ object PostgresAtomicRepositorySuite extends IOSuite:
 
   test("findMany deduplicates and chunks keys, reconstructs missing entries, and find reuses the batch query") {
     resources =>
-    val repository = RecordingRepository(resources.pool, Map("a" -> 1, "b" -> 2))
+      val repository = RecordingRepository(resources.pool, Map("a" -> 1, "b" -> 2))
 
-    for
-      found <- repository.findMany(List("a", "a", "missing", "b"))
-      one   <- repository.find("a")
-    yield expect.all(
-      found == Map("a" -> Some(1), "missing" -> None, "b" -> Some(2)),
-      one.contains(1),
-      repository.fetchCalls == List(List("a", "missing"), List("b"), List("a")),
-    )
+      for
+        found <- repository.findMany(List("a", "a", "missing", "b"))
+        one   <- repository.find("a")
+      yield expect.all(
+        found == Map("a" -> Some(1), "missing" -> None, "b" -> Some(2)),
+        one.contains(1),
+        repository.fetchCalls == List(List("a", "missing"), List("b"), List("a")),
+      )
   }
 
   test("rows derives fetched keys and unwraps keyed upserts for state-containing-key tables") { resources =>
@@ -202,11 +208,11 @@ object PostgresAtomicRepositorySuite extends IOSuite:
     val state = EmbeddedState("state-key", 1)
 
     for
-      name       <- fresh("projection")
-      checkpoint  = ProjectionCheckpointState(name, 1L, true, None)
-      result <- repository
-        .persistAtomically(ProjectionCommit(Map("map-key" -> state), Nil, -1L, checkpoint))
-        .attempt
+      name      <- fresh("projection")
+      checkpoint = ProjectionCheckpointState(name, 1L, true, None)
+      result    <- repository
+                  .persistAtomically(ProjectionCommit(Map("map-key" -> state), Nil, -1L, checkpoint))
+                  .attempt
       saved <- resources.checkpoint.load(name)
     yield expect.all(
       result.left.exists(
@@ -240,10 +246,10 @@ object PostgresAtomicRepositorySuite extends IOSuite:
   test("commits projection state and checkpoint together") { resources =>
     val repository = TestRepository(resources.pool)
     for
-      key  <- fresh("state")
-      name <- fresh("projection")
-      next  = ProjectionCheckpointState(name, 7L, true, None)
-      _    <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, -1L, next))
+      key   <- fresh("state")
+      name  <- fresh("projection")
+      next   = ProjectionCheckpointState(name, 7L, true, None)
+      _     <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, -1L, next))
       state <- repository.findMany(key :: Nil)
       saved <- resources.checkpoint.load(name)
     yield expect.all(
@@ -255,13 +261,13 @@ object PostgresAtomicRepositorySuite extends IOSuite:
   test("a stale checkpoint rolls back the state write") { resources =>
     val repository = TestRepository(resources.pool)
     for
-      key      <- fresh("state")
-      name     <- fresh("projection")
-      current   = ProjectionCheckpointState(name, 5L, true, None)
-      next      = current.copy(globalPosition = 6L)
-      _        <- resources.checkpoint.save(current)
-      result   <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, 4L, next)).attempt
-      state    <- repository.findMany(key :: Nil)
+      key       <- fresh("state")
+      name      <- fresh("projection")
+      current    = ProjectionCheckpointState(name, 5L, true, None)
+      next       = current.copy(globalPosition = 6L)
+      _         <- resources.checkpoint.save(current)
+      result    <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, 4L, next)).attempt
+      state     <- repository.findMany(key :: Nil)
       persisted <- resources.checkpoint.load(name)
     yield expect.all(
       result.left.exists(_.isInstanceOf[ProjectionCheckpointConflict]),
@@ -289,11 +295,11 @@ object PostgresAtomicRepositorySuite extends IOSuite:
   test("a state write failure rolls back the checkpoint and state") { resources =>
     val repository = TestRepository(resources.pool, failAfterWrite = true)
     for
-      key       <- fresh("state")
-      name      <- fresh("projection")
-      next       = ProjectionCheckpointState(name, 1L, true, None)
-      result    <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, -1L, next)).attempt
-      state     <- repository.findMany(key :: Nil)
+      key        <- fresh("state")
+      name       <- fresh("projection")
+      next        = ProjectionCheckpointState(name, 1L, true, None)
+      result     <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, -1L, next)).attempt
+      state      <- repository.findMany(key :: Nil)
       checkpoint <- resources.checkpoint.load(name)
     yield expect.all(
       result.isLeft,
