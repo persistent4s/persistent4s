@@ -19,18 +19,19 @@ package persistent4s.postgres
 import cats.effect.*
 import cats.effect.std.Console
 import cats.syntax.all.*
+
 import fs2.io.net.Network
-import org.typelevel.otel4s.metrics.Meter
-import org.typelevel.otel4s.trace.Tracer
+
+import persistent4s.{CommandRuntime, DefaultProjector, Event, EventCodec, ProjectionRuntime}
+
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.otel4s.trace.Tracer
 import pureconfig.ConfigSource
 import skunk.*
-import skunk.implicits.*
 import skunk.codec.all.*
-
-import persistent4s.EventCodec
-import persistent4s.Event
+import skunk.implicits.*
 
 sealed trait PostgresModuleError extends Throwable
 
@@ -78,11 +79,35 @@ object PostgresModuleError:
   */
 object PostgresModule:
 
-  /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
+  /** Fully initialized PostgreSQL components sharing one connection pool. `sessions` is exposed for application read
+    * model repositories; command snapshots, event storage and atomic projection commits therefore require no second
+    * pool or duplicate configuration.
+    */
   final case class Components[F[_], A <: Event](
     eventStore: PostgresEventStore[F, A],
     checkpoint: PostgresProjectionCheckpoint[F],
-  )
+    snapshotStore: PostgresCommandSnapshotStore[F],
+    sessions: Resource[F, Session[F]],
+  ):
+
+    val commandRuntime: CommandRuntime[F, A] =
+      CommandRuntime(eventStore, Some(snapshotStore))
+
+    def projectionRuntime(using Async[F]): ProjectionRuntime[F, A] =
+      ProjectionRuntime(DefaultProjector(eventStore, checkpoint))
+
+    /** Build an atomic projection repository from derived PostgreSQL table metadata using this module's shared session
+      * pool.
+      */
+    def repository[K, S <: Product](table: PostgresTable[K, S])(using Async[F]): DerivedPostgresRepository[F, K, S] =
+      DerivedPostgresRepository(sessions, table)
+
+    /** Build a derived repository and replace selected generated callbacks while retaining the shared session pool. */
+    def repository[K, S <: Product](
+      table: PostgresTable[K, S],
+      customize: PostgresRepositoryTable[F, K, S] => PostgresRepositoryTable[F, K, S],
+    )(using Async[F]): DerivedPostgresRepository[F, K, S] =
+      DerivedPostgresRepository.customized(sessions, table)(customize)
 
   private val defaultConfigPath = "persistent4s.postgres"
 
@@ -93,8 +118,8 @@ object PostgresModule:
     * @param configPath
     *   the path in application.conf where the PostgresConfig is located (default: "persistent4s.postgres")
     * @return
-    *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint, or fails with a clear error
-    *   message
+    *   initialized event, command-snapshot, checkpoint and shared-session components, or a clear connection/config
+    *   failure
     */
   def make[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
     codec: EventCodec[A],
@@ -110,10 +135,7 @@ object PostgresModule:
            )
       pool <- createSessionPool[F](config)
       _    <- Resource.eval(initializeDatabase[F](pool, logger))
-    yield Components(
-      PostgresEventStore[F, A](pool, codec),
-      PostgresProjectionCheckpoint.make[F](pool),
-    )
+    yield components(pool, codec)
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
     *
@@ -122,7 +144,7 @@ object PostgresModule:
     * @param codec
     *   the event codec for serializing/deserializing events
     * @return
-    *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint
+    *   initialized event, command-snapshot, checkpoint and shared-session components
     */
   def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
     config: PostgresConfig,
@@ -137,9 +159,18 @@ object PostgresModule:
            )
       pool <- createSessionPool[F](config)
       _    <- Resource.eval(initializeDatabase[F](pool, logger))
-    yield Components(
-      PostgresEventStore[F, A](pool, codec),
+    yield components(pool, codec)
+
+  private def components[F[_]: Async, A <: Event](
+    pool: Resource[F, Session[F]],
+    codec: EventCodec[A],
+  ): Components[F, A] =
+    val eventStore = PostgresEventStore[F, A](pool, codec)
+    Components(
+      eventStore,
       PostgresProjectionCheckpoint.make[F](pool),
+      PostgresCommandSnapshotStore.make[F](pool),
+      pool,
     )
 
   private def loadConfig[F[_]: Sync](configPath: String): F[PostgresConfig] =
@@ -188,7 +219,8 @@ object PostgresModule:
       session.execute(createEventTypeIndexCommand) *>
       session.execute(createEventTagsTableCommand) *>
       session.execute(createEventTagsSequenceIndexCommand) *>
-      session.execute(PostgresProjectionCheckpoint.createTableCommand).void
+      session.execute(PostgresProjectionCheckpoint.createTableCommand) *>
+      session.execute(PostgresCommandSnapshotStore.createTableCommand).void
 
   private val checkTableExistsQuery: Query[String, Long] =
     sql"""
