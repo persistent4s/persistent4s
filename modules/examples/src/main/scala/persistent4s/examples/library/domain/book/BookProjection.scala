@@ -16,12 +16,13 @@
 
 package persistent4s.examples.library.domain.book
 
-import cats.effect.*
-import cats.syntax.all.*
+import java.util.UUID
+
+import cats.effect.IO
 
 import persistent4s.*
-import persistent4s.examples.library.domain.{BookAdded, BookBorrowed, BookReturned, LibraryEvent}
-import java.util.UUID
+import persistent4s.examples.library.domain.borrowing.{BookBorrowed, BookReturned}
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
 final case class BookState(
   bookId: UUID,
@@ -31,31 +32,18 @@ final case class BookState(
   availableCopies: Int,
 )
 
-final class BookProjection[F[_]: Async] private (
-  protected val repository: Repository[F, UUID, BookState],
-) extends EventSourcedProjection[F, LibraryEvent, UUID, BookState]:
+final class BookProjection(
+  protected val repository: BookRepository,
+) extends ExactlyOnceEventSourcedProjection[IO, LibraryEvent, UUID, BookState]:
 
   override val name: String = "book-projection"
 
-  override val handlers = List(
-    onF[BookAdded](_.bookId) { (state, e) =>
-      state.fold(BookState(e.bookId, e.title, e.author, e.totalCopies, e.totalCopies).some.pure[F])(_ =>
-        Async[F].raiseError(new RuntimeException(s"Book ${e.bookId} already exists")),
-      )
-    },
-    onF[BookBorrowed](_.bookId) { (state, e) =>
-      state.fold(Async[F].raiseError(new RuntimeException(s"State does not exist for book ${e.bookId}")))(s =>
-        s.copy(availableCopies = s.availableCopies - 1).some.pure[F],
-      )
-    },
-    onF[BookReturned](_.bookId) { (state, e) =>
-      state.fold(Async[F].raiseError(new RuntimeException(s"State does not exist for book ${e.bookId}")))(s =>
-        s.copy(availableCopies = s.availableCopies + 1).some.pure[F],
-      )
-    },
-  )
+  override protected val eventHandlers = handlersBy(LibraryScopes.Book):
+    on[BookAdded].create: event =>
+      BookState(event.bookId, event.title, event.author, event.totalCopies, event.totalCopies)
 
-object BookProjection:
+    on[BookBorrowed].update: state =>
+      state.copy(availableCopies = state.availableCopies - 1)
 
-  def make[F[_]: Async](repository: Repository[F, UUID, BookState]): F[BookProjection[F]] =
-    Async[F].pure(new BookProjection(repository))
+    on[BookReturned].update: state =>
+      state.copy(availableCopies = state.availableCopies + 1)

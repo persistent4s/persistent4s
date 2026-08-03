@@ -20,23 +20,37 @@ import java.util.UUID
 
 import cats.effect.IO
 
-import persistent4s.EventStore
+import persistent4s.CommandRuntime
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
 
-class BookServiceImpl(repository: BookRepository[IO])(using EventStore[IO, LibraryEvent]) extends BookService[IO]:
+class BookServiceImpl(repository: BookRepository)(using commands: CommandRuntime[IO, LibraryEvent])
+    extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
-    (for
+    for
       bookId <- IO(UUID.randomUUID())
-      _      <- AddBookHandler.run[IO](AddBook(bookId, title, author, totalCopies))
-    yield AddBookOutput(bookId.toString())).adaptError { case e => ValidationError(e.getMessage) }
+      _      <- commands.executeOrRaise(AddBook.Handler, AddBook(bookId, title, author, totalCopies)):
+             case AddBook.Error.AlreadyExists(id) => ValidationError(s"Book already exists: $id")
+    yield AddBookOutput(bookId.toString())
 
-  def getBooks(): IO[GetBooksOutput] =
-    repository.getBooks.map(books =>
-      GetBooksOutput(books.map(b => BookItem(b.bookId.toString(), b.title, b.author, b.totalCopies, b.availableCopies))),
-    )
+  def getBooks(input: GetBooksInput): IO[GetBooksOutput] =
+    repository
+      .filterBy(_.title)
+      .in(input.title)
+      .and(_.author)
+      .in(input.author)
+      .and(_.totalCopies)
+      .is(input.totalCopies)
+      .and(_.availableCopies)
+      .is(input.availableCopies)
+      .run
+      .map(books =>
+        GetBooksOutput(
+          books.map(b => BookItem(b.bookId.toString(), b.title, b.author, b.totalCopies, b.availableCopies)),
+        ),
+      )
 
   def getBook(bookId: String): IO[GetBookOutput] =
     repository.find(UUID.fromString(bookId)).flatMap {

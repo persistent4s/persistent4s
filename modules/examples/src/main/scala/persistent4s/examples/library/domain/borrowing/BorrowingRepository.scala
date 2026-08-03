@@ -16,120 +16,28 @@
 
 package persistent4s.examples.library.domain.borrowing
 
-import cats.effect.*
-import cats.syntax.all.*
-import skunk.*
-import skunk.implicits.*
-import skunk.codec.all.*
-
-import persistent4s.Repository
-import persistent4s.examples.library.domain.borrowing.BorrowingState
 import java.util.UUID
 
-final class BorrowingRepository[F[_]: Async] private (
-  pool: Resource[F, Session[F]],
-) extends Repository[F, (UUID, UUID), BorrowingState]:
+import cats.effect.{IO, Resource}
 
-  import BorrowingRepository.*
+import persistent4s.postgres.{DerivedPostgresRepository, PostgresTable}
 
-  override def findMany(keys: List[(UUID, UUID)]): F[Map[(UUID, UUID), Option[BorrowingState]]] =
-    if keys.isEmpty then Map.empty.pure[F]
-    else
-      val (bookIds, memberIds) = keys.unzip
-      pool.use(_.execute(findManyQuery(keys.size))((bookIds, memberIds))).map { states =>
-        val found = states.map(s => (s.bookId, s.memberId) -> s).toMap
-        keys.map(k => k -> found.get(k)).toMap
-      }
+import skunk.Session
 
-  override def persist(upserts: Map[(UUID, UUID), BorrowingState], deletes: List[(UUID, UUID)]): F[Unit] =
-    if upserts.isEmpty && deletes.isEmpty then Async[F].unit
-    else
-      pool.use { session =>
-        session.transaction.use { _ =>
-          val deleteF =
-            if deletes.isEmpty then Async[F].unit
-            else
-              val (bookIds, memberIds) = deletes.unzip
-              session.execute(deleteManyCommand(deletes.size))((bookIds, memberIds)).void
-          val upsertF =
-            upserts.toList
-              .grouped(MaxUpsertChunkSize)
-              .toList
-              .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk.map(_._2)).void)
-          deleteF *> upsertF
-        }
-      }
+final class BorrowingRepository private (
+  pool: Resource[IO, Session[IO]],
+) extends DerivedPostgresRepository[IO, (UUID, UUID), BorrowingState](pool, BorrowingRepository.table):
 
-  def find(key: (UUID, UUID)): F[Option[BorrowingState]] =
-    pool.use(_.option(findQuery)(key))
+  def getActiveBorrowings: IO[List[BorrowingState]] =
+    filterBy(_.returnedAt).isNull.run
 
-  def getBorrowings: F[List[BorrowingState]] =
-    pool.use(_.execute(getBorrowingsQuery))
-
-  def getActiveBorrowings: F[List[BorrowingState]] =
-    pool.use(_.execute(getActiveBorrowingsQuery))
-
-  def getMemberBorrowings(memberId: UUID): F[List[BorrowingState]] =
-    pool.use(_.execute(getMemberBorrowingsQuery)(memberId))
+  def getMemberBorrowings(memberId: UUID): IO[List[BorrowingState]] =
+    filterBy(_.memberId).is(memberId).run
 
 object BorrowingRepository:
 
-  private val MaxUpsertChunkSize = 500
+  private val table: PostgresTable[(UUID, UUID), BorrowingState] =
+    PostgresTable.derived[BorrowingState]("borrowings").key(state => (state.bookId, state.memberId))
 
-  private val borrowingStateCodec: Codec[BorrowingState] =
-    (uuid *: uuid *: timestamptz *: timestamptz *: timestamptz.opt).to[BorrowingState]
-
-  private def findManyQuery(n: Int): Query[(List[UUID], List[UUID]), BorrowingState] =
-    sql"""
-      SELECT b.book_id, b.member_id, b.borrowed_at, b.due_date, b.returned_at
-      FROM borrowings b
-      JOIN (
-        SELECT unnest(ARRAY[${uuid.list(n)}]) AS book_id,
-               unnest(ARRAY[${uuid.list(n)}]) AS member_id
-      ) k ON b.book_id = k.book_id AND b.member_id = k.member_id
-    """.query(borrowingStateCodec)
-
-  private val findQuery: Query[(UUID, UUID), BorrowingState] =
-    sql"""
-      SELECT book_id, member_id, borrowed_at, due_date, returned_at
-      FROM borrowings
-      WHERE book_id = $uuid AND member_id = $uuid
-    """.query(borrowingStateCodec)
-
-  private def upsertManyCommand(n: Int): Command[List[BorrowingState]] =
-    sql"""
-      INSERT INTO borrowings (book_id, member_id, borrowed_at, due_date, returned_at)
-      VALUES ${borrowingStateCodec.values.list(n)}
-      ON CONFLICT (book_id, member_id) DO UPDATE SET
-        borrowed_at = EXCLUDED.borrowed_at,
-        due_date    = EXCLUDED.due_date,
-        returned_at = EXCLUDED.returned_at
-    """.command
-
-  private def deleteManyCommand(n: Int): Command[(List[UUID], List[UUID])] =
-    sql"""
-      DELETE FROM borrowings
-      WHERE (book_id, member_id) IN (
-        SELECT unnest(ARRAY[${uuid.list(n)}]), unnest(ARRAY[${uuid.list(n)}])
-      )
-    """.command
-
-  private val getBorrowingsQuery: Query[Void, BorrowingState] =
-    sql"SELECT book_id, member_id, borrowed_at, due_date, returned_at FROM borrowings".query(borrowingStateCodec)
-
-  private val getActiveBorrowingsQuery: Query[Void, BorrowingState] =
-    sql"""
-      SELECT book_id, member_id, borrowed_at, due_date, returned_at
-      FROM borrowings
-      WHERE returned_at IS NULL
-    """.query(borrowingStateCodec)
-
-  private val getMemberBorrowingsQuery: Query[UUID, BorrowingState] =
-    sql"""
-      SELECT book_id, member_id, borrowed_at, due_date, returned_at
-      FROM borrowings
-      WHERE member_id = $uuid
-    """.query(borrowingStateCodec)
-
-  def make[F[_]: Async](pool: Resource[F, Session[F]]): BorrowingRepository[F] =
+  def make(pool: Resource[IO, Session[IO]]): BorrowingRepository =
     new BorrowingRepository(pool)

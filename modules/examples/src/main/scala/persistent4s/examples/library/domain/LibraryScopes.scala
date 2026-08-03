@@ -16,20 +16,13 @@
 
 package persistent4s.examples.library.domain
 
-import persistent4s.circe.CirceEventCodec
-import persistent4s.examples.library.domain.book.BookEvent
-import persistent4s.examples.library.domain.borrowing.BorrowingEvent
-import persistent4s.examples.library.domain.member.MemberEvent
-import persistent4s.{Event, EventCodec}
+import java.util.UUID
 
-trait LibraryEvent extends Event
+import persistent4s.Scope
 
-object LibraryEvent:
+/** Stable histories and consistency boundaries used by the library domain. */
+object LibraryScopes:
 
-  val eventCodec: EventCodec[LibraryEvent] =
-    CirceEventCodec
-      .builder[LibraryEvent]
-      .add[BookEvent]
-      .add[MemberEvent]
-      .add[BorrowingEvent]
-      .build
+  val Book: Scope[UUID] = Scope[UUID]("book")
+
+  val Member: Scope[UUID] = Scope[UUID]("member")

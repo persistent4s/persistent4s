@@ -18,33 +18,38 @@ package persistent4s.examples.library.infrastructure
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import org.http4s.HttpRoutes
-import smithy4s.http4s.SimpleRestJsonBuilder
-import smithy4s.http4s.swagger.docs
 
-import persistent4s.EventStore
+import persistent4s.CommandRuntime
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.application.*
 import persistent4s.examples.library.domain.LibraryEvent
 
+import org.http4s.HttpRoutes
+import smithy4s.http4s.SimpleRestJsonBuilder
+import smithy4s.http4s.swagger.docs
+
 object LibraryRoutes:
 
   def make(module: LibraryModule): Resource[IO, HttpRoutes[IO]] =
-    given EventStore[IO, LibraryEvent] = module.store
+    given CommandRuntime[IO, LibraryEvent] = module.commands
 
     for
       bookRoutes <- SimpleRestJsonBuilder
                       .routes(BookServiceImpl(module.bookRepository))
                       .resource
+
       memberRoutes <- SimpleRestJsonBuilder
                         .routes(MemberServiceImpl(module.memberRepository))
                         .resource
+
       borrowingRoutes <- SimpleRestJsonBuilder
                            .routes(BorrowingServiceImpl(module.borrowingRepository))
                            .resource
+
       eventsRoutes <- SimpleRestJsonBuilder
                         .routes(EventsServiceImpl(module))
                         .resource
+
       docsRoutes = docs[IO](
                      BookService,
                      MemberService,

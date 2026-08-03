@@ -14,22 +14,26 @@
  * limitations under the License.
  */
 
-package persistent4s.examples.library.domain
+package persistent4s.examples.library.domain.member
 
-import persistent4s.circe.CirceEventCodec
-import persistent4s.examples.library.domain.book.BookEvent
-import persistent4s.examples.library.domain.borrowing.BorrowingEvent
-import persistent4s.examples.library.domain.member.MemberEvent
-import persistent4s.{Event, EventCodec}
+import java.util.UUID
 
-trait LibraryEvent extends Event
+import io.circe.{Decoder, Encoder}
 
-object LibraryEvent:
+import persistent4s.EventSchema
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
-  val eventCodec: EventCodec[LibraryEvent] =
-    CirceEventCodec
-      .builder[LibraryEvent]
-      .add[BookEvent]
-      .add[MemberEvent]
-      .add[BorrowingEvent]
-      .build
+sealed trait MemberEvent extends LibraryEvent
+
+final case class MemberRegistered(
+  memberId: UUID,
+  name: String,
+  email: String,
+) extends MemberEvent derives Encoder, Decoder
+
+object MemberRegistered:
+
+  given EventSchema[MemberRegistered] =
+    EventSchema[MemberRegistered]("library.member-registered")
+      .withAlias("MemberRegistered")
+      .scopedBy(LibraryScopes.Member)(_.memberId)

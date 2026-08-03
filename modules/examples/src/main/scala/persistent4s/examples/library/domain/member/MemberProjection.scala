@@ -16,12 +16,13 @@
 
 package persistent4s.examples.library.domain.member
 
-import cats.effect.*
-import cats.syntax.all.*
+import java.util.UUID
+
+import cats.effect.IO
 
 import persistent4s.*
-import persistent4s.examples.library.domain.{LibraryEvent, MemberRegistered, BookBorrowed, BookReturned}
-import java.util.UUID
+import persistent4s.examples.library.domain.borrowing.{BookBorrowed, BookReturned}
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
 final case class MemberState(
   memberId: UUID,
@@ -30,31 +31,23 @@ final case class MemberState(
   borrowedBooks: Int,
 )
 
-final class MemberProjection[F[_]: Async] private (
-  protected val repository: Repository[F, UUID, MemberState],
-) extends EventSourcedProjection[F, LibraryEvent, UUID, MemberState]:
+final class MemberProjection(
+  protected val repository: MemberRepository,
+) extends ExactlyOnceEventSourcedProjection[IO, LibraryEvent, UUID, MemberState]:
 
   override val name: String = "member-projection"
 
-  override val handlers = List(
-    onF[MemberRegistered](_.memberId) { (state, e) =>
-      state.fold(MemberState(e.memberId, e.name, e.email, borrowedBooks = 0).some.pure[F])(_ =>
-        Async[F].raiseError(new RuntimeException(s"Member ${e.memberId} already exists")),
-      )
-    },
-    onF[BookBorrowed](_.memberId) { (state, e) =>
-      state.fold(Async[F].raiseError(new RuntimeException(s"State does not exist for member ${e.memberId}")))(s =>
-        s.copy(borrowedBooks = s.borrowedBooks + 1).some.pure[F],
-      )
-    },
-    onF[BookReturned](_.memberId) { (state, e) =>
-      state.fold(Async[F].raiseError(new RuntimeException(s"State does not exist for member ${e.memberId}")))(s =>
-        s.copy(borrowedBooks = s.borrowedBooks - 1).some.pure[F],
-      )
-    },
-  )
+  override protected val eventHandlers = handlersBy(LibraryScopes.Member):
+    on[MemberRegistered].create: event =>
+      MemberState(event.memberId, event.name, event.email, borrowedBooks = 0)
+
+    on[BookBorrowed].update: state =>
+      state.copy(borrowedBooks = state.borrowedBooks + 1)
+
+    on[BookReturned].update: state =>
+      state.copy(borrowedBooks = state.borrowedBooks - 1)
 
 object MemberProjection:
 
-  def make[F[_]: Async](repository: Repository[F, UUID, MemberState]): F[MemberProjection[F]] =
-    Async[F].pure(new MemberProjection(repository))
+  def apply(repository: MemberRepository): MemberProjection =
+    new MemberProjection(repository)

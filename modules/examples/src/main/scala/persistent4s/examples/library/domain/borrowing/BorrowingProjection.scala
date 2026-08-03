@@ -16,13 +16,13 @@
 
 package persistent4s.examples.library.domain.borrowing
 
-import cats.effect.*
-import cats.syntax.all.*
-
-import persistent4s.*
-import persistent4s.examples.library.domain.{BookBorrowed, BookReturned, LibraryEvent}
 import java.time.OffsetDateTime
 import java.util.UUID
+
+import cats.effect.IO
+
+import persistent4s.*
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
 final case class BorrowingState(
   bookId: UUID,
@@ -32,28 +32,22 @@ final case class BorrowingState(
   returnedAt: Option[OffsetDateTime],
 )
 
-final class BorrowingProjection[F[_]: Async] private (
-  protected val repository: Repository[F, (UUID, UUID), BorrowingState],
-) extends EventSourcedProjection[F, LibraryEvent, (UUID, UUID), BorrowingState]:
+final class BorrowingProjection(
+  protected val repository: BorrowingRepository,
+) extends ExactlyOnceEventSourcedProjection[IO, LibraryEvent, (UUID, UUID), BorrowingState]:
 
   override val name: String = "borrowing-projection"
 
-  override val handlers = List(
-    onF[BookBorrowed](e => (e.bookId, e.memberId)) { (state, e) =>
-      state match
-        case Some(s) if s.returnedAt.isEmpty =>
-          Async[F].raiseError(new RuntimeException(s"Book ${e.bookId} is already borrowed by member ${e.memberId}"))
-        case _ =>
-          BorrowingState(e.bookId, e.memberId, e.borrowedAt, e.dueDate, None).some.pure[F]
-    },
-    onF[BookReturned](e => (e.bookId, e.memberId)) { (state, e) =>
-      state match
-        case Some(s) => s.copy(returnedAt = Some(e.returnedAt)).some.pure[F]
-        case None    => Async[F].raiseError(new RuntimeException(s"Cannot return non-borrowed book ${e.bookId}"))
-    },
-  )
+  override protected val eventHandlers = handlersBy(LibraryScopes.Book, LibraryScopes.Member):
+    on[BookBorrowed]
+      .reject:
+        case (Some(state), event) if state.returnedAt.isEmpty =>
+          new RuntimeException(s"Book ${event.bookId} is already borrowed by member ${event.memberId}")
+      .set: event =>
+        BorrowingState(event.bookId, event.memberId, event.borrowedAt, event.dueDate, None)
 
-object BorrowingProjection:
-
-  def make[F[_]: Async](repository: Repository[F, (UUID, UUID), BorrowingState]): F[BorrowingProjection[F]] =
-    Async[F].pure(new BorrowingProjection(repository))
+    on[BookReturned]
+      .reject:
+        case (None, event) => new RuntimeException(s"Cannot return non-borrowed book ${event.bookId}")
+      .update: (state, event) =>
+        state.copy(returnedAt = Some(event.returnedAt))
