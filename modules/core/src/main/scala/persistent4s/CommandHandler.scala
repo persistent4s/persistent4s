@@ -16,6 +16,9 @@
 
 package persistent4s
 
+import scala.annotation.unused
+import scala.util.control.NonFatal
+
 import cats.effect.Concurrent
 import cats.syntax.all.*
 
@@ -53,6 +56,12 @@ trait CommandHandler[C, S, E <: Event]:
     */
   def decide(state: S, command: C): List[(Set[Tag], E)]
 
+  /** Internal decision hook that receives the already-resolved command tags. Implementations that default emitted
+    * events to the command's read scope can override this to avoid evaluating [[tags]] twice.
+    */
+  protected def decide(state: S, command: C, @unused commandTags: Set[Tag]): List[(Set[Tag], E)] =
+    decide(state, command)
+
   /** Maximum number of retry attempts on optimistic concurrency conflicts. Override to customize. Default is 3. */
   def maxRetries: Int = 3
 
@@ -79,15 +88,22 @@ trait CommandHandler[C, S, E <: Event]:
     command: C,
   )(using eventStore: EventStore[F, E]): F[List[E]] =
     for
-      tags      <- Concurrent[F].pure(tags(command))
+      tags      <- suspend(tags(command))
       filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
       envelopes <- eventStore.readFrom(0L, filter).compile.toList
-      state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
+      state     <- suspend(envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload)))
       index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-      _         <- validate(state, command) match
+      result    <- suspend(validate(state, command))
+      _         <- result match
              case Left(e)  => Concurrent[F].raiseError(e)
              case Right(_) => Concurrent[F].unit
-      decided         = decide(state, command)
-      events          = decided.map((tags, event) => (None, tags, EventTypeName.fromInstance(event), false, event))
+      decided <- suspend(decide(state, command, tags))
+      events  <- suspend(
+                  decided.map((tags, event) => (None, tags, EventTypeName.fromInstance(event), false, event)),
+                )
       appendedEvents <- eventStore.append(filter, index, events)
     yield appendedEvents
+
+  private def suspend[F[_]: Concurrent, B](value: => B): F[B] =
+    try Concurrent[F].pure(value)
+    catch case NonFatal(error) => Concurrent[F].raiseError(error)
