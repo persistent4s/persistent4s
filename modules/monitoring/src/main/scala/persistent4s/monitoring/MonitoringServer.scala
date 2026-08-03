@@ -16,13 +16,16 @@
 
 package persistent4s.monitoring
 
+import scala.concurrent.duration.*
+
 import cats.effect.{Async, Resource}
-import com.comcast.ip4s.*
+
 import fs2.io.net.Network
-import org.http4s.ember.server.EmberServerBuilder
+
 import persistent4s.{EventStoreNotification, ProjectionCheckpoint}
 
-import scala.concurrent.duration.*
+import com.comcast.ip4s.*
+import org.http4s.ember.server.EmberServerBuilder
 
 object MonitoringServer:
 

@@ -43,6 +43,13 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
   conflicts: Counter[F, Long],
 ) extends EventStore[F, A]:
 
+  /** Delegated unchanged: the decorator must not hide the inner store's schema registry, or schema-aware handlers would
+    * stop failing fast on a shadowed [[EventSchema]].
+    */
+  override def storageSchema(event: A): Option[EventStorageSchema] = inner.storageSchema(event)
+
+  override def currentRevision(eventFilter: EventFilter): F[Long] = inner.currentRevision(eventFilter)
+
   override def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
@@ -146,7 +153,8 @@ object InstrumentedEventStore:
   ): F[EventStore[F, A] & EventNotification[F]] =
     make(inner).map { instrumented =>
       new EventStore[F, A] with EventNotification[F]:
-        export instrumented.{append, appendUnchecked, readFrom}
+        export instrumented.{append, appendUnchecked, currentRevision, readFrom}
+        override def storageSchema(event: A): Option[EventStorageSchema] = instrumented.storageSchema(event)
         def notification(projectionName: String): fs2.Stream[F, EventStoreNotification] =
           inner.notification(projectionName)
     }

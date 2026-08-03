@@ -16,16 +16,20 @@
 
 package persistent4s
 
+import java.util.UUID
+
+import scala.concurrent.duration.*
+
 import cats.effect.std.Queue
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
+
 import fs2.Stream
 import fs2.concurrent.Topic
-import persistent4s.EventStoreNotification.*
-import weaver.SimpleIOSuite
 
-import scala.concurrent.duration.*
-import java.util.UUID
+import persistent4s.EventStoreNotification.*
+
+import weaver.SimpleIOSuite
 
 object DefaultProjectorSuite extends SimpleIOSuite:
 
@@ -64,6 +68,9 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       byType && byTag
 
     def getAll: IO[Vector[EventEnvelope[A]]] = events.get
+
+    def currentRevision(eventFilter: EventFilter): IO[Long] =
+      events.get.map(_.filter(matches(_, eventFilter)).lastOption.fold(0L)(_.metadata.globalPosition))
 
     def append(
       eventFilter: EventFilter,
@@ -180,13 +187,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
           keys.map(k => k -> current.get(k)).toMap
         }
 
-        def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
-          repoStates.toList.traverse_ { case (key, state) =>
-            states.update(_.updated(key, state))
-          }
-
-        def deleteMany(keys: List[String]): IO[Unit] =
-          keys.traverse_(key => states.update(_ - key))
+        def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] =
+          states.update(current => (current -- deletes) ++ upserts)
       }
 
       def name: String = "tracking"
@@ -270,6 +272,107 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     yield expect(persisted.get("a") == Some(2)) // handle called twice for key "a"
   }
 
+  test("uses an atomic repository to persist state and checkpoint together") {
+    for
+      store                <- InMemoryStore.make[TestEvent]
+      fallbackCheckpoint   <- InMemoryCheckpoint.make
+      handled              <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states               <- Ref.of[IO, Map[String, Int]](Map.empty)
+      committedCheckpoint  <- Ref.of[IO, Option[ProjectionCheckpointState]](None)
+      regularPersistCalled <- Ref.of[IO, Boolean](false)
+      atomicRepository      = new AtomicRepository[IO, String, Int]:
+                           def findMany(keys: List[String]): IO[Map[String, Option[Int]]] =
+                             states.get.map(current => keys.map(key => key -> current.get(key)).toMap)
+
+                           def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] =
+                             regularPersistCalled.set(true)
+
+                           def persistAtomically(commit: ProjectionCommit[String, Int]): IO[Unit] =
+                             states.update(current => (current -- commit.deletes) ++ commit.upserts) *>
+                               committedCheckpoint.set(Some(commit.checkpoint))
+
+      projection = new Projection[IO, TestEvent, String, Int]:
+                     protected val repository: Repository[IO, String, Int] = atomicRepository
+                     def name: String = "atomic-tracking"
+                     def filter: Set[EventTypeName] = Set.empty
+                     def resolveKeys(event: EventEnvelope[TestEvent]): List[String] =
+                       event.payload match
+                         case TestEvent.Created(id) => id :: Nil
+                         case TestEvent.Deleted(id) => id :: Nil
+                     def handle(state: Option[Int], event: EventEnvelope[TestEvent]): IO[Option[Int]] =
+                       handled.update(_ :+ event).as(Some(state.getOrElse(0) + 1))
+
+      _ <- seed(
+             store,
+             (Set(entityTag("a")), TestEvent.Created("a")),
+             (Set(entityTag("a")), TestEvent.Created("a")),
+           )
+      _               <- DefaultProjector(store, fallbackCheckpoint).run(projection).take(1).compile.drain
+      persisted       <- states.get
+      committed       <- committedCheckpoint.get
+      fallback        <- fallbackCheckpoint.getAll
+      usedRegularPath <- regularPersistCalled.get
+    yield expect.all(
+      persisted.get("a").contains(2),
+      committed.exists(_.globalPosition == 2L),
+      fallback.isEmpty,
+      !usedRegularPath,
+    )
+  }
+
+  test("reloads and retries after an atomic checkpoint conflict") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      attempts   <- Ref.of[IO, Int](0)
+
+      atomicRepository = new AtomicRepository[IO, String, Int]:
+                           def findMany(keys: List[String]): IO[Map[String, Option[Int]]] =
+                             states.get.map(current => keys.map(key => key -> current.get(key)).toMap)
+
+                           def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] =
+                             IO.raiseError(new AssertionError("the at-least-once path was used"))
+
+                           def persistAtomically(commit: ProjectionCommit[String, Int]): IO[Unit] =
+                             attempts.getAndUpdate(_ + 1).flatMap {
+                               case 0 =>
+                                 states.set(Map("a" -> 1)) *>
+                                   checkpoint.save(
+                                     ProjectionCheckpointState("atomic-conflict", 1L, true, None),
+                                   ) *>
+                                   IO.raiseError(
+                                     ProjectionCheckpointConflict("atomic-conflict", commit.expectedPosition),
+                                   )
+                               case _ =>
+                                 states.update(current => (current -- commit.deletes) ++ commit.upserts) *>
+                                   checkpoint.save(commit.checkpoint)
+                             }
+
+      projection = new Projection[IO, TestEvent, String, Int]:
+                     protected val repository: Repository[IO, String, Int] = atomicRepository
+                     def name: String = "atomic-conflict"
+                     def filter: Set[EventTypeName] = Set.empty
+                     def resolveKeys(event: EventEnvelope[TestEvent]): List[String] = "a" :: Nil
+                     def handle(state: Option[Int], event: EventEnvelope[TestEvent]): IO[Option[Int]] =
+                       IO.pure(Some(state.getOrElse(0) + 1))
+
+      _ <- seed(
+             store,
+             (Set(entityTag("a")), TestEvent.Created("a")),
+             (Set(entityTag("a")), TestEvent.Created("a")),
+           )
+      _         <- DefaultProjector(store, checkpoint).run(projection).take(2).compile.drain
+      persisted <- states.get
+      saved     <- checkpoint.load("atomic-conflict")
+      tried     <- attempts.get
+    yield expect.all(
+      persisted.get("a").contains(2),
+      saved.exists(_.globalPosition == 2L),
+      tried == 2,
+    )
+  }
+
   test("advances checkpoint to the position of the last event in the batch") {
     for
       store      <- InMemoryStore.make[TestEvent]
@@ -303,13 +406,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                            keys.map(k => k -> current.get(k)).toMap
                          }
 
-                       def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
-                         repoStates.toList.traverse_ { case (key, state) =>
-                           states.update(_.updated(key, state))
-                         }
-
-                       def deleteMany(keys: List[String]): IO[Unit] =
-                         keys.traverse_(key => states.update(_ - key))
+                       def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] =
+                         states.update(current => (current -- deletes) ++ upserts)
                      }
 
                      def name: String = "tracking"

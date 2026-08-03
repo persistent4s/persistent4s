@@ -19,28 +19,25 @@ package persistent4s.examples.library.application
 import java.util.UUID
 
 import cats.effect.IO
-import org.typelevel.otel4s.trace.Tracer
 
-import persistent4s.EventStore
+import persistent4s.CommandRuntime
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.member.*
-import persistent4s.CommandHandlerMetrics
 
-class MemberServiceImpl(repository: MemberRepository[IO])(using
-  EventStore[IO, LibraryEvent],
-  Tracer[IO],
-  CommandHandlerMetrics[IO],
-) extends MemberService[IO]:
+class MemberServiceImpl(repository: MemberRepository)(using commands: CommandRuntime[IO, LibraryEvent])
+    extends MemberService[IO]:
 
   def registerMember(name: String, email: String): IO[RegisterMemberOutput] =
-    (for
+    for
       memberId <- IO(UUID.randomUUID())
-      _        <- RegisterMemberHandler.run[IO](RegisterMember(memberId, name, email))
-    yield RegisterMemberOutput(memberId.toString())).adaptError { case e => ValidationError(e.getMessage) }
+      _        <- commands.executeOrRaise(RegisterMember.Handler, RegisterMember(memberId, name, email)):
+             case RegisterMember.Error.AlreadyRegistered(id) =>
+               ValidationError(s"Member already registered: $id")
+    yield RegisterMemberOutput(memberId.toString())
 
   def getMembers(): IO[GetMembersOutput] =
-    repository.getMembers
+    repository.all
       .map(members =>
         GetMembersOutput(members.map(m => MemberItem(m.memberId.toString(), m.name, m.email, m.borrowedBooks))),
       )

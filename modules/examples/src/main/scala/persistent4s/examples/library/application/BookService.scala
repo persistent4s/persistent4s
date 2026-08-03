@@ -19,21 +19,15 @@ package persistent4s.examples.library.application
 import java.util.UUID
 
 import cats.effect.IO
-import org.typelevel.otel4s.trace.Tracer
 
-import persistent4s.{EventStore, SyncCommandHandler}
+import persistent4s.SyncCommandHandler
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
-import persistent4s.CommandHandlerMetrics
 
 class BookServiceImpl(
-  repository: BookRepository[IO],
-  syncHandler: SyncCommandHandler[IO, AddBook, AddBookState, LibraryEvent, UUID, BookState],
-)(using
-  EventStore[IO, LibraryEvent],
-  Tracer[IO],
-  CommandHandlerMetrics[IO],
+  repository: BookRepository,
+  syncHandler: SyncCommandHandler[IO, AddBook, LibraryEvent, UUID, BookState],
 ) extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
@@ -53,10 +47,22 @@ class BookServiceImpl(
         ValidationError(e.getMessage)
     }
 
-  def getBooks(): IO[GetBooksOutput] =
-    repository.getBooks.map(books =>
-      GetBooksOutput(books.map(b => BookItem(b.bookId.toString(), b.title, b.author, b.totalCopies, b.availableCopies))),
-    )
+  def getBooks(input: GetBooksInput): IO[GetBooksOutput] =
+    repository
+      .filterBy(_.title)
+      .in(input.title)
+      .and(_.author)
+      .in(input.author)
+      .and(_.totalCopies)
+      .is(input.totalCopies)
+      .and(_.availableCopies)
+      .is(input.availableCopies)
+      .run
+      .map(books =>
+        GetBooksOutput(
+          books.map(b => BookItem(b.bookId.toString(), b.title, b.author, b.totalCopies, b.availableCopies)),
+        ),
+      )
 
   def getBook(bookId: String): IO[GetBookOutput] =
     repository.find(UUID.fromString(bookId)).flatMap {

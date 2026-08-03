@@ -19,24 +19,31 @@ package persistent4s.postgres
 import cats.effect.*
 import cats.effect.std.{Console, SecureRandom}
 import cats.syntax.all.*
+
 import fs2.io.net.Network
-import org.typelevel.otel4s.trace.Tracer
-import org.typelevel.otel4s.metrics.{Histogram, Meter}
+import org.typelevel.otel4s.metrics.Histogram
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
+import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.otel4s.trace.Tracer
 import pureconfig.ConfigSource
 import skunk.*
-import skunk.implicits.*
 import skunk.codec.all.*
+import skunk.implicits.*
 
-import persistent4s.EventCodec
-import persistent4s.Event
-import persistent4s.EventNotification
-import persistent4s.EventStore
-import persistent4s.InstrumentedEventStore
-import persistent4s.EventStoreNotification
-import persistent4s.ProjectionCheckpoint
-import persistent4s.InstrumentedProjectionCheckpoint
+import persistent4s.{
+  CommandRuntime,
+  DefaultProjector,
+  Event,
+  EventCodec,
+  EventNotification,
+  EventStore,
+  EventStoreNotification,
+  InstrumentedEventStore,
+  InstrumentedProjectionCheckpoint,
+  ProjectionCheckpoint,
+  ProjectionRuntime,
+}
 
 sealed trait PostgresModuleError extends Throwable
 
@@ -84,12 +91,36 @@ object PostgresModuleError:
   */
 object PostgresModule:
 
-  /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
+  /** Fully initialized PostgreSQL components sharing one connection pool. `sessions` is exposed for application read
+    * model repositories; command snapshots, event storage and atomic projection commits therefore require no second
+    * pool or duplicate configuration.
+    */
   final case class Components[F[_], A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: ProjectionCheckpoint[F],
+    snapshotStore: PostgresCommandSnapshotStore[F],
+    sessions: Resource[F, Session[F]],
     sendNotification: EventStoreNotification => F[Unit],
-  )
+  ):
+
+    val commandRuntime: CommandRuntime[F, A] =
+      CommandRuntime(eventStore, Some(snapshotStore))
+
+    def projectionRuntime(using Async[F], Tracer[F], Meter[F]): ProjectionRuntime[F, A] =
+      ProjectionRuntime(DefaultProjector(eventStore, checkpoint))
+
+    /** Build an atomic projection repository from derived PostgreSQL table metadata using this module's shared session
+      * pool.
+      */
+    def repository[K, S <: Product](table: PostgresTable[K, S])(using Async[F]): DerivedPostgresRepository[F, K, S] =
+      DerivedPostgresRepository(sessions, table)
+
+    /** Build a derived repository and replace selected generated callbacks while retaining the shared session pool. */
+    def repository[K, S <: Product](
+      table: PostgresTable[K, S],
+      customize: PostgresRepositoryTable[F, K, S] => PostgresRepositoryTable[F, K, S],
+    )(using Async[F]): DerivedPostgresRepository[F, K, S] =
+      DerivedPostgresRepository.customized(sessions, table)(customize)
 
   private val defaultConfigPath = "persistent4s.postgres"
 
@@ -100,8 +131,8 @@ object PostgresModule:
     * @param configPath
     *   the path in application.conf where the PostgresConfig is located (default: "persistent4s.postgres")
     * @return
-    *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint, or fails with a clear error
-    *   message
+    *   initialized event, command-snapshot, checkpoint and shared-session components, or a clear connection/config
+    *   failure
     */
   def make[F[_]: Async: Network: Tracer: Meter: Console: SecureRandom, A <: Event](
     codec: EventCodec[A],
@@ -115,18 +146,10 @@ object PostgresModule:
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
-      pool  <- createSessionPool[F](config)
-      _     <- Resource.eval(initializeDatabase[F](pool, logger))
-      raw    = PostgresEventStore[F, A](pool, codec)
-      store <- Resource.eval(
-                 InstrumentedEventStore.makeWithNotification[F, A](raw),
-               )
-      checkpoint <- Resource.eval(InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)))
-    yield Components(
-      store,
-      checkpoint,
-      raw.notify,
-    )
+      pool       <- createSessionPool[F](config)
+      _          <- Resource.eval(initializeDatabase[F](pool, logger))
+      components <- components[F, A](pool, codec)
+    yield components
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
     *
@@ -135,7 +158,7 @@ object PostgresModule:
     * @param codec
     *   the event codec for serializing/deserializing events
     * @return
-    *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint
+    *   initialized event, command-snapshot, checkpoint and shared-session components
     */
   def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console: SecureRandom, A <: Event](
     config: PostgresConfig,
@@ -148,16 +171,29 @@ object PostgresModule:
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
-      pool  <- createSessionPool[F](config)
-      _     <- Resource.eval(initializeDatabase[F](pool, logger))
-      raw    = PostgresEventStore(pool, codec)
-      store <- Resource.eval(
-                 InstrumentedEventStore.makeWithNotification[F, A](raw),
-               )
-      checkpoint <- Resource.eval(InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)))
+      pool       <- createSessionPool[F](config)
+      _          <- Resource.eval(initializeDatabase[F](pool, logger))
+      components <- components[F, A](pool, codec)
+    yield components
+
+  /** Wire the raw PostgreSQL store, wrap it with otel4s instrumentation, and expose the shared pool alongside command
+    * snapshots so one configuration serves events, snapshots and read models.
+    */
+  private def components[F[_]: Async: Tracer: Meter: SecureRandom, A <: Event](
+    pool: Resource[F, Session[F]],
+    codec: EventCodec[A],
+  ): Resource[F, Components[F, A]] =
+    val raw = PostgresEventStore[F, A](pool, codec)
+    for
+      store      <- Resource.eval(InstrumentedEventStore.makeWithNotification[F, A](raw))
+      checkpoint <- Resource.eval(
+                      InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)),
+                    )
     yield Components(
       store,
       checkpoint,
+      PostgresCommandSnapshotStore.make[F](pool),
+      pool,
       raw.notify,
     )
 
@@ -226,10 +262,13 @@ object PostgresModule:
 
   private def createSchema[F[_]: Sync](session: Session[F]): F[Unit] =
     session.execute(createTableCommand) *>
+      session.execute(addEventVersionCommand) *>
+      session.execute(addHeadersCommand) *>
       session.execute(createEventTypeIndexCommand) *>
       session.execute(createEventTagsTableCommand) *>
       session.execute(createEventTagsSequenceIndexCommand) *>
-      session.execute(PostgresProjectionCheckpoint.createTableCommand).void
+      session.execute(PostgresProjectionCheckpoint.createTableCommand) *>
+      session.execute(PostgresCommandSnapshotStore.createTableCommand).void
 
   private val checkTableExistsQuery: Query[String, Long] =
     sql"""
@@ -245,6 +284,7 @@ object PostgresModule:
         sequence_number BIGSERIAL PRIMARY KEY,
         event_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
         event_type      TEXT        NOT NULL,
+        event_version   INTEGER     NOT NULL DEFAULT 1,
         tags            JSONB       NOT NULL DEFAULT '[]',
         payload         JSONB       NOT NULL DEFAULT '{}',
         is_external     BOOLEAN     NOT NULL,
@@ -253,6 +293,21 @@ object PostgresModule:
 
         CONSTRAINT unique_event_id UNIQUE (event_id)
       )
+    """.command
+
+  private val addEventVersionCommand: Command[Void] =
+    sql"""
+      ALTER TABLE events
+      ADD COLUMN IF NOT EXISTS event_version INTEGER NOT NULL DEFAULT 1
+    """.command
+
+  /** Mirrors [[addEventVersionCommand]]: an events table created before author-supplied headers existed must gain the
+    * column in place, or every append would fail against it.
+    */
+  private val addHeadersCommand: Command[Void] =
+    sql"""
+      ALTER TABLE events
+      ADD COLUMN IF NOT EXISTS headers JSONB NOT NULL DEFAULT '{}'
     """.command
 
   private val createEventTagsTableCommand: Command[Void] =

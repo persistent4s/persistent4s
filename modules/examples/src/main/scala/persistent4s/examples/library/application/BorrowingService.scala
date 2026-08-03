@@ -16,44 +16,43 @@
 
 package persistent4s.examples.library.application
 
-import cats.effect.IO
-import org.typelevel.otel4s.trace.Tracer
+import java.util.UUID
 
-import persistent4s.CommandHandlerMetrics
-import persistent4s.EventStore
+import cats.effect.IO
+
+import persistent4s.CommandRuntime
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.borrowing.*
 
-import java.util.UUID
 import smithy4s.time.Timestamp
 
-class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using
-  EventStore[IO, LibraryEvent],
-  Tracer[IO],
-  CommandHandlerMetrics[IO],
-) extends BorrowingService[IO]:
+class BorrowingServiceImpl(repository: BorrowingRepository)(using commands: CommandRuntime[IO, LibraryEvent])
+    extends BorrowingService[IO]:
 
   def borrowBook(bookId: String, memberId: String): IO[Unit] =
-    BorrowBookHandler
-      .run[IO](BorrowBook(UUID.fromString(bookId), UUID.fromString(memberId)))
-      .adaptError {
-        case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
-        case e                                       => ValidationError(e.getMessage)
-      }
-      .void
+    commands.executeOrRaise(
+      BorrowBook.Handler,
+      BorrowBook(UUID.fromString(bookId), UUID.fromString(memberId)),
+    ):
+      case BorrowBook.Error.BookNotFound(id)                   => NotFoundError(s"Book not found: $id")
+      case BorrowBook.Error.MemberNotFound(id)                 => NotFoundError(s"Member not found: $id")
+      case BorrowBook.Error.NoCopiesAvailable(id)              => ValidationError(s"No copies available for book: $id")
+      case BorrowBook.Error.MemberAlreadyHasBook(book, member) =>
+        ValidationError(s"Member $member already has book $book")
 
   def returnBook(bookId: String, memberId: String): IO[Unit] =
-    ReturnBookHandler
-      .run[IO](ReturnBook(UUID.fromString(bookId), UUID.fromString(memberId)))
-      .adaptError {
-        case e if e.getMessage.contains("not found") => NotFoundError(e.getMessage)
-        case e                                       => ValidationError(e.getMessage)
-      }
-      .void
+    commands.executeOrRaise(
+      ReturnBook.Handler,
+      ReturnBook(UUID.fromString(bookId), UUID.fromString(memberId)),
+    ):
+      case ReturnBook.Error.BorrowingNotFound(book, member) =>
+        NotFoundError(s"Borrowing not found for book $book and member $member")
+      case ReturnBook.Error.AlreadyReturned(book, member) =>
+        ValidationError(s"Book $book was already returned by member $member")
 
   def getBorrowings(): IO[GetBorrowingsOutput] =
-    repository.getBorrowings.map(borrowings => GetBorrowingsOutput(borrowings.map(toBorrowingItem)))
+    repository.all.map(borrowings => GetBorrowingsOutput(borrowings.map(toBorrowingItem)))
 
   def getActiveBorrowings(): IO[GetActiveBorrowingsOutput] =
     repository.getActiveBorrowings.map(borrowings => GetActiveBorrowingsOutput(borrowings.map(toBorrowingItem)))

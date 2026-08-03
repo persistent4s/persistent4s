@@ -37,6 +37,8 @@ import java.util.UUID
   *   the timestamp of when the event was created
   * @param headers
   *   arbitrary author-supplied key-value metadata
+  * @param eventVersion
+  *   the persisted schema version of the event payload
   */
 final case class EventMetadata(
   globalPosition: Long,
@@ -46,4 +48,5 @@ final case class EventMetadata(
   isExternal: Boolean,
   timestamp: Instant,
   headers: Map[String, String],
+  eventVersion: Int = 1,
 )

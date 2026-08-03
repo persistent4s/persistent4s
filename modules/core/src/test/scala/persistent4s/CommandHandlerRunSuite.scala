@@ -80,6 +80,10 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[EventEnvelope[A]]] =
       Async[F].pure(List.empty) // not needed for these tests
 
+    def currentRevision(eventFilter: EventFilter): F[Long] =
+      readFrom(0L, eventFilter, None).compile.toList
+        .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
     override def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -169,6 +173,10 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
         underlying.append(filter, expectedIndex, events*)
       def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[EventEnvelope[A]]] =
         underlying.appendUnchecked(events*)
+      def currentRevision(eventFilter: EventFilter): IO[Long] =
+        readFrom(0L, eventFilter, None).compile.toList
+          .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
       def readFrom(
         fromPosition: Long,
         eventFilter: EventFilter,

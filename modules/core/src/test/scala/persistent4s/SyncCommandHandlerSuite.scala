@@ -93,6 +93,10 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
       events: List[PendingEvent[TestEvent]]*,
     ): IO[List[EventEnvelope[TestEvent]]] = IO.pure(List.empty)
 
+    def currentRevision(eventFilter: EventFilter): IO[Long] =
+      readFrom(0L, eventFilter, None).compile.toList
+        .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -147,6 +151,10 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
       events: List[PendingEvent[TestEvent]]*,
     ): IO[List[EventEnvelope[TestEvent]]] = IO.pure(List.empty)
 
+    def currentRevision(eventFilter: EventFilter): IO[Long] =
+      readFrom(0L, eventFilter, None).compile.toList
+        .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -159,6 +167,14 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
   // ------------------------------------------------------------
 
   private def entityTag(id: String): Tag = Tag("entity", id)
+
+  /** The store is per-test, so it is supplied explicitly rather than as a suite-level given. */
+  private def syncFor(
+    store: EventStore[IO, TestEvent],
+    topic: SyncTopic,
+    timeout: FiniteDuration = 2.seconds,
+  ): SyncCommandHandler[IO, CreateMany, TestEvent, String, Int] =
+    SyncCommandHandler.fromCommandHandler(handler, store, topic, Set(EventTypeName.of[TestEvent.Created]), timeout)
 
   private def waitUntil(cond: IO[Boolean]): IO[Unit] =
     cond.flatMap {
@@ -174,8 +190,8 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     for
       store  <- InMemoryStore.make
       topic  <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
-      sync    = SyncCommandHandler(handler, topic, Set(EventTypeName.of[TestEvent.Created]), timeout = 2.seconds)
-      fiber  <- sync.runSync(CreateMany(List("a")))(using store).start
+      sync    = syncFor(store, topic)
+      fiber  <- sync.runSync(CreateMany(List("a"))).start
       _      <- waitUntil(store.getAll.map(_.nonEmpty))
       events <- store.getAll
       _      <- topic.publish1((events.head.metadata.id, Right(Map("a" -> Some(1)))))
@@ -187,8 +203,8 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     for
       store  <- InMemoryStore.make
       topic  <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
-      sync    = SyncCommandHandler(handler, topic, Set(EventTypeName.of[TestEvent.Created]), timeout = 2.seconds)
-      fiber  <- sync.runSync(CreateMany(List("a", "b")))(using store).start
+      sync    = syncFor(store, topic)
+      fiber  <- sync.runSync(CreateMany(List("a", "b"))).start
       _      <- waitUntil(store.getAll.map(_.size == 2))
       events <- store.getAll
       _      <- topic.publish1((events(0).metadata.id, Right(Map("a" -> Some(1)))))
@@ -201,8 +217,8 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     for
       store  <- InMemoryStore.make
       topic  <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
-      sync    = SyncCommandHandler(handler, topic, Set(EventTypeName.of[TestEvent.Created]), timeout = 2.seconds)
-      fiber  <- sync.runSync(CreateMany(List("a", "b")))(using store).start
+      sync    = syncFor(store, topic)
+      fiber  <- sync.runSync(CreateMany(List("a", "b"))).start
       _      <- waitUntil(store.getAll.map(_.size == 2))
       events <- store.getAll
       _      <- topic.publish1((events(0).metadata.id, Right(Map("a" -> Some(1)))))
@@ -216,8 +232,8 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     for
       store  <- InMemoryStore.make
       topic  <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
-      sync    = SyncCommandHandler(handler, topic, Set(EventTypeName.of[TestEvent.Created]), timeout = 2.seconds)
-      result <- sync.runSync(CreateMany(Nil))(using store).timeout(500.millis)
+      sync    = syncFor(store, topic)
+      result <- sync.runSync(CreateMany(Nil)).timeout(500.millis)
     yield expect(result == Map.empty)
   }
 
@@ -226,8 +242,8 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     for
       store  <- InMemoryStore.make
       topic  <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
-      sync    = SyncCommandHandler(handler, topic, Set(EventTypeName.of[TestEvent.Created]), timeout = 2.seconds)
-      fiber  <- sync.runSync(CreateMany(List("a")))(using store).attempt.start
+      sync    = syncFor(store, topic)
+      fiber  <- sync.runSync(CreateMany(List("a"))).attempt.start
       _      <- waitUntil(store.getAll.map(_.nonEmpty))
       events <- store.getAll
       _      <- topic.publish1((events.head.metadata.id, Left(boom)))
@@ -239,8 +255,8 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     for
       store    <- InMemoryStore.make
       topic    <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
-      sync      = SyncCommandHandler(handler, topic, Set(EventTypeName.of[TestEvent.Created]), timeout = 100.millis)
-      result   <- sync.runSync(CreateMany(List("a")))(using store).attempt
+      sync      = syncFor(store, topic, 100.millis)
+      result   <- sync.runSync(CreateMany(List("a"))).attempt
       stored   <- store.getAll
       isTimeout = result match
                     case Left(_: java.util.concurrent.TimeoutException) => true
@@ -253,7 +269,7 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
       events <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
       topic  <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
       store   = new InstantPublishingStore(events, topic)
-      sync    = SyncCommandHandler(handler, topic, Set(EventTypeName.of[TestEvent.Created]), timeout = 500.millis)
-      result <- sync.runSync(CreateMany(List("a")))(using store)
+      sync    = syncFor(store, topic, 500.millis)
+      result <- sync.runSync(CreateMany(List("a")))
     yield expect(result == Map("a" -> Some(1)))
   }

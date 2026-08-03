@@ -74,6 +74,10 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
     def appendUnchecked(evts: List[PendingEvent[TestEvent]]*): IO[List[EventEnvelope[TestEvent]]] =
       IO.pure(List.empty) // not needed for these tests
 
+    def currentRevision(eventFilter: EventFilter): IO[Long] =
+      readFrom(0L, eventFilter, None).compile.toList
+        .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -95,6 +99,10 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
 
     def appendUnchecked(evts: List[PendingEvent[TestEvent]]*): IO[List[EventEnvelope[TestEvent]]] =
       IO.pure(List.empty) // not needed for these tests
+
+    def currentRevision(eventFilter: EventFilter): IO[Long] =
+      readFrom(0L, eventFilter, None).compile.toList
+        .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
     def readFrom(
       fromPosition: Long,

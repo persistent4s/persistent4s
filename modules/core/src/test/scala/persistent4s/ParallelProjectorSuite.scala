@@ -16,15 +16,19 @@
 
 package persistent4s
 
+import java.util.UUID
+
+import scala.concurrent.duration.*
+
 import cats.effect.std.Queue
 import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
-import fs2.Stream
-import persistent4s.EventStoreNotification.*
-import weaver.SimpleIOSuite
 
-import scala.concurrent.duration.*
-import java.util.UUID
+import fs2.Stream
+
+import persistent4s.EventStoreNotification.*
+
+import weaver.SimpleIOSuite
 
 object ParallelProjectorSuite extends SimpleIOSuite:
 
@@ -54,6 +58,9 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       val byType = f.eventTypes.isEmpty || f.eventTypes.contains(env.metadata.eventType)
       val byTag = f.tags.isEmpty || env.metadata.tags.exists(f.tags.contains)
       byType && byTag
+
+    def currentRevision(eventFilter: EventFilter): IO[Long] =
+      events.get.map(_.filter(matches(_, eventFilter)).lastOption.fold(0L)(_.metadata.globalPosition))
 
     def append(
       eventFilter: EventFilter,
@@ -171,13 +178,8 @@ object ParallelProjectorSuite extends SimpleIOSuite:
           keys.map(k => k -> current.get(k)).toMap
         }
 
-        override def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
-          repoStates.toList.traverse_ { case (key, state) =>
-            states.update(_.updated(key, state))
-          }.void
-
-        override def deleteMany(keys: List[String]): IO[Unit] =
-          keys.traverse_(key => states.update(_ - key))
+        override def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] =
+          states.update(current => (current -- deletes) ++ upserts)
 
       }
       def name: String = "tracking"
@@ -295,13 +297,8 @@ object ParallelProjectorSuite extends SimpleIOSuite:
                            keys.map(k => k -> current.get(k)).toMap
                          }
 
-                       override def upsertMany(repoStates: Map[String, Int]): IO[Unit] =
-                         repoStates.toList.traverse_ { case (key, state) =>
-                           states.update(_.updated(key, state))
-                         }.void
-
-                       override def deleteMany(keys: List[String]): IO[Unit] =
-                         keys.traverse_(key => states.update(_ - key))
+                       override def persist(upserts: Map[String, Int], deletes: List[String]): IO[Unit] =
+                         states.update(current => (current -- deletes) ++ upserts)
 
                      }
                      def name: String = "tracking"
