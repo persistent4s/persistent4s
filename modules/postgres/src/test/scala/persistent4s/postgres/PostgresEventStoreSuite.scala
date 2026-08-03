@@ -35,6 +35,7 @@ import persistent4s.{EventFilter, EventStoreNotification, IndexConflictException
 import weaver.IOSuite
 import persistent4s.EventTypeName
 import persistent4s.Event
+import persistent4s.PendingEvent
 
 object PostgresEventStoreSuite extends IOSuite:
 
@@ -83,7 +84,7 @@ object PostgresEventStoreSuite extends IOSuite:
       .append(
         EventFilter(Set.empty, tags),
         expectedIndex,
-        List((None, tags, EventTypeName.of[TestEvent], false, TestEvent(value))),
+        List(PendingEvent(TestEvent(value), tags, EventTypeName.of[TestEvent], false, None, Map.empty)),
       )
       .void
 
@@ -95,7 +96,7 @@ object PostgresEventStoreSuite extends IOSuite:
   ): IO[Unit] =
     store
       .appendUnchecked(
-        List((eventId, tags, EventTypeName.of[TestEvent], true, TestEvent(value))),
+        List(PendingEvent(TestEvent(value), tags, EventTypeName.of[TestEvent], true, eventId, Map.empty)),
       )
       .void
 
@@ -119,6 +120,135 @@ object PostgresEventStoreSuite extends IOSuite:
       events.head.metadata.tags == Set(tag),
       events.head.metadata.eventType == EventTypeName.of[TestEvent],
       events.head.metadata.globalPosition >= 1L,
+    )
+  }
+
+  test("append round-trips non-empty headers through the store") { store =>
+    val headers = Map("correlationId" -> "abc-123", "userId" -> "42")
+    for
+      id <- freshId("student")
+      tag = Tag("student", id)
+      _  <- store
+             .append(
+               EventFilter(Set.empty, Set(tag)),
+               0L,
+               List(
+                 PendingEvent(
+                   TestEvent("hello"),
+                   Set(tag),
+                   EventTypeName.of[TestEvent],
+                   isExternal = false,
+                   headers = headers,
+                 ),
+               ),
+             )
+             .void
+      events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.headers == headers,
+    )
+  }
+
+  test("append defaults to empty headers when none are provided") { store =>
+    for
+      id     <- freshId("student")
+      tag     = Tag("student", id)
+      _      <- appendOne(store, 0L, Set(tag), "hello")
+      events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
+    yield expect.all(
+      events.length == 1,
+      events.head.metadata.headers.isEmpty,
+    )
+  }
+
+  test("a multi-event append keeps each event's own headers, tags and isExternal") { store =>
+    // Multiple events go out as a single multi-row INSERT, so a misaligned bind parameter would
+    // silently attach one event's headers to another. Distinct values per row catch that.
+    for
+      id     <- freshId("batch")
+      tagA    = Tag("batch", s"$id-a")
+      tagB    = Tag("batch", s"$id-b")
+      tagC    = Tag("batch", s"$id-c")
+      readAll = EventFilter(Set.empty, Set(tagA, tagB, tagC))
+      pending = List(
+                  PendingEvent(
+                    TestEvent("one"),
+                    Set(tagA),
+                    EventTypeName.of[TestEvent],
+                    isExternal = false,
+                    headers = Map("k" -> "1"),
+                  ),
+                  PendingEvent(
+                    TestEvent("two"),
+                    Set(tagB),
+                    EventTypeName.of[TestEvent],
+                    isExternal = true,
+                    headers = Map("k" -> "2", "extra" -> "x"),
+                  ),
+                  PendingEvent(
+                    TestEvent("three"),
+                    Set(tagC),
+                    EventTypeName.of[TestEvent],
+                    isExternal = false,
+                    headers = Map.empty,
+                  ),
+                )
+      returned <- store.append(readAll, 0L, pending)
+      readBack <- store.readFrom(0L, readAll).compile.toList
+    yield expect.all(
+      // returned envelopes come back in the order the events were supplied
+      returned.map(_.payload) == List(TestEvent("one"), TestEvent("two"), TestEvent("three")),
+      returned.map(_.metadata.headers) == List(Map("k" -> "1"), Map("k" -> "2", "extra" -> "x"), Map.empty),
+      returned.map(_.metadata.isExternal) == List(false, true, false),
+      returned.map(_.metadata.tags) == List(Set(tagA), Set(tagB), Set(tagC)),
+      // positions are distinct and ascend with that same order
+      returned.map(_.metadata.globalPosition).distinct.length == 3,
+      returned.map(_.metadata.globalPosition) == returned.map(_.metadata.globalPosition).sorted,
+      // and the envelopes agree with what was actually persisted
+      readBack.map(_.payload) == returned.map(_.payload),
+      readBack.map(_.metadata.headers) == returned.map(_.metadata.headers),
+      readBack.map(_.metadata.isExternal) == returned.map(_.metadata.isExternal),
+      readBack.map(_.metadata.globalPosition) == returned.map(_.metadata.globalPosition),
+      readBack.map(_.metadata.id) == returned.map(_.metadata.id),
+      readBack.map(_.metadata.timestamp) == returned.map(_.metadata.timestamp),
+    )
+  }
+
+  test("a duplicate UUID within a single append is written once and shares the same metadata") { store =>
+    for
+      id     <- freshId("batchdedup")
+      tag     = Tag("batchdedup", id)
+      uuid    = UUID.randomUUID()
+      readAll = EventFilter(Set.empty, Set(tag))
+      pending = List(
+                  PendingEvent(
+                    TestEvent("dup"),
+                    Set(tag),
+                    EventTypeName.of[TestEvent],
+                    isExternal = true,
+                    id = Some(uuid),
+                    headers = Map("h" -> "v"),
+                  ),
+                  PendingEvent(
+                    TestEvent("dup"),
+                    Set(tag),
+                    EventTypeName.of[TestEvent],
+                    isExternal = true,
+                    id = Some(uuid),
+                    headers = Map("h" -> "v"),
+                  ),
+                )
+      returned <- store.append(readAll, 0L, pending)
+      readBack <- store.readFrom(0L, readAll).compile.toList
+    yield expect.all(
+      // one envelope per supplied event, but both describe the single row that was written
+      returned.length == 2,
+      returned.map(_.metadata.globalPosition).distinct.length == 1,
+      returned.map(_.metadata.id).distinct == List(uuid),
+      readBack.length == 1,
+      readBack.head.metadata.globalPosition == returned.head.metadata.globalPosition,
+      readBack.head.metadata.headers == Map("h" -> "v"),
     )
   }
 
@@ -245,7 +375,16 @@ object PostgresEventStoreSuite extends IOSuite:
                   .append(
                     EventFilter(Set.empty, Set.empty),
                     0L,
-                    List((None, Set(secondTag), EventTypeName.of[TestEvent], false, TestEvent("after"))),
+                    List(
+                      PendingEvent(
+                        TestEvent("after"),
+                        Set(secondTag),
+                        EventTypeName.of[TestEvent],
+                        false,
+                        None,
+                        Map.empty,
+                      ),
+                    ),
                   )
                   .void
                   .attempt
@@ -264,7 +403,16 @@ object PostgresEventStoreSuite extends IOSuite:
       _   <- store.append(
              EventFilter(Set.empty, Set(tag)),
              0L,
-             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("external-event"))),
+             List(
+               PendingEvent(
+                 TestEvent("external-event"),
+                 Set(tag),
+                 EventTypeName.of[TestEvent],
+                 true,
+                 Some(uuid),
+                 Map.empty,
+               ),
+             ),
            )
       events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
     yield expect.all(
@@ -293,7 +441,7 @@ object PostgresEventStoreSuite extends IOSuite:
       _   <- store.append(
              EventFilter(Set.empty, Set(tag)),
              0L,
-             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("first"))),
+             List(PendingEvent(TestEvent("first"), Set(tag), EventTypeName.of[TestEvent], true, Some(uuid), Map.empty)),
            )
       pos1 <- store
                 .readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag)))
@@ -303,7 +451,9 @@ object PostgresEventStoreSuite extends IOSuite:
       _ <- store.append(
              EventFilter(Set.empty, Set(tag)),
              pos1,
-             List((Some(uuid), Set(tag), EventTypeName.of[TestEvent], true, TestEvent("duplicate"))),
+             List(
+               PendingEvent(TestEvent("duplicate"), Set(tag), EventTypeName.of[TestEvent], true, Some(uuid), Map.empty),
+             ),
            )
       events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
     yield expect.all(
