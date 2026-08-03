@@ -33,6 +33,8 @@ import java.util.UUID
   *   whether the event was come from an external domain or not
   * @param timestamp
   *   the timestamp of when the event was created
+  * @param eventVersion
+  *   the persisted schema version of the event payload
   */
 final case class EventMetadata(
   globalPosition: Long,
@@ -41,4 +43,5 @@ final case class EventMetadata(
   eventType: EventTypeName,
   isExternal: Boolean,
   timestamp: Instant,
+  eventVersion: Int = 1,
 )

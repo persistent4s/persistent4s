@@ -27,5 +27,25 @@ trait EventCodec[A <: Event]:
   /** Serialize an event to a String representation. */
   def encode(event: A): String
 
+  /** Resolve the durable event identifier written alongside an encoded payload. Legacy codecs retain class-name-based
+    * identity; schema-aware codecs override this with the registered [[EventSchema]].
+    */
+  def eventType(event: A): EventTypeName =
+    EventTypeName.fromInstance(event)
+
+  /** Resolve the schema version written alongside an encoded payload. */
+  def eventVersion(event: A): Int = 1
+
+  /** Encode a payload and its storage metadata in one operation. */
+  final def encodeWithSchema(event: A): EncodedEvent =
+    EncodedEvent(eventType(event), eventVersion(event), encode(event))
+
   /** Deserialize an event from its type name and String representation. */
   def decode(eventType: EventTypeName, payload: String): Either[Throwable, A]
+
+  /** Deserialize a versioned event. Existing codecs remain source-compatible and support their legacy version `1`;
+    * schema-aware codecs override this method to evolve older payloads.
+    */
+  def decode(eventType: EventTypeName, version: Int, payload: String): Either[Throwable, A] =
+    if version == 1 then decode(eventType, payload)
+    else Left(UnsupportedEventVersion(eventType, version))
