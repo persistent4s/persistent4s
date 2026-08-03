@@ -26,6 +26,10 @@ trait Projector[F[_], A <: Event]:
 
   /** Run the projection as an infinite stream. The stream only terminates on an unrecoverable error; the caller is
     * responsible for restart logic.
+    *
+    * '''Single runner:''' a projection shares one checkpoint, so running this on multiple instances concurrently races
+    * the checkpoint and double-applies events. Wrap it in a [[LeaderElection]] so only one instance drives a given
+    * projection at a time.
     */
   def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit]
 
