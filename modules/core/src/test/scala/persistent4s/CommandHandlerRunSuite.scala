@@ -34,9 +34,13 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
 
   final class InMemoryEventStore[F[_]: Async, A <: Event] private (
     store: Ref[F, Vector[EventEnvelope[A]]],
-  ) extends EventStore[F, A]:
+    outbox: Ref[F, Vector[OutgoingMessage]],
+  ) extends EventStore[F, A]
+      with TransactionalMessages[F, A]:
 
     def getEvents: F[Vector[EventEnvelope[A]]] = store.get
+
+    def getMessages: F[Vector[OutgoingMessage]] = outbox.get
 
     override def append(
       filter: EventFilter,
@@ -74,6 +78,29 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[A]] =
       Async[F].pure(List.empty) // not needed for these tests
 
+    /** Not atomic with the append — two `Ref`s cannot be — but it does preserve the one rule the real store's
+      * transaction gives and the tests rely on: an append that loses a conflict leaves no message behind.
+      */
+    override def appendWithMessages(
+      eventFilter: EventFilter,
+      expectedIndex: Long,
+      messages: List[OutgoingMessage],
+      events: List[PendingEvent[A]]*,
+    ): F[List[A]] =
+      if events.flatten.isEmpty then
+        // Per TransactionalMessages: nothing is being written, so `expectedIndex` is ignored rather than checked and
+        // the messages are enqueued on their own. Checking it would also be meaningless here — this fake derives the
+        // actual index from the tags of the events being appended, and there are none.
+        outbox.update(_ ++ messages).as(List.empty)
+      else append(eventFilter, expectedIndex, events*).flatTap(_ => outbox.update(_ ++ messages))
+
+    override def appendUncheckedWithMessages(
+      messages: List[OutgoingMessage],
+      events: List[PendingEvent[A]]*,
+    ): F[List[A]] =
+      // `appendUnchecked` above is a stub, so this only carries the messages; nothing here calls it.
+      outbox.update(_ ++ messages) *> appendUnchecked(events*)
+
     override def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -91,7 +118,13 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
   object InMemoryEventStore:
 
     def make[F[_]: Async, A <: Event]: F[InMemoryEventStore[F, A]] =
-      Ref.of[F, Vector[EventEnvelope[A]]](Vector.empty).map(new InMemoryEventStore(_))
+      (
+        Ref.of[F, Vector[EventEnvelope[A]]](Vector.empty),
+        Ref.of[F, Vector[OutgoingMessage]](Vector.empty),
+      ).mapN(new InMemoryEventStore(_, _))
+
+  /** What [[CommandHandler.runWithMessages]] asks for: a store that can append and enqueue in one go. */
+  private type MessagingStore[A <: Event] = EventStore[IO, A] & TransactionalMessages[IO, A]
 
   // ---------------------------------------------------------------------------
   // Test domain
@@ -153,12 +186,21 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     underlying: InMemoryEventStore[IO, A],
     arrivals: Ref[IO, Int],
     gate: Deferred[IO, Unit],
-  ): EventStore[IO, A] =
-    new EventStore[IO, A]:
+  ): MessagingStore[A] =
+    new EventStore[IO, A] with TransactionalMessages[IO, A]:
       def append(filter: EventFilter, expectedIndex: Long, events: List[PendingEvent[A]]*): IO[List[A]] =
         underlying.append(filter, expectedIndex, events*)
       def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[A]] =
         underlying.appendUnchecked(events*)
+      def appendWithMessages(
+        eventFilter: EventFilter,
+        expectedIndex: Long,
+        messages: List[OutgoingMessage],
+        events: List[PendingEvent[A]]*,
+      ): IO[List[A]] =
+        underlying.appendWithMessages(eventFilter, expectedIndex, messages, events*)
+      def appendUncheckedWithMessages(messages: List[OutgoingMessage], events: List[PendingEvent[A]]*): IO[List[A]] =
+        underlying.appendUncheckedWithMessages(messages, events*)
       def readFrom(
         fromPosition: Long,
         eventFilter: EventFilter,
@@ -220,6 +262,58 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
 
     def decide(state: StudentState, command: CreateStudent): List[(Set[Tag], TestEvent)] =
       List((Set(studentTag(command.studentId)), TestEvent.StudentCreated(command.studentId)))
+
+  private val ReplyTopic = "replies"
+
+  /** The shape a service answering another one needs: the reply is enqueued in the transaction that appends the event,
+    * and it is enqueued *especially* on the path that decides to write no event at all. A case class rather than an
+    * object because the address to answer arrives with the request, so it has to be closed over.
+    */
+  final case class AnsweringCreateStudentHandler(replyKey: String)
+      extends CommandHandler[CreateStudent, StudentState, TestEvent]:
+
+    def tags(command: CreateStudent): Set[Tag] = Set(studentTag(command.studentId))
+
+    def initial: StudentState = StudentState(exists = false)
+
+    def evolve(command: CreateStudent, state: StudentState, event: TestEvent): StudentState =
+      CommandHandlerRunSuite.evolve(state, event)
+
+    def validate(state: StudentState, command: CreateStudent): Either[Throwable, Unit] =
+      if state.exists then Left(new RuntimeException("Student already exists")) else Right(())
+
+    def decide(state: StudentState, command: CreateStudent): List[(Set[Tag], TestEvent)] =
+      List((Set(studentTag(command.studentId)), TestEvent.StudentCreated(command.studentId)))
+
+    override def messages(
+      state: StudentState,
+      command: CreateStudent,
+      outcome: Either[Throwable, List[TestEvent]],
+    ): List[OutgoingMessage] =
+      List(
+        OutgoingMessage(
+          topic = ReplyTopic,
+          key = Some(replyKey),
+          payload = outcome.fold(error => s"rejected:${error.getMessage}", events => s"accepted:${events.size}"),
+          headers = Map("studentId" -> command.studentId),
+        ),
+      )
+
+  private def seedStudentCreated(store: InMemoryEventStore[IO, TestEvent], studentId: String): IO[Unit] =
+    store
+      .append(
+        EventFilter(),
+        0L,
+        List(
+          PendingEvent(
+            TestEvent.StudentCreated(studentId),
+            Set(studentTag(studentId)),
+            EventTypeName.of[StudentCreated],
+            isExternal = false,
+          ),
+        ),
+      )
+      .void
 
   // ---------------------------------------------------------------------------
   // Tests
@@ -453,6 +547,105 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     yield expect.all(
       events.length == 2,
       events.forall(_.metadata.headers == Map("correlationId" -> "1", "source" -> "test")),
+    )
+  }
+
+  test("runWithMessages commits the decided events and the handler's messages together") {
+    val handler = AnsweringCreateStudentHandler("saga-1")
+    for
+      store  <- InMemoryEventStore.make[IO, TestEvent]
+      result <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      events   <- store.getEvents
+      messages <- store.getMessages
+    yield expect.all(
+      result == Right(List(TestEvent.StudentCreated("1"))),
+      events.length == 1,
+      events.head.payload == TestEvent.StudentCreated("1"),
+      messages.length == 1,
+      messages.head.topic == ReplyTopic,
+      messages.head.key == Some("saga-1"),
+      // `messages` saw what decide produced, not just that it succeeded.
+      messages.head.payload == "accepted:1",
+      messages.head.headers == Map("studentId" -> "1"),
+    )
+  }
+
+  test("runWithMessages answers a rejected command as a Left instead of raising, and writes no event") {
+    val handler = AnsweringCreateStudentHandler("saga-1")
+    for
+      store  <- InMemoryEventStore.make[IO, TestEvent]
+      _      <- seedStudentCreated(store, "1")
+      result <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      events   <- store.getEvents
+      messages <- store.getMessages
+    yield expect.all(
+      result.isLeft,
+      events.length == 1, // the seeded event only
+      messages.length == 1,
+      messages.head.payload == "rejected:Student already exists",
+    )
+  }
+
+  test("runWithMessages enqueues nothing for a handler that does not override messages") {
+    for
+      store    <- InMemoryEventStore.make[IO, TestEvent]
+      accepted <- {
+        given MessagingStore[TestEvent] = store
+        CreateStudentHandler.runWithMessages[IO](CreateStudent("1"))
+      }
+      // Rejected this time, and with no message to carry there is nothing at all for the store to do.
+      rejected <- {
+        given MessagingStore[TestEvent] = store
+        CreateStudentHandler.runWithMessages[IO](CreateStudent("1"))
+      }
+      events   <- store.getEvents
+      messages <- store.getMessages
+    yield expect.all(
+      accepted == Right(List(TestEvent.StudentCreated("1"))),
+      rejected.isLeft,
+      events.length == 1,
+      messages.isEmpty,
+    )
+  }
+
+  test("runWithMessages: the loser of a conflict re-reads, changes its answer, and leaves no stale message") {
+    val handler = AnsweringCreateStudentHandler("saga-1")
+    for
+      store            <- InMemoryEventStore.make[IO, TestEvent]
+      arrivals         <- Ref.of[IO, Int](0)
+      gate             <- Deferred[IO, Unit]
+      synchronizedStore = barrieredStore(store, arrivals, gate)
+      first             = {
+        given MessagingStore[TestEvent] = synchronizedStore
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      second = {
+        given MessagingStore[TestEvent] = synchronizedStore
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      results  <- (first, second).parTupled
+      events   <- store.getEvents
+      messages <- store.getMessages
+      reads    <- arrivals.get
+      outcomes  = List(results._1, results._2)
+    yield expect.all(
+      outcomes.count(_.isRight) == 1,
+      outcomes.count(_.isLeft) == 1,
+      events.length == 1,
+      // Three reads, not two: the gate holds both commands until each has read, so the conflict is unavoidable and the
+      // loser had to read again. Without this the assertions below would also hold for two sequential runs.
+      reads == 3,
+      // Both callers are answered, and never twice with "accepted" — the retry read the winner's event and changed its
+      // mind. The attempt that lost the conflict contributed no message of its own.
+      messages.length == 2,
+      messages.count(_.payload == "accepted:1") == 1,
+      messages.count(_.payload == "rejected:Student already exists") == 1,
     )
   }
 

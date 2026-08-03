@@ -21,7 +21,13 @@ package persistent4s
   */
 trait TransactionalMessages[F[_], A <: Event]:
 
-  /** [[EventStore.append]] plus an atomic message enqueue. */
+  /** [[EventStore.append]] plus an atomic message enqueue.
+    *
+    * Passing no events enqueues the messages alone: with nothing being written there is no local invariant to protect,
+    * so `eventFilter` and `expectedIndex` are ignored rather than checked, and an implementation must neither raise
+    * [[IndexConflictException]] nor skip the enqueue. [[CommandHandler.runWithMessages]] depends on this — it is how a
+    * rejected command still answers the service that asked.
+    */
   def appendWithMessages(
     eventFilter: EventFilter,
     expectedIndex: Long,
@@ -29,7 +35,7 @@ trait TransactionalMessages[F[_], A <: Event]:
     events: List[PendingEvent[A]]*,
   ): F[List[A]]
 
-  /** [[EventStore.appendUnchecked]] plus an atomic message enqueue. */
+  /** [[EventStore.appendUnchecked]] plus an atomic message enqueue. Passing no events enqueues the messages alone. */
   def appendUncheckedWithMessages(
     messages: List[OutgoingMessage],
     events: List[PendingEvent[A]]*,
