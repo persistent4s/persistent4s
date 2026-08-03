@@ -68,7 +68,7 @@ object ScopeSuite extends SimpleIOSuite:
   }
 
   pureTest("a resolved scope can bridge to the legacy tag representation") {
-    val scopeId = Scope[String]("book")("42")
+    val scopeId = Scope[String]("book").apply("42")
 
     expect(scopeId.toTag == Tag("book", "42"))
   }
@@ -76,5 +76,5 @@ object ScopeSuite extends SimpleIOSuite:
   pureTest("invalid scope definitions and empty encoded keys are rejected") {
     expect(Try(Scope[String]("")).isFailure) and
       expect(Try(Scope[String]("invalid:name")).isFailure) and
-      expect(Try(Scope[String]("book")(" ".trim)).isFailure)
+      expect(Try(Scope[String]("book").apply(" ".trim)).isFailure)
   }

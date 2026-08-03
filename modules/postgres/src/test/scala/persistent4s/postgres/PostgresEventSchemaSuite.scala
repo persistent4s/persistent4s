@@ -24,7 +24,18 @@ import io.circe.syntax.*
 import io.circe.{Decoder, Encoder, Json}
 
 import persistent4s.circe.{CirceEventCodec, JsonEventUpcaster}
-import persistent4s.{Event, EventCodec, EventFilter, EventSchema, EventSchemaMismatch, EventTypeName, Tag}
+import persistent4s.{
+  Event,
+  EventCodec,
+  EventFilter,
+  EventNotification,
+  EventSchema,
+  EventSchemaMismatch,
+  EventStore,
+  EventTypeName,
+  PendingEvent,
+  Tag,
+}
 
 import org.testcontainers.containers.PostgreSQLContainer
 import org.typelevel.otel4s.metrics.Meter
@@ -62,7 +73,7 @@ object PostgresEventSchemaSuite extends IOSuite:
         .build
 
   final case class Resources(
-    store: PostgresEventStore[IO, VersionedEvent],
+    store: EventStore[IO, VersionedEvent] & EventNotification[IO],
     sessions: Resource[IO, Session[IO]],
   )
 
@@ -105,12 +116,11 @@ object PostgresEventSchemaSuite extends IOSuite:
       tag <- IO(Tag("schema-test", UUID.randomUUID().toString))
       _   <- resources.store.appendUnchecked(
              List(
-               (
-                 None,
+               PendingEvent(
+                 ValueChanged("current"): VersionedEvent,
                  Set(tag),
                  EventTypeName.of[ValueChanged],
-                 false,
-                 ValueChanged("current"): VersionedEvent,
+                 isExternal = false,
                ),
              ),
            )
@@ -152,7 +162,7 @@ object PostgresEventSchemaSuite extends IOSuite:
       tag    <- IO(Tag("schema-mismatch", UUID.randomUUID().toString))
       result <- resources.store
                   .appendUnchecked(
-                    List((None, Set(tag), wrongType, false, ValueChanged("invalid"): VersionedEvent)),
+                    List(PendingEvent(ValueChanged("invalid"): VersionedEvent, Set(tag), wrongType, isExternal = false)),
                   )
                   .attempt
       revision <- resources.store.currentRevision(EventFilter(Set.empty, Set(tag)))
@@ -177,12 +187,11 @@ object PostgresEventSchemaSuite extends IOSuite:
       result <- store
                   .appendUnchecked(
                     List(
-                      (
-                        None,
+                      PendingEvent(
+                        ValueChanged("invalid"): VersionedEvent,
                         Set(tag),
                         EventTypeName.of[ValueChanged],
-                        false,
-                        ValueChanged("invalid"): VersionedEvent,
+                        isExternal = false,
                       ),
                     ),
                   )
@@ -210,12 +219,11 @@ object PostgresEventSchemaSuite extends IOSuite:
                           tag          = Tag("upgraded-schema", UUID.randomUUID().toString)
                           _           <- components.eventStore.appendUnchecked(
                                  List(
-                                   (
-                                     None,
+                                   PendingEvent(
+                                     ValueChanged("after-upgrade"): VersionedEvent,
                                      Set(tag),
                                      EventTypeName.of[ValueChanged],
-                                     false,
-                                     ValueChanged("after-upgrade"): VersionedEvent,
+                                     isExternal = false,
                                    ),
                                  ),
                                )

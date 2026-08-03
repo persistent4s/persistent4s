@@ -18,7 +18,7 @@ package persistent4s.postgres
 
 import java.util.UUID
 
-import scala.compiletime.testing.typeCheckErrors
+import scala.compiletime.testing.{Error, typeCheckErrors}
 
 import cats.effect.IO
 
@@ -238,7 +238,7 @@ object PostgresDerivationSuite extends SimpleIOSuite:
   }
 
   test("derivation rejects an unsupported state field") {
-    val errors = typeCheckErrors("""
+    val errors: List[Error] = typeCheckErrors("""
       import persistent4s.postgres.*
       final case class UnsupportedState(id: java.util.UUID, labels: List[String]) derives PostgresRow
     """)

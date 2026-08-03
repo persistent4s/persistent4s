@@ -25,12 +25,20 @@ import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 
 import fs2.Stream
+import fs2.concurrent.Topic
 
 import persistent4s.EventStoreNotification.*
 
 import weaver.SimpleIOSuite
 
 object DefaultProjectorSuite extends SimpleIOSuite:
+
+  import org.typelevel.otel4s.metrics.Meter
+  import org.typelevel.otel4s.trace.Tracer
+
+  given Tracer[IO] = Tracer.Implicits.noop
+
+  given Meter[IO] = Meter.Implicits.noop
 
   // ---------------------------------------------------------------------------
   // Test domain
@@ -67,34 +75,35 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
-    ): IO[List[A]] =
+      evts: List[PendingEvent[A]]*,
+    ): IO[List[EventEnvelope[A]]] =
       events.modify { current =>
         val relevant = current.filter(matches(_, eventFilter))
         val actualIdx = relevant.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
         if actualIdx != expectedIndex then (current, Left(new IndexConflictException(expectedIndex, actualIdx)))
         else
           val lastPos = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvts = evts.flatten.zipWithIndex.map { case ((maybeId, tags, eventType, isExternal, evt), i) =>
+          val newEvts = evts.flatten.zipWithIndex.map { case (pending, i) =>
             EventEnvelope(
               EventMetadata(
                 lastPos + i.toLong + 1L,
-                maybeId.getOrElse(UUID.randomUUID()),
-                tags,
-                eventType,
-                isExternal,
+                pending.id.getOrElse(UUID.randomUUID()),
+                pending.tags,
+                pending.eventType,
+                pending.isExternal,
                 java.time.Instant.now(),
+                pending.headers,
               ),
-              evt,
+              pending.payload,
             )
           }
-          (current ++ newEvts, Right(evts.flatten.map(_._5)))
+          (current ++ newEvts, Right(newEvts))
       }.flatMap {
         case Left(e)       => IO.raiseError(e)
         case Right(result) => queue.offer(EventsAppended).as(result.toList)
       }
 
-    def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): IO[List[A]] =
+    def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[EventEnvelope[A]]] =
       IO.pure(List.empty) // not needed for these tests
 
     def readFrom(
@@ -151,7 +160,7 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       store.append(
         EventFilter(),
         i.toLong,
-        List((None, tags, EventTypeName.fromInstance(event), false, event)),
+        List(PendingEvent(event, tags, EventTypeName.fromInstance(event), false, None, Map.empty)),
       )
     }
 
@@ -447,6 +456,67 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     )
   }
 
+  test("publishes each processed event's state to the topic after persisting") {
+    // This is the channel SyncCommandHandler waits on, so a projector that persists but never
+    // publishes would leave every synchronous command hanging until its timeout.
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states)
+      topic      <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      _          <- seed(
+             store,
+             (Set(entityTag("a")), TestEvent.Created("a")),
+             (Set(entityTag("b")), TestEvent.Created("b")),
+           )
+      appended  <- store.getAll.map(_.toList)
+      published <- topic
+                     .subscribeAwait(16)
+                     .use { stream =>
+                       DefaultProjector(store, checkpoint)
+                         .run(projection, Some(topic))
+                         .compile
+                         .drain
+                         .background
+                         .use(_ => stream.take(2).compile.toList.timeout(5.seconds))
+                     }
+    yield expect.all(
+      // one publish per processed event, keyed by that event's id, in order
+      published.map(_._1) == appended.map(_.metadata.id),
+      // each carries the state for that event's own key
+      published.map(_._2) == List(Right(Map("a" -> Some(1))), Right(Map("b" -> Some(1)))),
+    )
+  }
+
+  test("publishes the failure to the topic when an event fails to process") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states, failOnPosition = Some(1L))
+      topic      <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      _          <- seed(store, (Set(entityTag("a")), TestEvent.Created("a")))
+      appended   <- store.getAll.map(_.toList)
+      published  <- topic
+                     .subscribeAwait(16)
+                     .use { stream =>
+                       DefaultProjector(store, checkpoint)
+                         .run(projection, Some(topic))
+                         .compile
+                         .drain
+                         .attempt
+                         .background
+                         .use(_ => stream.head.compile.lastOrError.timeout(5.seconds))
+                     }
+    yield expect.all(
+      published._1 == appended.head.metadata.id,
+      published._2.left.toOption.exists(_.getMessage.contains("simulated")),
+    )
+  }
+
   test("on partial batch failure: persists progress up to the failed event, pauses the projector with an error") {
     for
       store      <- InMemoryStore.make[TestEvent]
@@ -517,9 +587,8 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                   EventFilter(),
                   0L,
                   List(
-                    (
-                      None, Set(entityTag("1")), EventTypeName.fromString("Created"), false, TestEvent.Created("1"),
-                    ),
+                    PendingEvent(TestEvent.Created("1"), Set(entityTag("1")), EventTypeName.fromString("Created"),
+                      false, None, Map.empty),
                   ),
                 ) *>
                 processed.get.timeout(2.seconds)

@@ -16,8 +16,6 @@
 
 package persistent4s
 
-import java.util.UUID
-
 import fs2.Stream
 
 /** An EventStore is a component that allows you to append and read events in an event-sourced system. Appending events
@@ -58,17 +56,17 @@ trait EventStore[F[_], A <: Event]:
     * @param expectedIndex
     *   the global position of the last known matching event, or 0 if none are expected
     * @param events
-    *   one or more lists of events to append, each event paired with its tags, type name, and a boolean indicating if
-    *   it is external
+    *   each events represented as a [[PendingEvent]] carrying its payload, tags, type name, external flag, optional id,
+    *   and headers
     * @return
-    *   a F[List[A]] that completes when the events have been written, or fails with [[IndexConflictException]] on
-    *   conflict
+    *   a F[List[EventEnvelope[A]]] that completes when the events have been written, or fails with
+    *   [[IndexConflictException]] on conflict
     */
   def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
-    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
-  ): F[List[A]]
+    events: List[PendingEvent[A]]*,
+  ): F[List[EventEnvelope[A]]]
 
   /** Append events to the event store WITHOUT optimistic concurrency control.
     *
@@ -87,19 +85,18 @@ trait EventStore[F[_], A <: Event]:
     * ==Idempotency==
     *
     * At-least-once delivery from a broker means the same event may arrive twice. To make this method idempotent in the
-    * face of redelivery, pass the source event's UUID via the tuple's first element. The unique constraint on
-    * `event_id` then rejects duplicates at the storage layer, and the caller can catch that error and treat it as
-    * "already imported" (typically: commit the broker offset and continue). Passing `None` skips this safeguard and is
-    * appropriate only if duplicates are impossible by construction.
+    * face of redelivery, pass the source event's UUID via [[PendingEvent.id]]. The unique constraint on `event_id` then
+    * makes a duplicate append a silent no-op: the original row is left untouched and its existing metadata (position,
+    * timestamp) is returned rather than a new one being written. Passing `None` skips this safeguard and is appropriate
+    * only if duplicates are impossible by construction.
     *
     * @param events
-    *   one or more lists of events to append, each event paired with its optional id, tags, type name, an `isExternal`
-    *   flag and the payload itself. See [[append]] for the per-element semantics.
+    *   each events represented as a [[PendingEvent]] carrying its payload, tags, type name, external flag, optional id,
+    *   and headers
     * @return
-    *   a `F[Unit]` that completes when the events have been written. May fail at the storage layer if a duplicate
-    *   `event_id` is detected — see the idempotency note above.
+    *   a F[List[EventEnvelope[A]]] that completes when the events have been written.
     */
-  def appendUnchecked(events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): F[List[A]]
+  def appendUnchecked(events: List[PendingEvent[A]]*): F[List[EventEnvelope[A]]]
 
   /** Read events from the event store starting from a specific position, filtering by event types and tags. The
     * returned Stream will emit EventEnvelope[A] instances that match the specified event types and tags. The Stream

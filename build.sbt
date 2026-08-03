@@ -1,8 +1,8 @@
-import org.typelevel.sbt.gha.{PermissionValue, Permissions}
+import org.typelevel.sbt.gha.{JavaSpec, PermissionValue, Permissions}
 
 ThisBuild / tlBaseVersion          := "0.2"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
-ThisBuild / scalaVersion           := "3.8.3"
+ThisBuild / scalaVersion           := "3.3.8"
 ThisBuild / tlJdkRelease           := Some(17)
 ThisBuild / organization           := "io.github.persistent4s"
 ThisBuild / organizationName       := "Antonio Jimenez and Bastien Jolidon"
@@ -12,19 +12,39 @@ ThisBuild / developers             := List(
   tlGitHubDev("antoniojimeneznieto", "Antonio Jimenez"),
   tlGitHubDev("Bjolidon", "Bastien Jolidon"),
 )
-ThisBuild / scalafmtOnCompile         := false // recommended in Scala 3
-ThisBuild / testFrameworks            += new TestFramework("weaver.framework.CatsEffect")
-ThisBuild / Test / logBuffered        := false
-ThisBuild / Test / parallelExecution  := false
-ThisBuild / githubWorkflowGeneratedCI := {
+ThisBuild / scalafmtOnCompile          := false // recommended in Scala 3
+ThisBuild / testFrameworks             += new TestFramework("weaver.framework.CatsEffect")
+ThisBuild / Test / logBuffered         := false
+ThisBuild / Test / parallelExecution   := false
+ThisBuild / githubWorkflowJavaVersions := Seq(JavaSpec.temurin("17"))
+ThisBuild / githubWorkflowGeneratedCI  := {
   (ThisBuild / githubWorkflowGeneratedCI).value.map { job =>
-    if (job.id == "dependency-submission")
-      job.withPermissions(
-        Some(
-          Permissions.Specify.defaultRestrictive.withContents(PermissionValue.Write),
-        ),
-      )
-    else job
+    job.id match {
+      case "dependency-submission" =>
+        job.withPermissions(
+          Some(
+            Permissions.Specify.defaultRestrictive
+              .withContents(PermissionValue.Write),
+          ),
+        )
+
+      // Overwrite the default Java version for the validate-steward job to use Java 17 instead of Java 11.
+      case "validate-steward" =>
+        job
+          .withJavas(List(JavaSpec.temurin("17")))
+          .withSteps(
+            WorkflowStep.Run(
+              List(
+                """echo "JAVA_HOME=$JAVA_HOME_17_X64" >> "$GITHUB_ENV"""",
+                """echo "$JAVA_HOME_17_X64/bin" >> "$GITHUB_PATH"""",
+                """"$JAVA_HOME_17_X64/bin/java" -version""",
+              ),
+              name = Some("Select Java 17"),
+            ) :: job.steps,
+          )
+      case _ =>
+        job
+    }
   }
 }
 
@@ -36,23 +56,23 @@ val CatsEffectV = "3.7.0"
 
 val Fs2V = "3.13.0"
 
-val SkunkV = "1.0.0"
+val SkunkV = "2.0.0-RC2"
 
-val CirceV = "0.14.15"
+val CirceV = "0.14.16"
 
 val Log4CatsV = "2.8.0"
 
-val Otel4sV = "0.16.0"
+val Otel4sV = "1.0.1"
 
-val LogbackV = "1.5.32"
+val LogbackV = "1.5.38"
 
 val TestcontainersV = "1.21.4"
 
 val Fs2KafkaV = "4.0.0"
 
-val WeaverV = "0.12.0"
+val WeaverV = "0.13.0"
 
-val Http4sV = "0.23.34"
+val Http4sV = "0.23.36"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 

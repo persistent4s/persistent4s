@@ -128,7 +128,7 @@ object EventSourcedProjectionSuite extends SimpleIOSuite:
     EventEnvelope(
       EventMetadata(
         position, id, Set.empty, eventType.getOrElse(EventTypeName.fromInstance(payload)), isExternal = false,
-        Instant.now(),
+        Instant.now(), Map.empty,
       ),
       payload,
     )

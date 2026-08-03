@@ -16,12 +16,15 @@
 
 package persistent4s
 
+import java.util.UUID
+
 import scala.collection.mutable.ListBuffer
 
 import cats.effect.{Async, Fiber, Outcome, Resource}
 import cats.syntax.all.*
 
 import fs2.Stream
+import fs2.concurrent.Topic
 
 /** Raised before startup when two registered projections share a checkpoint name. */
 final case class DuplicateProjectionNames(names: List[String])
@@ -49,9 +52,17 @@ final class ProjectionRegistrations[F[_], A <: Event] private[persistent4s] (
 
   private val registrations = ListBuffer.empty[RegisteredProjection[F]]
 
-  /** Register one projection. */
-  def run[K, S](projection: Projection[F, A, K, S]): Unit =
-    registrations += RegisteredProjection(projection.name, projector.run(projection))
+  /** Register one projection.
+    *
+    * @param topic
+    *   an optional topic the projector publishes to after persisting, so a [[SyncCommandHandler]] can wait on this
+    *   projection - see [[Projector.run]]
+    */
+  def run[K, S](
+    projection: Projection[F, A, K, S],
+    topic: Option[Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])]] = None,
+  ): Unit =
+    registrations += RegisteredProjection(projection.name, projector.run(projection, topic))
 
   private[persistent4s] def result: List[RegisteredProjection[F]] = registrations.toList
 

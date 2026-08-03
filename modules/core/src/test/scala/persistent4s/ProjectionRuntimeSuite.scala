@@ -24,6 +24,7 @@ import cats.effect.{Deferred, IO}
 import cats.syntax.all.*
 
 import fs2.Stream
+import fs2.concurrent.Topic
 
 import weaver.SimpleIOSuite
 
@@ -45,7 +46,10 @@ object ProjectionRuntimeSuite extends SimpleIOSuite:
   private def runtime(streamFor: String => Stream[IO, Unit]): ProjectionRuntime[IO, TestEvent] =
     ProjectionRuntime(
       new Projector[IO, TestEvent]:
-        def run[K, S](projection: Projection[IO, TestEvent, K, S]): Stream[IO, Unit] =
+        def run[K, S](
+          projection: Projection[IO, TestEvent, K, S],
+          topic: Option[Topic[IO, (UUID, Either[Throwable, Map[K, Option[S]]])]],
+        ): Stream[IO, Unit] =
           streamFor(projection.name),
     )
 

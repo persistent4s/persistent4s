@@ -145,6 +145,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
         summon[EventSchema[E]].eventType,
         isExternal = false,
         Instant.now(),
+        Map.empty,
         summon[EventSchema[E]].version,
       ),
       payload,
@@ -157,7 +158,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     eventType: EventTypeName,
   ): EventEnvelope[TestEvent] =
     EventEnvelope(
-      EventMetadata(position, UUID.randomUUID(), tags, eventType, isExternal = false, Instant.now()),
+      EventMetadata(position, UUID.randomUUID(), tags, eventType, isExternal = false, Instant.now(), Map.empty),
       payload,
     )
 
@@ -173,9 +174,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
 
     var readCount: Int = 0
 
-    var appended: Option[
-      (EventFilter, Long, List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]),
-    ] = None
+    var appended: Option[(EventFilter, Long, List[PendingEvent[TestEvent]])] = None
 
     private def matches(event: EventEnvelope[TestEvent], filter: EventFilter): Boolean =
       val eventTypeMatches = filter.eventTypes.isEmpty || filter.eventTypes.contains(event.metadata.eventType)
@@ -201,16 +200,30 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
-    ): IO[List[TestEvent]] =
+      events: List[PendingEvent[TestEvent]]*,
+    ): IO[List[EventEnvelope[TestEvent]]] =
       val flattened = events.toList.flatten
       appended = Some((eventFilter, expectedIndex, flattened))
-      IO.pure(flattened.map(_._5))
+      IO.pure(flattened.map(envelopeFor))
 
     def appendUnchecked(
-      events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
-    ): IO[List[TestEvent]] =
-      IO.pure(events.toList.flatten.map(_._5))
+      events: List[PendingEvent[TestEvent]]*,
+    ): IO[List[EventEnvelope[TestEvent]]] =
+      IO.pure(events.toList.flatten.map(envelopeFor))
+
+    private def envelopeFor(pending: PendingEvent[TestEvent]): EventEnvelope[TestEvent] =
+      EventEnvelope(
+        EventMetadata(
+          history.lastOption.fold(0L)(_.metadata.globalPosition) + 1L,
+          pending.id.getOrElse(UUID.randomUUID()),
+          pending.tags,
+          pending.eventType,
+          pending.isExternal,
+          Instant.now(),
+          pending.headers,
+        ),
+        pending.payload,
+      )
 
   final private class RecordingSnapshotStore(initial: Option[StoredCommandSnapshot]) extends CommandSnapshotStore[IO]:
 
@@ -380,7 +393,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       val expectedFilter = EventFilter(Set.empty, commandTags)
       val expectedEvent = Incremented("a", 3)
 
-      expect(result == Right(List(expectedEvent))) and
+      expect(result.map(_.map(_.payload)) == Right(List(expectedEvent))) and
         expect(store.readFromPosition.contains(0L)) and
         expect(store.readFilter.contains(expectedFilter)) and
         expect(
@@ -388,7 +401,9 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
             (
               expectedFilter,
               7L,
-              List((None, commandTags, incrementedSchema.eventType, false, expectedEvent)),
+              List(
+                PendingEvent(expectedEvent, commandTags, incrementedSchema.eventType, isExternal = false),
+              ),
             ),
           ),
         )
@@ -409,7 +424,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       raised   <- rejectedRuntime
                   .executeOrRaise(subject, TestCommand("a"))(_ => mapped)
                   .attempt
-    yield expect(accepted == Right(List(Incremented("a", 3)))) and
+    yield expect(accepted.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
       expect(rejected == Left(TestRejection.Missing)) and
       expect(raised == Left(mapped))
   }
@@ -426,7 +441,9 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     openFilterHandler
       .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
       .map(result =>
-        expect(result == Right(List(LegacyObserved("a")))) and expect(store.readFilter.exists(_.eventTypes.isEmpty)),
+        expect(result.map(_.map(_.payload)) == Right(List(LegacyObserved("a")))) and expect(
+          store.readFilter.exists(_.eventTypes.isEmpty),
+        ),
       )
   }
 
@@ -582,7 +599,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       val expectedEvent = Incremented("a", 13)
       val expectedSnapshot = StoredCommandSnapshot(7L, 2L, fingerprint, "true:12")
 
-      expect(result == Right(List(expectedEvent))) and
+      expect(result.map(_.map(_.payload)) == Right(List(expectedEvent))) and
         expect(store.readFromPosition.contains(5L)) and
         expect(store.appended.exists(_._2 == 7L)) and
         expect(snapshots.loaded.contains((snapshotId, snapshotKey, 1))) and
@@ -611,7 +628,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
                     summon[Concurrent[IO]],
                     CommandRuntime(rejectedStore, Some(snapshots)),
                   )
-    yield expect(accepted == Right(List(Incremented("a", 4)))) and
+    yield expect(accepted.map(_.map(_.payload)) == Right(List(Incremented("a", 4)))) and
       expect(rejected == Left(TestRejection.Missing))
   }
 
@@ -624,7 +641,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     val runtime = CommandRuntime(store, Some(snapshots))
 
     subject.run[IO](TestCommand("a"))(using summon[Concurrent[IO]], runtime).map { result =>
-      expect(result == Right(List(Incremented("a", 5)))) and
+      expect(result.map(_.map(_.payload)) == Right(List(Incremented("a", 5)))) and
         expect(store.readFromPosition.contains(0L)) and
         expect(snapshots.saved.isEmpty) and
         expect(snapshots.deleted.nonEmpty)
@@ -642,7 +659,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     val runtime = CommandRuntime(store, Some(snapshots))
 
     subject.run[IO](TestCommand("a"))(using summon[Concurrent[IO]], runtime).map { result =>
-      expect(result == Right(List(Incremented("a", 5)))) and
+      expect(result.map(_.map(_.payload)) == Right(List(Incremented("a", 5)))) and
         expect(store.readFromPosition.contains(0L)) and
         expect(snapshots.deleted.nonEmpty) and
         expect(store.appended.exists(_._2 == 2L))

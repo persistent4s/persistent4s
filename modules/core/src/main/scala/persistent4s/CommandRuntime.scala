@@ -83,7 +83,7 @@ final case class CommandRuntime[F[_], A <: Event](
   def execute[C, S, R](
     handler: EventSourcedCommandHandler[C, S, A, R],
     command: C,
-  )(using Concurrent[F]): F[Either[R, List[A]]] =
+  )(using Concurrent[F]): F[Either[R, List[EventEnvelope[A]]]] =
     handler.run(command)(using summon[Concurrent[F]], this)
 
   /** Execute a command while discarding accepted events but preserving a typed rejection. */
@@ -99,7 +99,7 @@ final case class CommandRuntime[F[_], A <: Event](
     command: C,
   )(
     mapRejection: R => Throwable,
-  )(using Concurrent[F]): F[List[A]] =
+  )(using Concurrent[F]): F[List[EventEnvelope[A]]] =
     handler.runOrRaise(command)(mapRejection)(using summon[Concurrent[F]], this)
 
   /** Execute a command for its success/failure outcome, translate its typed rejection, and discard accepted events. */

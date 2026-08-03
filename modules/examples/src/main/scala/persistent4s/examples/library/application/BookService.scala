@@ -20,20 +20,32 @@ import java.util.UUID
 
 import cats.effect.IO
 
-import persistent4s.CommandRuntime
+import persistent4s.SyncCommandHandler
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
 
-class BookServiceImpl(repository: BookRepository)(using commands: CommandRuntime[IO, LibraryEvent])
-    extends BookService[IO]:
+class BookServiceImpl(
+  repository: BookRepository,
+  syncHandler: SyncCommandHandler[IO, AddBook, LibraryEvent, UUID, BookState],
+) extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
-    for
-      bookId <- IO(UUID.randomUUID())
-      _      <- commands.executeOrRaise(AddBook.Handler, AddBook(bookId, title, author, totalCopies)):
-             case AddBook.Error.AlreadyExists(id) => ValidationError(s"Book already exists: $id")
-    yield AddBookOutput(bookId.toString())
+    (for
+      bookId    <- IO(UUID.randomUUID())
+      states    <- syncHandler.runSync(AddBook(bookId, title, author, totalCopies))
+      bookState <- IO.fromOption(states.get(bookId).flatten)(
+                     new Exception(s"BookProjection produced no state for $bookId"),
+                   )
+    yield AddBookOutput(
+      BookItem(bookState.bookId.toString(), bookState.title, bookState.author, bookState.totalCopies,
+        bookState.availableCopies),
+    )).adaptError {
+      case _: java.util.concurrent.TimeoutException =>
+        ProjectionTimeoutError("The book was created, but its view hasn't caught yet - please retry your read")
+      case e =>
+        ValidationError(e.getMessage)
+    }
 
   def getBooks(input: GetBooksInput): IO[GetBooksOutput] =
     repository

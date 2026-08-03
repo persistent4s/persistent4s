@@ -539,7 +539,9 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     behavior.decide(state, command, behavior.selection(command))
 
   /** Execute a command. Expected domain failures are `Left`; infrastructure failures remain failed effects. */
-  final def run[F[_]: Concurrent](command: C)(using runtime: CommandRuntime[F, A]): F[Either[R, List[A]]] =
+  final def run[F[_]: Concurrent](command: C)(using
+    runtime: CommandRuntime[F, A],
+  ): F[Either[R, List[EventEnvelope[A]]]] =
     suspend(behavior.selection(command)).flatMap(selection => runWithRetry(command, selection, maxRetries))
 
   /** Execute a command and translate only its typed domain rejection into an application error. Existing failed effects
@@ -547,7 +549,7 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     */
   final def runOrRaise[F[_]: Concurrent](command: C)(mapRejection: R => Throwable)(using
     runtime: CommandRuntime[F, A],
-  ): F[List[A]] =
+  ): F[List[EventEnvelope[A]]] =
     run(command).flatMap(_.leftMap(mapRejection).liftTo[F])
 
   final private case class ReplayStart(
@@ -560,7 +562,7 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     command: C,
     selection: ResolvedCommandSelection,
     retriesLeft: Int,
-  )(using runtime: CommandRuntime[F, A]): F[Either[R, List[A]]] =
+  )(using runtime: CommandRuntime[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
     attempt(command, selection).handleErrorWith {
       case RetryableCommandAppendConflict(_) if retriesLeft > 0 =>
         runWithRetry(command, selection, retriesLeft - 1)
@@ -572,7 +574,7 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   private def attempt[F[_]: Concurrent](
     command: C,
     selection: ResolvedCommandSelection,
-  )(using runtime: CommandRuntime[F, A]): F[Either[R, List[A]]] =
+  )(using runtime: CommandRuntime[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
     val readEventTypes =
       if selection.scopeBased || readAllEventTypes then Set.empty[EventTypeName]
       else behavior.eventTypes
@@ -600,7 +602,8 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
                                       if storage != declared then
                                         throw EventSchemaMismatch(declared, storage, event.getClass.getName)
                                     }
-                                    (None, tags, description.eventType, false, event)
+                                    PendingEvent(payload = event, tags = tags, eventType = description.eventType,
+                                      isExternal = false, id = None, headers = Map.empty)
                                   },
                                 )
                       appended <- runtime.eventStore

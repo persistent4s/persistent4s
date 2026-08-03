@@ -42,7 +42,7 @@ object MonitoringServer:
     * @param checkpoint
     *   the Postgres checkpoint store used to load all projection states
     * @param sendNotification
-    *   function to send a control notification (typically `components.eventStore.notify`)
+    *   function to send a control notification (typically `components.sendNotification`)
     * @param port
     *   the port to bind on (default: 9595)
     */

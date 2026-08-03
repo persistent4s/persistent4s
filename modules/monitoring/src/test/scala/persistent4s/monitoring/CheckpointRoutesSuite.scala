@@ -121,33 +121,30 @@ object CheckpointRoutesSuite extends SimpleIOSuite:
   }
 
   test("POST /checkpoints/{name}/pause returns 503 when sendNotification fails") {
-    for
-      app = new CheckpointRoutes[IO](
-              IO.pure(Nil),
-              _ => IO.raiseError(new RuntimeException("notify failed")),
-            ).routes.orNotFound
-      resp <- app.run(Request[IO](Method.POST, uri"/checkpoints/books/pause"))
+    val app = new CheckpointRoutes[IO](
+      IO.pure(Nil),
+      _ => IO.raiseError(new RuntimeException("notify failed")),
+    ).routes.orNotFound
+    for resp <- app.run(Request[IO](Method.POST, uri"/checkpoints/books/pause"))
     yield expect(resp.status == Status.ServiceUnavailable)
   }
 
   test("POST /checkpoints/{name}/resume returns 503 when sendNotification fails") {
-    for
-      app = new CheckpointRoutes[IO](
-              IO.pure(Nil),
-              _ => IO.raiseError(new RuntimeException("notify failed")),
-            ).routes.orNotFound
-      resp <- app.run(Request[IO](Method.POST, uri"/checkpoints/books/resume"))
+    val app = new CheckpointRoutes[IO](
+      IO.pure(Nil),
+      _ => IO.raiseError(new RuntimeException("notify failed")),
+    ).routes.orNotFound
+    for resp <- app.run(Request[IO](Method.POST, uri"/checkpoints/books/resume"))
     yield expect(resp.status == Status.ServiceUnavailable)
   }
 
   test("POST /checkpoints/{name}/index returns 503 when sendNotification fails") {
-    for
-      body = UrlForm("index" -> "1")
-      req  = Request[IO](Method.POST, uri"/checkpoints/books/index").withEntity(body)
-      app  = new CheckpointRoutes[IO](
-              IO.pure(Nil),
-              _ => IO.raiseError(new RuntimeException("notify failed")),
-            ).routes.orNotFound
-      resp <- app.run(req)
+    val body = UrlForm("index" -> "1")
+    val req = Request[IO](Method.POST, uri"/checkpoints/books/index").withEntity(body)
+    val app = new CheckpointRoutes[IO](
+      IO.pure(Nil),
+      _ => IO.raiseError(new RuntimeException("notify failed")),
+    ).routes.orNotFound
+    for resp <- app.run(req)
     yield expect(resp.status == Status.ServiceUnavailable)
   }

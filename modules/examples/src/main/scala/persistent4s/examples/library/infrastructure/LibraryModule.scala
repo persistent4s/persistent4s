@@ -16,8 +16,11 @@
 
 package persistent4s.examples.library.infrastructure
 
+import java.util.UUID
+import scala.concurrent.duration.*
 import cats.effect.*
 
+import fs2.concurrent.Topic
 import fs2.io.net.Network
 
 import org.typelevel.otel4s.metrics.Meter
@@ -28,20 +31,22 @@ given Tracer[IO] = Tracer.Implicits.noop
 given Meter[IO] = Meter.Implicits.noop
 
 import persistent4s.*
+import persistent4s.examples.library.api.ValidationError
 import persistent4s.examples.library.domain.LibraryEvent
-import persistent4s.examples.library.domain.book.{BookProjection, BookRepository}
+import persistent4s.examples.library.domain.book.{AddBook, BookProjection, BookRepository, BookState}
 import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, BorrowingRepository}
 import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
-import persistent4s.postgres.{PostgresEventStore, PostgresModule}
+import persistent4s.postgres.PostgresModule
 import persistent4s.monitoring.MonitoringServer
 
 final class LibraryModule private (
-  val store: PostgresEventStore[IO, LibraryEvent],
+  val store: EventStore[IO, LibraryEvent] & EventNotification[IO],
   val commands: CommandRuntime[IO, LibraryEvent],
   val projections: RunningProjections[IO],
   val bookRepository: BookRepository,
   val memberRepository: MemberRepository,
   val borrowingRepository: BorrowingRepository,
+  val addBookSyncHandler: SyncCommandHandler[IO, AddBook, LibraryEvent, UUID, BookState],
 )
 
 object LibraryModule:
@@ -52,13 +57,26 @@ object LibraryModule:
       store         = resources.eventStore
       commands      = resources.commandRuntime
       checkpoint    = resources.checkpoint
-      _            <- MonitoringServer.make(checkpoint, store.notify)
+      _            <- MonitoringServer.make(checkpoint, resources.sendNotification)
       bookRepo      = BookRepository.make(resources.sessions)
       memberRepo    = MemberRepository.make(resources.sessions)
       borrowingRepo = BorrowingRepository.make(resources.sessions)
-      projections  <- resources.projectionRuntime.startAll { registered =>
-                       registered.run(BookProjection(bookRepo))
+      bookProj      = BookProjection(bookRepo)
+      // AddBook answers with the projected book, so its projection publishes to a topic the command waits on.
+      bookTopic   <- Resource.eval(Topic[IO, (UUID, Either[Throwable, Map[UUID, Option[BookState]]])])
+      projections <- resources.projectionRuntime.startAll { registered =>
+                       registered.run(bookProj, Some(bookTopic))
                        registered.run(MemberProjection(memberRepo))
                        registered.run(BorrowingProjection(borrowingRepo))
                      }
-    yield new LibraryModule(store, commands, projections, bookRepo, memberRepo, borrowingRepo)
+      addBookSyncHandler = SyncCommandHandler.fromEventSourced(
+                             AddBook.Handler,
+                             commands,
+                             { case AddBook.Error.AlreadyExists(id) =>
+                               ValidationError(s"Book already exists: $id")
+                             },
+                             bookTopic,
+                             bookProj.filter,
+                             timeout = 5.seconds,
+                           )
+    yield new LibraryModule(store, commands, projections, bookRepo, memberRepo, borrowingRepo, addBookSyncHandler)

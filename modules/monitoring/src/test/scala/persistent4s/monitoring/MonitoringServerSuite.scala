@@ -75,7 +75,7 @@ object MonitoringServerSuite extends IOSuite:
       components <- PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec)
       _          <- MonitoringServer.make[IO](
              components.checkpoint,
-             components.eventStore.notify,
+             components.sendNotification,
              port"9092",
            )
       client <- EmberClientBuilder.default[IO].build
