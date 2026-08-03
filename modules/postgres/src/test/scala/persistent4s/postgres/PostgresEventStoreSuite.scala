@@ -162,6 +162,96 @@ object PostgresEventStoreSuite extends IOSuite:
     )
   }
 
+  test("a multi-event append keeps each event's own headers, tags and isExternal") { store =>
+    // Multiple events go out as a single multi-row INSERT, so a misaligned bind parameter would
+    // silently attach one event's headers to another. Distinct values per row catch that.
+    for
+      id     <- freshId("batch")
+      tagA    = Tag("batch", s"$id-a")
+      tagB    = Tag("batch", s"$id-b")
+      tagC    = Tag("batch", s"$id-c")
+      readAll = EventFilter(Set.empty, Set(tagA, tagB, tagC))
+      pending = List(
+                  PendingEvent(
+                    TestEvent("one"),
+                    Set(tagA),
+                    EventTypeName.of[TestEvent],
+                    isExternal = false,
+                    headers = Map("k" -> "1"),
+                  ),
+                  PendingEvent(
+                    TestEvent("two"),
+                    Set(tagB),
+                    EventTypeName.of[TestEvent],
+                    isExternal = true,
+                    headers = Map("k" -> "2", "extra" -> "x"),
+                  ),
+                  PendingEvent(
+                    TestEvent("three"),
+                    Set(tagC),
+                    EventTypeName.of[TestEvent],
+                    isExternal = false,
+                    headers = Map.empty,
+                  ),
+                )
+      returned <- store.append(readAll, 0L, pending)
+      readBack <- store.readFrom(0L, readAll).compile.toList
+    yield expect.all(
+      // returned envelopes come back in the order the events were supplied
+      returned.map(_.payload) == List(TestEvent("one"), TestEvent("two"), TestEvent("three")),
+      returned.map(_.metadata.headers) == List(Map("k" -> "1"), Map("k" -> "2", "extra" -> "x"), Map.empty),
+      returned.map(_.metadata.isExternal) == List(false, true, false),
+      returned.map(_.metadata.tags) == List(Set(tagA), Set(tagB), Set(tagC)),
+      // positions are distinct and ascend with that same order
+      returned.map(_.metadata.globalPosition).distinct.length == 3,
+      returned.map(_.metadata.globalPosition) == returned.map(_.metadata.globalPosition).sorted,
+      // and the envelopes agree with what was actually persisted
+      readBack.map(_.payload) == returned.map(_.payload),
+      readBack.map(_.metadata.headers) == returned.map(_.metadata.headers),
+      readBack.map(_.metadata.isExternal) == returned.map(_.metadata.isExternal),
+      readBack.map(_.metadata.globalPosition) == returned.map(_.metadata.globalPosition),
+      readBack.map(_.metadata.id) == returned.map(_.metadata.id),
+      readBack.map(_.metadata.timestamp) == returned.map(_.metadata.timestamp),
+    )
+  }
+
+  test("a duplicate UUID within a single append is written once and shares the same metadata") { store =>
+    for
+      id     <- freshId("batchdedup")
+      tag     = Tag("batchdedup", id)
+      uuid    = UUID.randomUUID()
+      readAll = EventFilter(Set.empty, Set(tag))
+      pending = List(
+                  PendingEvent(
+                    TestEvent("dup"),
+                    Set(tag),
+                    EventTypeName.of[TestEvent],
+                    isExternal = true,
+                    id = Some(uuid),
+                    headers = Map("h" -> "v"),
+                  ),
+                  PendingEvent(
+                    TestEvent("dup"),
+                    Set(tag),
+                    EventTypeName.of[TestEvent],
+                    isExternal = true,
+                    id = Some(uuid),
+                    headers = Map("h" -> "v"),
+                  ),
+                )
+      returned <- store.append(readAll, 0L, pending)
+      readBack <- store.readFrom(0L, readAll).compile.toList
+    yield expect.all(
+      // one envelope per supplied event, but both describe the single row that was written
+      returned.length == 2,
+      returned.map(_.metadata.globalPosition).distinct.length == 1,
+      returned.map(_.metadata.id).distinct == List(uuid),
+      readBack.length == 1,
+      readBack.head.metadata.globalPosition == returned.head.metadata.globalPosition,
+      readBack.head.metadata.headers == Map("h" -> "v"),
+    )
+  }
+
   test("readFrom skips events at or before the given position") { store =>
     // In Postgres the expectedIndex is the actual globalPosition of the last matching event,
     // not a per-tag counter — so we read it back after each append rather than hardcoding.

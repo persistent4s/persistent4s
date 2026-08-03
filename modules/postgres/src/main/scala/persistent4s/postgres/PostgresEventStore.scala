@@ -17,6 +17,7 @@
 package persistent4s.postgres
 
 import cats.effect.*
+import cats.effect.std.{SecureRandom, UUIDGen}
 import cats.syntax.all.*
 import fs2.Stream
 import io.circe.Json
@@ -54,7 +55,7 @@ import java.time.OffsetDateTime
   * @param codec
   *   the event codec for serializing/deserializing events
   */
-final class PostgresEventStore[F[_]: Async, A <: Event] private (
+final class PostgresEventStore[F[_]: Async: SecureRandom, A <: Event] private (
   pool: Resource[F, Session[F]],
   codec: EventCodec[A],
   channelId: Identifier,
@@ -78,7 +79,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
           for
             _         <- acquireAppendLocks(session, allTags)
             _         <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
-            envelopes <- flatEvents.traverse(pending => insertEvent(session, pending))
+            envelopes <- insertEvents(session, flatEvents)
             _         <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield envelopes
         }
@@ -93,7 +94,7 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
       pool.use { session =>
         session.transaction.use { _ =>
           for
-            envelopes <- flatEvents.traverse(pending => insertEvent(session, pending))
+            envelopes <- insertEvents(session, flatEvents)
             _         <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
           yield envelopes
         }
@@ -240,47 +241,43 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
       .sortBy(_.value)
       .traverse_(tag => session.unique(acquireTagLockQuery)(tag.value).void)
 
-  private def insertEvent(
+  private def insertEvents(
     session: Session[F],
-    pending: PendingEvent[A],
-  ): F[EventEnvelope[A]] =
-    val tagsJson = tagsToJson(pending.tags)
-    val headersJson = headersToJson(pending.headers)
-    val payloadJson = parseJson(codec.encode(pending.payload)).getOrElse(Json.obj())
+    events: List[PendingEvent[A]],
+  ): F[List[EventEnvelope[A]]] =
     for
-      result <- pending.id match
-                  case Some(eventId) =>
-                    session.unique(insertEventWithIdQuery)(
-                      eventId *: pending.eventType.value *: tagsJson *: payloadJson *: pending.isExternal *:
-                        headersJson *: EmptyTuple,
-                    )
-                  case None =>
-                    session.unique(insertEventQuery)(
-                      pending.eventType.value *: tagsJson *: payloadJson *: pending.isExternal *: headersJson *:
-                        EmptyTuple,
-                    )
-      sequenceNumber *: returnedEventId *: recordedAt *: EmptyTuple = result
-      _                                                            <- insertEventTags(session, sequenceNumber, pending.tags)
-    yield EventEnvelope(
-      EventMetadata(
-        globalPosition = sequenceNumber, id = returnedEventId, tags = pending.tags, eventType = pending.eventType,
-        isExternal = pending.isExternal, timestamp = recordedAt.toInstant, headers = pending.headers,
-      ),
-      pending.payload,
-    )
-
-  private def insertEventTags(
-    session: Session[F],
-    sequenceNumber: Long,
-    tags: Set[Tag],
-  ): F[Unit] =
-    tags.toList.traverse_ { tag =>
-      session
-        .execute(insertEventTagCommand)(
-          tag.value *: sequenceNumber *: EmptyTuple,
-        )
-        .void
+      resolved       <- events.traverse(pending => resolveId(pending.id).map(id => (id, pending)))
+      uniqueByEventId = resolved.distinctBy(_._1)
+      rows            = uniqueByEventId.map { case (id, pending) =>
+               id *: pending.eventType.value *: tagsToJson(pending.tags) *: encodePayload(pending.payload) *:
+                 pending.isExternal *: headersToJson(pending.headers) *: EmptyTuple
+             }
+      idToRow <- chunked(rows, paramsPerRow = 6)
+                   .flatTraverse(chunk => session.execute(insertEventsQuery(chunk.size))(chunk))
+                   .map(_.map { case id *: seq *: recordedAt *: EmptyTuple => id -> (seq, recordedAt) }.toMap)
+      tagPairs = uniqueByEventId.flatMap { case (id, pending) =>
+                   pending.tags.toList.map(tag => tag.value *: idToRow(id)._1 *: EmptyTuple)
+                 }
+      _ <- chunked(tagPairs, paramsPerRow = 2)
+             .traverse_(chunk => session.execute(insertEventTagsCommand(chunk.size))(chunk).void)
+    yield resolved.map { case (id, pending) =>
+      val (sequenceNumber, recordedAt) = idToRow(id)
+      EventEnvelope(
+        EventMetadata(
+          globalPosition = sequenceNumber, id = id, tags = pending.tags, eventType = pending.eventType,
+          isExternal = pending.isExternal, timestamp = recordedAt.toInstant, headers = pending.headers,
+        ),
+        pending.payload,
+      )
     }
+
+  private def resolveId(idOpt: Option[UUID]): F[UUID] = idOpt.fold(UUIDGen.randomUUID[F])(_.pure[F])
+
+  private def encodePayload(event: A): Json =
+    parseJson(codec.encode(event)).getOrElse(Json.obj())
+
+  private def chunked[T](rows: List[T], paramsPerRow: Int): List[List[T]] =
+    rows.grouped(MaxUsableBindParams / paramsPerRow).toList
 
   private def parsePayload(eventType: EventTypeName, payload: Json): F[A] =
     codec.decode(eventType, payload.noSpaces) match
@@ -303,6 +300,13 @@ object PostgresEventStore:
         sys.error("Invalid channel identifier"),
       )
 
+  /** Max number of parameters supported by PostgreSQL within a query */
+  private val MaxBindParams: Int = 32767
+
+  private val BindParamSafetyMargin: Int = 16
+
+  private val MaxUsableBindParams: Int = MaxBindParams - BindParamSafetyMargin
+
   /** Number of rows fetched per cursor round-trip when streaming events from PostgreSQL. */
   private val FetchSize: Int = 256
 
@@ -317,7 +321,7 @@ object PostgresEventStore:
     * @return
     *   a new PostgresEventStore instance
     */
-  def apply[F[_]: Async, A <: Event](
+  def apply[F[_]: Async: SecureRandom, A <: Event](
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
     channelId: Identifier = NotificationChannel,
@@ -344,31 +348,27 @@ object PostgresEventStore:
   private val acquireTagLockQuery: Query[String, String] =
     sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
 
-  private val insertEventQuery: Query[
-    String *: Json *: Json *: Boolean *: Json *: EmptyTuple,
-    Long *: UUID *: OffsetDateTime *: EmptyTuple,
+  private def insertEventsQuery(
+    n: Int,
+  ): Query[
+    List[UUID *: String *: Json *: Json *: Boolean *: Json *: EmptyTuple],
+    UUID *: Long *: OffsetDateTime *: EmptyTuple,
   ] =
-    sql"""
-      INSERT INTO events (event_type, tags, payload, is_external, headers)
-      VALUES ($text, $jsonb, $jsonb, $bool, $jsonb)
-      RETURNING sequence_number, event_id, recorded_at
-    """.query(int8 *: uuid *: timestamptz)
-
-  private val insertEventWithIdQuery: Query[
-    UUID *: String *: Json *: Json *: Boolean *: Json *: EmptyTuple,
-    Long *: UUID *: OffsetDateTime *: EmptyTuple,
-  ] =
+    val rows = (uuid *: text *: jsonb *: jsonb *: bool *: jsonb).values.list(n)
     sql"""
       INSERT INTO events (event_id, event_type, tags, payload, is_external, headers)
-      VALUES ($uuid, $text, $jsonb, $jsonb, $bool, $jsonb)
+      VALUES $rows
       ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
-      RETURNING sequence_number, event_id, recorded_at
-    """.query(int8 *: uuid *: timestamptz)
+      RETURNING event_id, sequence_number, recorded_at
+    """.query(uuid *: int8 *: timestamptz)
 
-  private val insertEventTagCommand: Command[String *: Long *: EmptyTuple] =
+  private def insertEventTagsCommand(
+    n: Int,
+  ): Command[List[String *: Long *: EmptyTuple]] =
+    val pairs = (text *: int8).values.list(n)
     sql"""
       INSERT INTO event_tags (tag, sequence_number)
-      VALUES ($text, $int8)
+      VALUES $pairs
       ON CONFLICT DO NOTHING
     """.command
 
