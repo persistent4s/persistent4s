@@ -1,0 +1,263 @@
+openapi: 3.0.3
+info:
+  title: Orders service
+  version: "1.0"
+  description: |
+    Owns customers and orders, and hosts the `reserve-stock` saga.
+
+    `POST /orders` answers **202**, not 201: everything this service can decide has been decided, and that is not enough
+    to say the order will be honoured. Stock belongs to the inventory service, so the order is appended as *provisional*
+    and the saga chases the reservation. Poll `GET /orders/{orderId}` to watch `Placed` become `Confirmed` or `Cancelled`,
+    and `GET /orders/{orderId}/saga` to watch the instance behind it.
+
+    The pre-filled ids match the README walkthrough, so the requests below can be run in order as they are.
+servers:
+  - url: http://localhost:8183
+
+paths:
+  /customers:
+    post:
+      summary: Register a customer
+      description: Ordinary local command — everything it validates lives in this service's own log.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterCustomerRequest"
+      responses:
+        "201":
+          description: Registered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  customerId:
+                    type: string
+                    format: uuid
+        "400":
+          description: Already registered, or the name is blank
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /orders:
+    post:
+      summary: Place an order (starts the saga)
+      description: |
+        Validates that the customer exists and the amount is positive — and **cannot** validate stock, which is the point
+        of the example. Appends `OrderPlaced`, which triggers the saga.
+
+        The response is the outcome of *this request*, not a read of the read model: a read straight after the append can
+        lose the race with the projector, and would then have to answer 404 for an order that certainly exists.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlaceOrderRequest"
+      responses:
+        "202":
+          description: Accepted, outcome pending
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderAccepted"
+        "400":
+          description: No such customer, order already placed, or non-positive amount
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      summary: List every order with its status
+      responses:
+        "200":
+          description: All orders
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OrderView"
+
+  /orders/{orderId}:
+    get:
+      summary: Read one order
+      description: |
+        Served from the `orders` projection. Can answer **404** for a few milliseconds after `POST /orders` — the event is
+        committed, the projector is a little behind. That is ordinary CQRS, not saga behaviour.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: The order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/OrderView"
+        "404":
+          description: Unknown order, or the projection has not caught up yet
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /orders/{orderId}/saga:
+    get:
+      summary: Read the saga instance behind an order
+      description: |
+        The machinery on display. The instance id is not stored on the order — it is derived from the saga's name and key
+        (`SagaId.instance("reserve-stock", orderId)`), which is how replaying a trigger event finds the same row instead
+        of starting a second instance.
+
+        `status` is `Pending` while a reply is awaited, then `Completed` (reserved) or `Compensated` (declined, or the
+        deadline passed). `deadline` is when the timer loop will give up; `data` is the instance's serialized state.
+      parameters:
+        - $ref: "#/components/parameters/OrderId"
+      responses:
+        "200":
+          description: The instance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SagaInstance"
+        "404":
+          description: No instance for this order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  parameters:
+    OrderId:
+      name: orderId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+
+  schemas:
+    RegisterCustomerRequest:
+      type: object
+      required: [customerId, name]
+      properties:
+        customerId:
+          type: string
+          format: uuid
+        name:
+          type: string
+      example:
+        customerId: 11111111-1111-1111-1111-111111111111
+        name: Ada
+
+    PlaceOrderRequest:
+      type: object
+      required: [orderId, customerId, itemId, amount]
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        itemId:
+          type: string
+          format: uuid
+          description: Belongs to the inventory service; this service never validates it.
+        amount:
+          type: integer
+          minimum: 1
+      example:
+        orderId: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+        customerId: 11111111-1111-1111-1111-111111111111
+        itemId: 22222222-2222-2222-2222-222222222222
+        amount: 2
+
+    OrderAccepted:
+      type: object
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          example: Placed
+        outcomeAt:
+          type: string
+          description: Where to poll for the outcome.
+          example: /orders/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+
+    OrderView:
+      type: object
+      properties:
+        orderId:
+          type: string
+          format: uuid
+        customerId:
+          type: string
+          format: uuid
+        itemId:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+        status:
+          type: string
+          enum: [Placed, Confirmed, Cancelled]
+          description: |
+            `Placed` is not a step towards being recorded — it is a state an order sits in for as long as the saga takes.
+        reason:
+          type: string
+          nullable: true
+          description: Why it was cancelled, straight from inventory's own validation or from the timeout.
+      example:
+        orderId: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+        customerId: 11111111-1111-1111-1111-111111111111
+        itemId: 22222222-2222-2222-2222-222222222222
+        amount: 2
+        status: Confirmed
+        reason: null
+
+    SagaInstance:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Derived from sagaName + key, not stored on the order.
+        sagaName:
+          type: string
+          example: reserve-stock
+        key:
+          type: string
+          description: The correlation key — the order id, for this saga.
+        status:
+          type: string
+          enum: [Pending, Completed, Compensated, Failed]
+        step:
+          type: integer
+        data:
+          type: string
+          description: The instance's state, still serialized — one table holds every saga's instances.
+        deadline:
+          type: string
+          format: date-time
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
