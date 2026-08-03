@@ -16,8 +16,9 @@
 
 package persistent4s
 
-import fs2.Stream
 import java.util.UUID
+
+import fs2.Stream
 
 /** An EventStore is a component that allows you to append and read events in an event-sourced system. Appending events
   * to the store is done with optimistic concurrency control.
@@ -29,12 +30,22 @@ import java.util.UUID
   */
 trait EventStore[F[_], A <: Event]:
 
+  /** Describe the schema this store will persist for `event`, when the backend owns a schema-aware codec. High-level
+    * handlers use this to fail fast if a shadowed/local EventSchema disagrees with the storage registry.
+    */
+  def storageSchema(event: A): Option[EventStorageSchema] = None
+
+  /** Return the global position of the latest event matching `eventFilter`, or `0` when none exists. This is the
+    * authoritative revision used by optimistic concurrency and to validate disposable command snapshots.
+    */
+  def currentRevision(eventFilter: EventFilter): F[Long]
+
   /** Append events to the event store using optimistic concurrency control.
     *
-    * The `expectedIndex` must equal the global position of the most recent event that matches `eventFilter`. If another
-    * event matching the filter has been appended concurrently, the actual index will be higher and an
-    * [[IndexConflictException]] is raised with no events written. Pass `expectedIndex = 0` when no prior matching
-    * events are expected (i.e. this is the first append for that filter scope).
+    * The `expectedIndex` must equal the global position of the most recent event that matches `eventFilter`. Any
+    * mismatch (behind or ahead of the authoritative revision) raises [[IndexConflictException]] with no events written.
+    * Pass `expectedIndex = 0` when no prior matching events are expected (i.e. this is the first append for that filter
+    * scope).
     *
     * The `events` parameter is variadic so that callers who build events in separate groups can pass multiple lists
     * without flattening them first. All lists are treated as a single ordered sequence — there is no semantic
