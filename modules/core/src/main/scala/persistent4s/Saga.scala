@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 import scala.concurrent.duration.FiniteDuration
+import scala.util.Try
 
 /** Identifies the saga instance a decision is being made for, so decision functions can build tags and messages that
   * reference the instance without carrying the key around in the state themselves.
@@ -100,6 +101,51 @@ object SagaDecision:
     messages: List[SagaRequest[Req]] = Nil,
   ): SagaDecision[A, S, Req] = SagaDecision(SagaOutcome.Continue(data, timeout), events, messages)
 
+/** Identifies one of the requests an instance has sent: the emission round it went out in, and its position within that
+  * round. Enough to tell a fan-out's answers apart — a saga built the request list itself, so it knows that round 1
+  * ordinal 0 went to one partner and ordinal 1 to another, without needing the replies to be distinguishable by shape.
+  */
+final case class SagaRequestRef(round: Int, ordinal: Int)
+
+object SagaRequestRef:
+
+  /** The single definition of the [[SagaHeaders.IdempotencyKey]] format. [[SagaRunner]] stamps requests with this and
+    * [[parse]] reads it back off [[SagaHeaders.InReplyTo]], so the producer and the reader cannot drift — a second
+    * spelling of the format would show up only as [[SagaReply.answering]] quietly being `None` forever.
+    */
+  def idempotencyKey(instance: UUID, round: Int, ordinal: Int): String = s"$instance:$round:$ordinal"
+
+  /** `None` unless `key` is well-formed '''and''' belongs to `expected`, so a key echoed from somewhere else cannot be
+    * mistaken for one of this instance's own requests.
+    */
+  def parse(key: String, expected: UUID): Option[SagaRequestRef] =
+    key.split(':') match
+      case Array(instance, round, ordinal) if instance == expected.toString =>
+        for
+          r <- Try(round.toInt).toOption
+          o <- Try(ordinal.toInt).toOption
+        yield SagaRequestRef(r, o)
+      case _ => None
+
+/** A partner's answer, with everything the runner knows about how it arrived.
+  *
+  * An envelope rather than a bare `Rep` for the same reason [[Saga.start]] receives an [[EventEnvelope]]: what a
+  * decision function needs is the payload *and* its provenance. It also means the next thing worth telling a saga about
+  * a reply does not change [[Saga.onReply]]'s signature again.
+  *
+  * @param answering
+  *   which request this answers, taken from [[SagaHeaders.InReplyTo]] — [[SagaHeaders.reply]] sets it automatically.
+  *   `None` if the partner built its reply by hand, or if the key it named was not one of this instance's requests.
+  * @param headers
+  *   the reply message's headers, unfiltered, `persistent4s.*` ones included. A partner that prefers to describe its
+  *   own replies rather than rely on [[answering]] can put whatever it likes here.
+  */
+final case class SagaReply[+Rep](
+  payload: Rep,
+  answering: Option[SagaRequestRef],
+  headers: Map[String, String],
+)
+
 /** Headers the runner attaches to every saga request message. The partner must echo [[Name]] and [[Id]] back on its
   * reply so the runner can route it to the right saga and instance, and must publish that reply to [[ReplyTo]].
   */
@@ -119,6 +165,14 @@ object SagaHeaders:
     */
   val ReplyTo = "persistent4s.replyTo"
 
+  /** On a reply: the [[IdempotencyKey]] of the request being answered.
+    *
+    * A separate header rather than echoing [[IdempotencyKey]] itself, because that key is the identity of ''one''
+    * message — copying it onto the reply would have two different messages claiming the same one. This says "I am the
+    * answer to that", which is a reference, not an identity, and it is what [[SagaReply.answering]] is read from.
+    */
+  val InReplyTo = "persistent4s.inReplyTo"
+
   /** Build the reply to a saga request: `payload` addressed to the topic the request nominated, carrying back the
     * correlation headers [[SagaRunner]] needs to route it to the right saga and instance.
     *
@@ -128,10 +182,24 @@ object SagaHeaders:
     * `payload` is already encoded, unlike [[SagaRequest]]: a partner answers inside an effect and can report an
     * encoding failure itself, whereas a saga's decision functions are pure and cannot.
     *
+    * The request's [[IdempotencyKey]] comes back as [[InReplyTo]] when it has one, which is what lets the runner tell
+    * the saga ''which'' of its requests is being answered — see [[SagaReply.answering]]. A partner gets that for free
+    * by using this method; one that builds its own reply has to set that header itself or the saga learns nothing.
+    *
     * @param key
-    *   partition key for the reply; defaults to the request's own, keeping one saga's traffic on one partition
+    *   partition key for the reply; defaults to the saga instance id, which is what keeps one instance's replies on one
+    *   partition and therefore handled one at a time. Override only with something equally per-instance: two replies to
+    *   the same instance handled concurrently race each other, and the loser is discarded.
+    * @param headers
+    *   extra headers to send alongside the correlation ones; the correlation headers win on a clash, as with
+    *   [[SagaRequest.headers]]
     */
-  def reply(request: IncomingMessage, payload: String, key: Option[String] = None): Option[OutgoingMessage] =
+  def reply(
+    request: IncomingMessage,
+    payload: String,
+    key: Option[String] = None,
+    headers: Map[String, String] = Map.empty,
+  ): Option[OutgoingMessage] =
     for
       replyTo <- request.headers.get(ReplyTo)
       name    <- request.headers.get(Name)
@@ -140,7 +208,8 @@ object SagaHeaders:
       topic = replyTo,
       key = Some(key.getOrElse(id)),
       payload = payload,
-      headers = Map(Name -> name, Id -> id),
+      headers = headers ++ Map(Name -> name, Id -> id) ++
+        request.headers.get(IdempotencyKey).map(InReplyTo -> _),
     )
 
 /** Deterministic identifiers, so that replaying a trigger event or redelivering a reply produces the same ids and
@@ -183,8 +252,12 @@ trait Saga[A <: Event, S, Req, Rep]:
   /** Decide whether `event` starts an instance. Returning `None` skips it and the checkpoint still advances past it. */
   def start(event: EventEnvelope[A]): Option[SagaStart[S, Req]]
 
-  /** Interpret the partner's reply for a pending instance. */
-  def onReply(ctx: SagaContext, state: S, reply: Rep): SagaDecision[A, S, Req]
+  /** Interpret the partner's reply for a pending instance.
+    *
+    * A saga that sent more than one request tells them apart with [[SagaReply.answering]], which identifies the request
+    * being answered by round and ordinal — the same order they were listed in.
+    */
+  def onReply(ctx: SagaContext, state: S, reply: SagaReply[Rep]): SagaDecision[A, S, Req]
 
   /** Decide what to do when a pending instance passes its deadline — normally a compensation. */
   def onTimeout(ctx: SagaContext, state: S): SagaDecision[A, S, Req]

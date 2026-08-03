@@ -102,19 +102,61 @@ object SagaRunnerSuite extends IOSuite:
     def onReply(
       ctx: SagaContext,
       state: OrderState,
-      reply: StockReserved,
+      reply: SagaReply[StockReserved],
     ): SagaDecision[TestEvent, OrderState, ReserveStock] =
-      if reply.ok then
+      if reply.payload.ok then
         SagaDecision.completed(events = List(Set(orderTag(state.orderId)) -> OrderConfirmed(state.orderId)))
       else
         SagaDecision.compensated(events =
-          List(Set(orderTag(state.orderId)) -> OrderCancelled(state.orderId, reply.reason.getOrElse("rejected"))),
+          List(
+            Set(orderTag(state.orderId)) ->
+              OrderCancelled(state.orderId, reply.payload.reason.getOrElse("rejected")),
+          ),
         )
 
     def onTimeout(ctx: SagaContext, state: OrderState): SagaDecision[TestEvent, OrderState, ReserveStock] =
       SagaDecision.compensated(events =
         List(Set(orderTag(state.orderId)) -> OrderCancelled(state.orderId, "timed out")),
       )
+
+    val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
+
+    val requestCodec: MessageCodec[ReserveStock] = CirceMessageCodec.derived[ReserveStock]
+
+    val replyCodec: MessageCodec[StockReserved] = CirceMessageCodec.derived[StockReserved]
+
+  /** Writes what the runner told it about the reply into the event it appends, so a test can see whether a saga can
+    * actually tell which of its requests was answered — the thing a fan-out needs and cannot get from the payload.
+    */
+  object ObservingSaga extends Saga[TestEvent, OrderState, ReserveStock, StockReserved]:
+
+    val name = "observe-reply"
+
+    val triggers = Set(EventTypeName.of[OrderPlaced])
+
+    def start(event: EventEnvelope[TestEvent]): Option[SagaStart[OrderState, ReserveStock]] =
+      event.payload match
+        case OrderPlaced(orderId) =>
+          Some(
+            SagaStart(
+              key = orderId,
+              data = OrderState(orderId),
+              request = List(SagaRequest(RequestTopic, Some(orderId), ReserveStock(orderId))),
+              timeout = Some(1.hour),
+            ),
+          )
+        case _ => None
+
+    def onReply(
+      ctx: SagaContext,
+      state: OrderState,
+      reply: SagaReply[StockReserved],
+    ): SagaDecision[TestEvent, OrderState, ReserveStock] =
+      val answered = reply.answering.fold("none")(ref => s"${ref.round}:${ref.ordinal}")
+      SagaDecision.completed(events = List(Set(orderTag(state.orderId)) -> Unrelated(answered)))
+
+    def onTimeout(ctx: SagaContext, state: OrderState): SagaDecision[TestEvent, OrderState, ReserveStock] =
+      SagaDecision.compensated()
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 
@@ -140,9 +182,11 @@ object SagaRunnerSuite extends IOSuite:
     payload: String,
     sagaName: String = TestSaga.name,
     withId: Boolean = true,
+    inReplyTo: Option[String] = None,
   ): IncomingMessage =
     val headers = Map(SagaHeaders.Name -> sagaName) ++
-      (if withId then Map(SagaHeaders.Id -> id.toString) else Map.empty)
+      (if withId then Map(SagaHeaders.Id -> id.toString) else Map.empty) ++
+      inReplyTo.map(SagaHeaders.InReplyTo -> _)
     IncomingMessage(ReplyTopic, None, payload, headers)
 
   private def accepted: String = """{"ok":true,"reason":null}"""
@@ -236,6 +280,13 @@ object SagaRunnerSuite extends IOSuite:
   private def storedEvents(fixture: Fixture): IO[List[String]] =
     fixture.pool.use(_.execute(sql"SELECT event_type FROM events ORDER BY sequence_number".query(text)))
 
+  private def storedPayloads(fixture: Fixture, eventType: String): IO[List[String]] =
+    fixture.pool.use(
+      _.execute(
+        sql"SELECT payload::text FROM events WHERE event_type = $text ORDER BY sequence_number".query(text),
+      )(eventType),
+    )
+
   private def eventCount(fixture: Fixture): IO[Long] =
     fixture.pool.use(_.unique(sql"SELECT count(*) FROM events".query(int8)))
 
@@ -321,6 +372,57 @@ object SagaRunnerSuite extends IOSuite:
       events == List("OrderPlaced", "OrderConfirmed"),
       seen.size == 1,
     )
+  }
+
+  test("a reply tells the saga which of its requests was answered") { fixture =>
+    val id = SagaId.instance(ObservingSaga.name, "o-ref")
+    for
+      _     <- truncate(fixture)
+      _     <- append(fixture, OrderPlaced("o-ref"))
+      _     <- noReplies(fixture).flatMap(_.triggerLoop(ObservingSaga).take(1).compile.drain)
+      acked <- Ref.of[IO, List[IncomingMessage]](Nil)
+      // What SagaHeaders.reply would have put there: the idempotency key of round 0, ordinal 0.
+      answer = reply(
+                 id,
+                 accepted,
+                 sagaName = ObservingSaga.name,
+                 inReplyTo = Some(SagaRequestRef.idempotencyKey(id, 0, 0)),
+               )
+      _        <- runner(fixture, List(answer), acked).replyLoop(ObservingSaga).compile.drain
+      observed <- storedPayloads(fixture, "Unrelated")
+    yield expect(observed == List("""{"what": "0:0"}"""))
+  }
+
+  test("a reply that names no request leaves the saga with nothing to go on") { fixture =>
+    val id = SagaId.instance(ObservingSaga.name, "o-ref")
+    for
+      _        <- truncate(fixture)
+      _        <- append(fixture, OrderPlaced("o-ref"))
+      _        <- noReplies(fixture).flatMap(_.triggerLoop(ObservingSaga).take(1).compile.drain)
+      acked    <- Ref.of[IO, List[IncomingMessage]](Nil)
+      answer    = reply(id, accepted, sagaName = ObservingSaga.name)
+      _        <- runner(fixture, List(answer), acked).replyLoop(ObservingSaga).compile.drain
+      observed <- storedPayloads(fixture, "Unrelated")
+    yield expect(observed == List("""{"what": "none"}"""))
+  }
+
+  test("a request key belonging to another instance is not read as this one's") { fixture =>
+    val id = SagaId.instance(ObservingSaga.name, "o-ref")
+    val other = SagaId.instance(ObservingSaga.name, "someone-else")
+    for
+      _     <- truncate(fixture)
+      _     <- append(fixture, OrderPlaced("o-ref"))
+      _     <- noReplies(fixture).flatMap(_.triggerLoop(ObservingSaga).take(1).compile.drain)
+      acked <- Ref.of[IO, List[IncomingMessage]](Nil)
+      answer = reply(
+                 id,
+                 accepted,
+                 sagaName = ObservingSaga.name,
+                 inReplyTo = Some(SagaRequestRef.idempotencyKey(other, 3, 7)),
+               )
+      _        <- runner(fixture, List(answer), acked).replyLoop(ObservingSaga).compile.drain
+      observed <- storedPayloads(fixture, "Unrelated")
+    yield expect(observed == List("""{"what": "none"}"""))
   }
 
   test("a rejecting reply compensates the instance and appends the compensating event") { fixture =>

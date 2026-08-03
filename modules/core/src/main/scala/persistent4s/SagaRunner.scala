@@ -155,7 +155,7 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
               headers = request.headers ++ Map(
                 SagaHeaders.Name           -> saga.name,
                 SagaHeaders.Id             -> id.toString,
-                SagaHeaders.IdempotencyKey -> s"$id:$step:$ordinal",
+                SagaHeaders.IdempotencyKey -> SagaRequestRef.idempotencyKey(id, step, ordinal),
                 SagaHeaders.ReplyTo        -> replyTopic,
               ),
             ),
@@ -215,7 +215,14 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
   ): F[Unit] =
     (saga.stateCodec.decode(record.data), saga.replyCodec.decode(message.payload)) match
       case (Right(state), Right(reply)) =>
-        applyDecision(saga, record, saga.onReply(contextOf(saga.name, record), state, reply))
+        val envelope = SagaReply(
+          payload = reply,
+          // Absent when the partner hand-rolled its reply instead of using `SagaHeaders.reply`, or echoed a key that is
+          // not one of this instance's. A saga with a single request never needs it; a fan-out does.
+          answering = message.headers.get(SagaHeaders.InReplyTo).flatMap(SagaRequestRef.parse(_, record.id)),
+          headers = message.headers,
+        )
+        applyDecision(saga, record, saga.onReply(contextOf(saga.name, record), state, envelope))
       case (Left(error), _) =>
         Logger[F].error(error)(
           s"saga '${saga.name}' could not decode the stored state of instance ${record.id}; " +
