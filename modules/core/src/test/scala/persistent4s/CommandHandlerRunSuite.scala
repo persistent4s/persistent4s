@@ -42,7 +42,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       filter: EventFilter,
       expectedIndex: Long,
       events: List[PendingEvent[A]]*,
-    ): F[List[A]] =
+    ): F[List[EventEnvelope[A]]] =
       store.modify { currentEvents =>
         val incomingTags = events.flatten.flatMap(_.tags).toSet
         val relevantEvents = currentEvents.filter(env => env.metadata.tags.exists(incomingTags.contains))
@@ -65,13 +65,13 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
               pending.payload,
             )
           }
-          (currentEvents ++ newEvents, Right(events.flatten.map(_.payload).toList))
+          (currentEvents ++ newEvents, Right(newEvents.toList))
       }.flatMap {
         case Left(error)   => Async[F].raiseError(error)
         case Right(result) => Async[F].pure(result)
       }
 
-    override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[A]] =
+    override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[EventEnvelope[A]]] =
       Async[F].pure(List.empty) // not needed for these tests
 
     override def readFrom(
@@ -155,9 +155,13 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     gate: Deferred[IO, Unit],
   ): EventStore[IO, A] =
     new EventStore[IO, A]:
-      def append(filter: EventFilter, expectedIndex: Long, events: List[PendingEvent[A]]*): IO[List[A]] =
+      def append(
+        filter: EventFilter,
+        expectedIndex: Long,
+        events: List[PendingEvent[A]]*,
+      ): IO[List[EventEnvelope[A]]] =
         underlying.append(filter, expectedIndex, events*)
-      def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[A]] =
+      def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[EventEnvelope[A]]] =
         underlying.appendUnchecked(events*)
       def readFrom(
         fromPosition: Long,

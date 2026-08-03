@@ -34,7 +34,7 @@ object LibraryRoutes:
 
     for
       bookRoutes <- SimpleRestJsonBuilder
-                      .routes(BookServiceImpl(module.bookRepository))
+                      .routes(BookServiceImpl(module.bookRepository, module.addBookSyncHandler))
                       .resource
       memberRoutes <- SimpleRestJsonBuilder
                         .routes(MemberServiceImpl(module.memberRepository))
