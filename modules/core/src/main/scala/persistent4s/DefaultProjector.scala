@@ -17,11 +17,11 @@
 package persistent4s
 
 import cats.Applicative
-import cats.effect.Async
-import cats.effect.Deferred
-import cats.effect.Ref
+import cats.effect.{Async, Deferred, Ref}
 import cats.syntax.all.*
+
 import fs2.Stream
+
 import persistent4s.EventStoreNotification.*
 
 /** The default [[Projector]] implementation.
@@ -29,11 +29,14 @@ import persistent4s.EventStoreNotification.*
   * Events are read in chunks of up to `batchSize` and processed sequentially within each chunk. For each chunk, all
   * distinct keys are looked up once via [[Projection.fetchStates]], the events are folded in order, and the resulting
   * states are persisted together with a single checkpoint advance. This amortizes the I/O cost of checkpointing over
-  * many events.
+  * many events. When the projection uses an [[AtomicRepository]], state changes and that checkpoint are one atomic
+  * commit; ordinary repositories retain the at-least-once state-then-checkpoint path.
   *
   * On handler failure mid-batch, the successfully computed states up to the failing event are persisted and the
-  * checkpoint is advanced to the last fully processed position before the error is re-raised. The stream then
-  * terminates; the caller is responsible for restarting it (e.g. via `Stream.retry` or a supervisor).
+  * checkpoint advances to the last fully processed position with `running = false` and the formatted error. The
+  * projector stream stays alive but stops processing events until it receives a resume notification. Unexpected
+  * failures outside this managed handler path, such as notification-stream failure, still terminate the stream and are
+  * observable by a [[ProjectionRuntime]].
   *
   * New events are detected via [[EventNotification]]. Notifications are coalesced: if multiple events arrive while a
   * batch is being processed, only one additional pass is triggered rather than one per notification.
@@ -70,8 +73,8 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
     lastProcessedPosition: Option[Long],
   )
 
-  // TODO How should we handle failure? What do we do if the process dies?
-  // Answer: On failure, push the error in the checkpoint state and wait on the Defer until the dev restart or fix the issue.
+  // Handler failures persist partial progress, pause the checkpoint and keep this stream alive for an explicit resume.
+  // Failures outside the managed work loop intentionally remain stream failures for the supervising runtime to observe.
 
   // TODO Projection can miss some notifications due to connexion issue or restart.
   // A solution would be to store user requests in postgres and keep track of the last processed request in the checkpoint.
@@ -95,9 +98,9 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
                  running = if (error.isEmpty) current.running else false,
                  error = error.map(formatError),
                )
-        _ <- projection.persistStates(statesToPersist)
-        _ <- checkpoint.save(next)
-        _ <- projectionState.set(next)
+        atomicCommit = projection.persistStatesAtomically(statesToPersist, current.globalPosition, next)
+        _           <- atomicCommit.getOrElse(projection.persistStates(statesToPersist) *> checkpoint.save(next))
+        _           <- projectionState.set(next)
       } yield ()
 
     def processEvent(
@@ -245,6 +248,15 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
         _       <- projectionState.set(next)
       } yield ()
 
+    def retryAfterConflict(
+      projectionState: Ref[F, ProjectionCheckpointState],
+      wakeupState: Ref[F, WakeupState],
+    ): F[Unit] =
+      checkpoint
+        .load(projection.name)
+        .map(_.getOrElse(ProjectionCheckpointState(projection.name, -1L, true, None)))
+        .flatMap(projectionState.set) *> markPending(wakeupState)
+
     Stream.eval {
       for {
         maybeState      <- checkpoint.load(projection.name)
@@ -282,7 +294,10 @@ final case class DefaultProjector[F[_]: Async, A <: Event](
               _ <-
                 if processed == passLimit then markPending(wakeupState)
                 else Applicative[F].unit
-            } yield ()).handleErrorWith(pauseWithError(projectionState))
+            } yield ()).handleErrorWith {
+              case _: ProjectionCheckpointConflict => retryAfterConflict(projectionState, wakeupState)
+              case error                           => pauseWithError(projectionState)(error)
+            }
           }
 
       projector.concurrently(notifications)

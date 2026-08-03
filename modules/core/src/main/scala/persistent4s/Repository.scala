@@ -48,6 +48,11 @@ trait Repository[F[_], K, S]:
     */
   def persist(upserts: Map[K, S], deletes: List[K]): F[Unit]
 
+  /** The optional atomic persistence capability used internally by projectors. Ordinary repositories retain the
+    * existing at-least-once state-then-checkpoint behavior.
+    */
+  private[persistent4s] def atomicPersist(commit: ProjectionCommit[K, S]): Option[F[Unit]] = None
+
 object Repository:
 
   /** A no-op repository for projections that keep no state. */

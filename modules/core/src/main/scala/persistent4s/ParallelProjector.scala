@@ -16,13 +16,12 @@
 
 package persistent4s
 
-import cats.Applicative
-import cats.Parallel
-import cats.effect.Async
-import cats.effect.Deferred
-import cats.effect.Ref
+import cats.effect.{Async, Deferred, Ref}
 import cats.syntax.all.*
+import cats.{Applicative, Parallel}
+
 import fs2.Stream
+
 import persistent4s.EventStoreNotification.*
 
 /** A [[Projector]] implementation that processes events for distinct keys in parallel within each batch.
@@ -31,7 +30,8 @@ import persistent4s.EventStoreNotification.*
   * processed concurrently via `Parallel`. If every key succeeds the resulting states and checkpoint are persisted in
   * one shot. If any key fails the batch falls back to the sequential strategy of [[DefaultProjector]]: events are
   * replayed in order and progress is saved up to the last successfully processed position before the error is
-  * re-raised.
+  * re-raised. An [[AtomicRepository]] commits state and checkpoint in one transaction; ordinary repositories retain
+  * at-least-once persistence.
   *
   * The notification, pause/resume, and checkpoint-reset mechanics are identical to [[DefaultProjector]].
   *
@@ -85,9 +85,9 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
                  running = if (error.isEmpty) current.running else false,
                  error = error.map(formatError),
                )
-        _ <- projection.persistStates(statesToPersist)
-        _ <- checkpoint.save(next)
-        _ <- projectionState.set(next)
+        atomicCommit = projection.persistStatesAtomically(statesToPersist, current.globalPosition, next)
+        _           <- atomicCommit.getOrElse(projection.persistStates(statesToPersist) *> checkpoint.save(next))
+        _           <- projectionState.set(next)
       } yield ()
 
     def processEvent(
@@ -253,6 +253,15 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
         _       <- projectionState.set(next)
       } yield ()
 
+    def retryAfterConflict(
+      projectionState: Ref[F, ProjectionCheckpointState],
+      wakeupState: Ref[F, WakeupState],
+    ): F[Unit] =
+      checkpoint
+        .load(projection.name)
+        .map(_.getOrElse(ProjectionCheckpointState(projection.name, -1L, true, None)))
+        .flatMap(projectionState.set) *> markPending(wakeupState)
+
     Stream.eval {
       for {
         maybeState      <- checkpoint.load(projection.name)
@@ -290,7 +299,10 @@ final case class ParallelProjector[F[_]: Async: Parallel, A <: Event](
               _ <-
                 if processed == passLimit then markPending(wakeupState)
                 else Applicative[F].unit
-            } yield ()).handleErrorWith(pauseWithError(projectionState))
+            } yield ()).handleErrorWith {
+              case _: ProjectionCheckpointConflict => retryAfterConflict(projectionState, wakeupState)
+              case error                           => pauseWithError(projectionState)(error)
+            }
           }
 
       projector.concurrently(notifications)
