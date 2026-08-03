@@ -1,0 +1,66 @@
+/*
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package persistent4s
+
+import cats.effect.Async
+import cats.syntax.all.*
+import org.typelevel.otel4s.Attribute
+import org.typelevel.otel4s.metrics.{Histogram, Meter}
+import org.typelevel.otel4s.trace.Tracer
+
+/** Decorates any [[ProjectionCheckpoint]] with otel4s spans and a duration histogram.
+  *
+  * Emits:
+  *   - span `persistent4s.checkpoint.save` per save call
+  *   - span `persistent4s.checkpoint.load` per load call
+  *   - span `persistent4s.checkpoint.load_all` per loadAll call
+  *   - histogram `persistent4s.checkpoint.save.duration` (ms)
+  */
+final class InstrumentedProjectionCheckpoint[F[_]: Async: Tracer] private (
+  inner: ProjectionCheckpoint[F],
+  saveDuration: Histogram[F, Double],
+) extends ProjectionCheckpoint[F]:
+
+  override def load(projectionName: String): F[Option[ProjectionCheckpointState]] =
+    Tracer[F]
+      .spanBuilder("persistent4s.checkpoint.load")
+      .addAttribute(Attribute("projection.name", projectionName))
+      .build
+      .surround(inner.load(projectionName))
+
+  override def save(state: ProjectionCheckpointState): F[Unit] =
+    val projAttr = Attribute("projection.name", state.projectionName)
+    Tracer[F]
+      .spanBuilder("persistent4s.checkpoint.save")
+      .addAttribute(projAttr)
+      .build
+      .surround(
+        Telemetry.timed(saveDuration, projAttr)(inner.save(state)).flatMap(_.fold(Async[F].raiseError, Async[F].pure)),
+      )
+
+  override def loadAll(): F[List[ProjectionCheckpointState]] =
+    Tracer[F].spanBuilder("persistent4s.checkpoint.load_all").build.surround(inner.loadAll())
+
+object InstrumentedProjectionCheckpoint:
+
+  def make[F[_]: Async: Tracer: Meter](inner: ProjectionCheckpoint[F]): F[InstrumentedProjectionCheckpoint[F]] =
+    Meter[F]
+      .histogram[Double]("persistent4s.checkpoint.save.duration")
+      .withDescription("Time to persist a projection checkpoint")
+      .withUnit("ms")
+      .create
+      .map(new InstrumentedProjectionCheckpoint(inner, _))

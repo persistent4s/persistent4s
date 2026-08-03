@@ -20,8 +20,8 @@ import cats.effect.*
 import cats.effect.std.{Console, SecureRandom}
 import cats.syntax.all.*
 import fs2.io.net.Network
-import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Histogram, Meter}
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
 import pureconfig.ConfigSource
@@ -31,6 +31,12 @@ import skunk.codec.all.*
 
 import persistent4s.EventCodec
 import persistent4s.Event
+import persistent4s.EventNotification
+import persistent4s.EventStore
+import persistent4s.InstrumentedEventStore
+import persistent4s.EventStoreNotification
+import persistent4s.ProjectionCheckpoint
+import persistent4s.InstrumentedProjectionCheckpoint
 
 sealed trait PostgresModuleError extends Throwable
 
@@ -80,8 +86,9 @@ object PostgresModule:
 
   /** Holds the fully-initialized PostgreSQL event store and projection checkpoint, sharing the same connection pool. */
   final case class Components[F[_], A <: Event](
-    eventStore: PostgresEventStore[F, A],
-    checkpoint: PostgresProjectionCheckpoint[F],
+    eventStore: EventStore[F, A] & EventNotification[F],
+    checkpoint: ProjectionCheckpoint[F],
+    sendNotification: EventStoreNotification => F[Unit],
   )
 
   private val defaultConfigPath = "persistent4s.postgres"
@@ -108,11 +115,17 @@ object PostgresModule:
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
-      pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger))
+      pool  <- createSessionPool[F](config)
+      _     <- Resource.eval(initializeDatabase[F](pool, logger))
+      raw    = PostgresEventStore[F, A](pool, codec)
+      store <- Resource.eval(
+                 InstrumentedEventStore.makeWithNotification[F, A](raw),
+               )
+      checkpoint <- Resource.eval(InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)))
     yield Components(
-      PostgresEventStore[F, A](pool, codec),
-      PostgresProjectionCheckpoint.make[F](pool),
+      store,
+      checkpoint,
+      raw.notify,
     )
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
@@ -135,11 +148,17 @@ object PostgresModule:
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
-      pool <- createSessionPool[F](config)
-      _    <- Resource.eval(initializeDatabase[F](pool, logger))
+      pool  <- createSessionPool[F](config)
+      _     <- Resource.eval(initializeDatabase[F](pool, logger))
+      raw    = PostgresEventStore(pool, codec)
+      store <- Resource.eval(
+                 InstrumentedEventStore.makeWithNotification[F, A](raw),
+               )
+      checkpoint <- Resource.eval(InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)))
     yield Components(
-      PostgresEventStore[F, A](pool, codec),
-      PostgresProjectionCheckpoint.make[F](pool),
+      store,
+      checkpoint,
+      raw.notify,
     )
 
   private def loadConfig[F[_]: Sync](configPath: String): F[PostgresConfig] =
@@ -156,14 +175,37 @@ object PostgresModule:
   private def createSessionPool[F[_]: Async: Network: Tracer: Meter: Console](
     config: PostgresConfig,
   ): Resource[F, Resource[F, Session[F]]] =
-    Session
-      .Builder[F]
-      .withHost(config.host)
-      .withPort(config.port)
-      .withUserAndPassword(config.user, config.password)
-      .withDatabase(config.database)
-      .pooled(config.maxConnections)
-      .adaptError { case e => PostgresModuleError.ConnectionFailed(e) }
+    for
+      rawPool <- Session
+                   .Builder[F]
+                   .withHost(config.host)
+                   .withPort(config.port)
+                   .withUserAndPassword(config.user, config.password)
+                   .withDatabase(config.database)
+                   .pooled(config.maxConnections)
+                   .adaptError { case e => PostgresModuleError.ConnectionFailed(e) }
+      waitDuration <- Resource.eval(
+                        Meter[F]
+                          .histogram[Double]("persistent4s.postgres.pool.wait_duration")
+                          .withDescription("Time spent waiting to acquire a session from the connection pool")
+                          .withUnit("ms")
+                          .create,
+                      )
+    yield timedPool(rawPool, waitDuration)
+
+  private def timedPool[F[_]: Async](
+    pool: Resource[F, Session[F]],
+    waitDuration: Histogram[F, Double],
+  ): Resource[F, Session[F]] =
+    Resource.suspend(
+      Async[F].monotonic.map { start =>
+        pool.evalMap { session =>
+          Async[F].monotonic.flatMap { end =>
+            waitDuration.record((end - start).toNanos.toDouble / 1e6).as(session)
+          }
+        }
+      },
+    )
 
   private def initializeDatabase[F[_]: Async](
     pool: Resource[F, Session[F]],

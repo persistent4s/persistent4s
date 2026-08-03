@@ -20,12 +20,18 @@ import cats.effect.{IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.Topic
+import org.typelevel.otel4s.metrics.Counter
+import org.typelevel.otel4s.trace.Tracer
 import weaver.SimpleIOSuite
 
 import scala.concurrent.duration.*
 import java.util.UUID
 
 object SyncCommandHandlerSuite extends SimpleIOSuite:
+
+  given Tracer[IO] = Tracer.Implicits.noop
+
+  given CommandHandlerMetrics[IO] = CommandHandlerMetrics(Counter.noop[IO, Long])
 
   // ------------------------------------------------------------
   // Test domain

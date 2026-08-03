@@ -19,17 +19,22 @@ package persistent4s.examples.library.application
 import java.util.UUID
 
 import cats.effect.IO
+import org.typelevel.otel4s.trace.Tracer
 
 import persistent4s.{EventStore, SyncCommandHandler}
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
+import persistent4s.CommandHandlerMetrics
 
 class BookServiceImpl(
   repository: BookRepository[IO],
   syncHandler: SyncCommandHandler[IO, AddBook, AddBookState, LibraryEvent, UUID, BookState],
-)(using EventStore[IO, LibraryEvent])
-    extends BookService[IO]:
+)(using
+  EventStore[IO, LibraryEvent],
+  Tracer[IO],
+  CommandHandlerMetrics[IO],
+) extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
     (for

@@ -19,6 +19,9 @@ package persistent4s
 import scala.concurrent.duration.*
 import fs2.Stream
 import fs2.concurrent.Topic
+import cats.effect.Async
+import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.Meter
 import java.util.UUID
 
 /** A Projector is responsible for running a Projection. It manages the lifecycle of the projection, including loading
@@ -69,10 +72,10 @@ object Projector:
     *   maximum number of events processed in a single batch (default: 100). A larger value reduces checkpoint overhead
     *   but increases memory usage and the reprocessing window after a failure.
     */
-  def apply[F[_], A <: Event](
+  def apply[F[_]: Async: Tracer: Meter, A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: ProjectionCheckpoint[F],
     batchSize: Int = 100,
     publishTimeout: FiniteDuration = 1.second,
-  )(using cats.effect.Async[F]): Projector[F, A] =
+  ): Projector[F, A] =
     DefaultProjector(eventStore, checkpoint, batchSize, publishTimeout = publishTimeout)

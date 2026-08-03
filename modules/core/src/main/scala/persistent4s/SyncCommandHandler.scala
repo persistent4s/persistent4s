@@ -21,6 +21,7 @@ import cats.effect.Concurrent
 import cats.syntax.all.*
 import fs2.Stream
 import fs2.concurrent.Topic
+import org.typelevel.otel4s.trace.Tracer
 import java.util.UUID
 import scala.concurrent.duration.FiniteDuration
 
@@ -61,7 +62,13 @@ final case class SyncCommandHandler[F[_], C, S, E <: Event, K, PS](
     * the projection's own error if any of the events fail to process, or with a timeout error if the projection doesn't
     * catch up in time. The events are appended either way - this only gates the return, it cannot undo the write.
     */
-  def runSync(command: C)(using eventStore: EventStore[F, E])(using F: Temporal[F]): F[Map[K, Option[PS]]] =
+  def runSync(command: C)(using
+    eventStore: EventStore[F, E],
+  )(using
+    F: Temporal[F],
+    tracer: Tracer[F],
+    metrics: CommandHandlerMetrics[F],
+  ): F[Map[K, Option[PS]]] =
 
     def awaitAll(
       stream: Stream[F, (UUID, Either[Throwable, Map[K, Option[PS]]])],
@@ -88,5 +95,11 @@ final case class SyncCommandHandler[F[_], C, S, E <: Event, K, PS](
       yield result
     }
 
-  def run(command: C)(using eventStore: EventStore[F, E])(using F: Concurrent[F]): F[List[EventEnvelope[E]]] =
+  def run(command: C)(using
+    eventStore: EventStore[F, E],
+  )(using
+    F: Concurrent[F],
+    tracer: Tracer[F],
+    metrics: CommandHandlerMetrics[F],
+  ): F[List[EventEnvelope[E]]] =
     handler.run(command)

@@ -19,6 +19,8 @@ package persistent4s
 import cats.effect.{Async, Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
+import org.typelevel.otel4s.metrics.Counter
+import org.typelevel.otel4s.trace.Tracer
 import weaver.SimpleIOSuite
 
 import java.util.UUID
@@ -27,6 +29,10 @@ import persistent4s.CommandHandlerRunSuite.TestEvent.StudentDeleted
 import persistent4s.CommandHandlerRunSuite.CounterEvent.Incremented
 
 object CommandHandlerRunSuite extends SimpleIOSuite:
+
+  given Tracer[IO] = Tracer.Implicits.noop
+
+  given CommandHandlerMetrics[IO] = CommandHandlerMetrics(Counter.noop[IO, Long])
 
   // ---------------------------------------------------------------------------
   // Minimal in-memory EventStore for testing — no testkit dependency needed

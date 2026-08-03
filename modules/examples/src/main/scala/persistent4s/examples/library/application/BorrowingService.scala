@@ -17,7 +17,9 @@
 package persistent4s.examples.library.application
 
 import cats.effect.IO
+import org.typelevel.otel4s.trace.Tracer
 
+import persistent4s.CommandHandlerMetrics
 import persistent4s.EventStore
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
@@ -26,8 +28,11 @@ import persistent4s.examples.library.domain.borrowing.*
 import java.util.UUID
 import smithy4s.time.Timestamp
 
-class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using EventStore[IO, LibraryEvent])
-    extends BorrowingService[IO]:
+class BorrowingServiceImpl(repository: BorrowingRepository[IO])(using
+  EventStore[IO, LibraryEvent],
+  Tracer[IO],
+  CommandHandlerMetrics[IO],
+) extends BorrowingService[IO]:
 
   def borrowBook(bookId: String, memberId: String): IO[Unit] =
     BorrowBookHandler
