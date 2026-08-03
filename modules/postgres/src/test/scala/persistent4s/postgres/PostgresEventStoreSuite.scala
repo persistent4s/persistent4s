@@ -20,8 +20,10 @@ import java.util.UUID
 
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
-import io.circe.{Decoder, Encoder}
+
 import io.circe.syntax.*
+import io.circe.{Decoder, Encoder}
+
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 
@@ -234,6 +236,17 @@ object PostgresEventStoreSuite extends IOSuite:
       result.isRight,
       events.head.payload == TestEvent("after"),
     )
+  }
+
+  test("append rejects an expected index ahead of the scoped revision") { store =>
+    for
+      id     <- freshId("future-index")
+      tag     = Tag("student", id)
+      result <- appendOne(store, 99L, Set(tag), "invalid").attempt
+    yield result match
+      case Left(error: IndexConflictException) =>
+        expect(error.expectedIndex == 99L) and expect(error.actualIndex == 0L)
+      case other => failure(s"Expected IndexConflictException, got $other")
   }
 
   test("append with empty tags uses all tags for conflict detection") { store =>

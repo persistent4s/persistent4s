@@ -184,6 +184,7 @@ object PostgresModule:
 
   private def createSchema[F[_]: Sync](session: Session[F]): F[Unit] =
     session.execute(createTableCommand) *>
+      session.execute(addEventVersionCommand) *>
       session.execute(createEventTypeIndexCommand) *>
       session.execute(createEventTagsTableCommand) *>
       session.execute(createEventTagsSequenceIndexCommand) *>
@@ -203,6 +204,7 @@ object PostgresModule:
         sequence_number BIGSERIAL PRIMARY KEY,
         event_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
         event_type      TEXT        NOT NULL,
+        event_version   INTEGER     NOT NULL DEFAULT 1,
         tags            JSONB       NOT NULL DEFAULT '[]',
         payload         JSONB       NOT NULL DEFAULT '{}',
         is_external     BOOLEAN     NOT NULL,
@@ -210,6 +212,12 @@ object PostgresModule:
 
         CONSTRAINT unique_event_id UNIQUE (event_id)
       )
+    """.command
+
+  private val addEventVersionCommand: Command[Void] =
+    sql"""
+      ALTER TABLE events
+      ADD COLUMN IF NOT EXISTS event_version INTEGER NOT NULL DEFAULT 1
     """.command
 
   private val createEventTagsTableCommand: Command[Void] =
