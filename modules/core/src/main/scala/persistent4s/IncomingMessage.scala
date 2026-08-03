@@ -34,5 +34,8 @@ final case class IncomingMessage(
   headers: Map[String, String] = Map.empty,
 ):
 
-  /** Decode [[payload]] with `codec`. */
-  def as[M](using codec: MessageCodec[M]): Either[Throwable, M] = codec.decode(payload)
+  /** Decode [[payload]] with `decoder`. Only a [[MessageDecoder]] is asked for: reading someone else's message is no
+    * reason to be able to write one, and a service that only consumes a type should not have to supply an encoder for
+    * it. A full [[MessageCodec]] satisfies this too.
+    */
+  def as[M](using decoder: MessageDecoder[M]): Either[Throwable, M] = decoder.decode(payload)

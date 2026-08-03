@@ -27,7 +27,7 @@ import scala.util.Try
   */
 final case class SagaContext(id: UUID, sagaName: String, key: String, step: Int)
 
-/** A command a saga wants to send, still typed. The runner encodes it with [[Saga.requestCodec]] and stamps the
+/** A command a saga wants to send, still typed. The runner encodes it with [[Saga.requestEncoder]] and stamps the
   * [[SagaHeaders]] onto it, so a saga never serializes anything itself — its decision functions are pure and would have
   * nowhere to report an encoding failure.
   *
@@ -262,11 +262,13 @@ trait Saga[A <: Event, S, Req, Rep]:
   /** Decide what to do when a pending instance passes its deadline — normally a compensation. */
   def onTimeout(ctx: SagaContext, state: S): SagaDecision[A, S, Req]
 
-  /** Serializes [[S]]; the runner persists instance state as text. */
+  /** Serializes [[S]]; the runner persists instance state as text and reads it back on every reply and deadline, so
+    * this is the one payload here that genuinely needs both directions.
+    */
   def stateCodec: MessageCodec[S]
 
   /** Encodes the commands this saga sends. */
-  def requestCodec: MessageCodec[Req]
+  def requestEncoder: MessageEncoder[Req]
 
   /** Decodes reply payloads into [[Rep]]. */
-  def replyCodec: MessageCodec[Rep]
+  def replyDecoder: MessageDecoder[Rep]

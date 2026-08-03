@@ -121,9 +121,9 @@ object SagaRunnerSuite extends IOSuite:
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 
-    val requestCodec: MessageCodec[ReserveStock] = CirceMessageCodec.derived[ReserveStock]
+    val requestEncoder: MessageEncoder[ReserveStock] = CirceMessageCodec.derived[ReserveStock]
 
-    val replyCodec: MessageCodec[StockReserved] = CirceMessageCodec.derived[StockReserved]
+    val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
   /** Writes what the runner told it about the reply into the event it appends, so a test can see whether a saga can
     * actually tell which of its requests was answered — the thing a fan-out needs and cannot get from the payload.
@@ -160,9 +160,71 @@ object SagaRunnerSuite extends IOSuite:
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 
-    val requestCodec: MessageCodec[ReserveStock] = CirceMessageCodec.derived[ReserveStock]
+    val requestEncoder: MessageEncoder[ReserveStock] = CirceMessageCodec.derived[ReserveStock]
 
-    val replyCodec: MessageCodec[StockReserved] = CirceMessageCodec.derived[StockReserved]
+    val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
+
+  // ----- a saga that asks two partners at once -----
+
+  sealed trait FanOutRequest
+
+  final case class ReserveStockFor(orderId: String) extends FanOutRequest derives Encoder.AsObject, Decoder
+
+  final case class ChargeFor(orderId: String, cents: Int) extends FanOutRequest derives Encoder.AsObject, Decoder
+
+  private val PaymentTopic = "payment.commands"
+
+  /** Sends one round to two different partners, in two different shapes. */
+  object FanOutSaga extends Saga[TestEvent, OrderState, FanOutRequest, StockReserved]:
+
+    val name = "fan-out"
+
+    val triggers = Set(EventTypeName.of[OrderPlaced])
+
+    def start(event: EventEnvelope[TestEvent]): Option[SagaStart[OrderState, FanOutRequest]] =
+      event.payload match
+        case OrderPlaced(orderId) =>
+          Some(
+            SagaStart(
+              key = orderId,
+              data = OrderState(orderId),
+              request = List(
+                SagaRequest(RequestTopic, Some(orderId), ReserveStockFor(orderId)),
+                SagaRequest(PaymentTopic, Some(orderId), ChargeFor(orderId, 500)),
+              ),
+              timeout = Some(1.hour),
+            ),
+          )
+        case _ => None
+
+    def onReply(
+      ctx: SagaContext,
+      state: OrderState,
+      reply: SagaReply[StockReserved],
+    ): SagaDecision[TestEvent, OrderState, FanOutRequest] = SagaDecision.completed()
+
+    def onTimeout(ctx: SagaContext, state: OrderState): SagaDecision[TestEvent, OrderState, FanOutRequest] =
+      SagaDecision.compensated()
+
+    val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
+
+    private val stockCodec = CirceMessageCodec.derived[ReserveStockFor]
+
+    private val chargeCodec = CirceMessageCodec.derived[ChargeFor]
+
+    /** Dispatches to each leaf's own codec instead of deriving one for the sealed trait, so what goes on the wire is
+      * the shape each partner's own decoder expects rather than circe's `{"ReserveStockFor": {...}}` sum wrapper.
+      *
+      * Note that there is no honest `decode` for this type — an incoming payload could be either leaf and nothing on it
+      * says which. That is exactly why the saga asks for a [[MessageEncoder]] and not a codec: before the split this
+      * had to be a stub that threw.
+      */
+    val requestEncoder: MessageEncoder[FanOutRequest] = new MessageEncoder[FanOutRequest]:
+      def encode(request: FanOutRequest): Either[Throwable, String] = request match
+        case r: ReserveStockFor => stockCodec.encode(r)
+        case c: ChargeFor       => chargeCodec.encode(c)
+
+    val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
   private val eventCodec: EventCodec[TestEvent] = CirceEventCodec.derived[TestEvent]
 
@@ -319,6 +381,25 @@ object SagaRunnerSuite extends IOSuite:
         headers.get(SagaHeaders.ReplyTo) == Some(ReplyTopic),
         headers.get(SagaHeaders.IdempotencyKey) == Some(s"$expected:0:0"),
       )
+  }
+
+  test("one round can ask two partners, each in that partner's own format") { fixture =>
+    for
+      _    <- truncate(fixture)
+      _    <- append(fixture, OrderPlaced("o-fan"))
+      _    <- noReplies(fixture).flatMap(_.triggerLoop(FanOutSaga).take(1).compile.drain)
+      rows <- outboxRows(fixture)
+      id    = SagaId.instance(FanOutSaga.name, "o-fan")
+    yield expect.all(
+      rows.size == 2,
+      rows.map(_._1) == List(RequestTopic, PaymentTopic),
+      // Bare leaves. A partner decoding its own DTO would choke on the `{"ReserveStockFor": {...}}` wrapper that
+      // deriving a codec for the sealed trait would have produced.
+      rows.map(_._3) == List("""{"orderId":"o-fan"}""", """{"orderId":"o-fan","cents":500}"""),
+      // Distinct keys within the one round, so a partner deduplicating on them cannot mistake one request for the other,
+      // and so the ordinal identifies which of the two a reply is answering.
+      rows.flatMap(_._4.get(SagaHeaders.IdempotencyKey)) == List(s"$id:0:0", s"$id:0:1"),
+    )
   }
 
   test("an event the saga declines starts nothing, and the checkpoint still moves past it") { fixture =>

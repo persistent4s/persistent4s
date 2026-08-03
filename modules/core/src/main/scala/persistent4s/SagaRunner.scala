@@ -141,7 +141,7 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
     requests: List[SagaRequest[Req]],
   ): F[List[OutgoingMessage]] =
     requests.zipWithIndex.traverse { case (request, ordinal) =>
-      saga.requestCodec.encode(request.payload) match
+      saga.requestEncoder.encode(request.payload) match
         case Left(error) =>
           Async[F].raiseError(
             new RuntimeException(s"saga '${saga.name}' failed to encode a request: ${error.getMessage}", error),
@@ -213,7 +213,7 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
     record: SagaRecord,
     message: IncomingMessage,
   ): F[Unit] =
-    (saga.stateCodec.decode(record.data), saga.replyCodec.decode(message.payload)) match
+    (saga.stateCodec.decode(record.data), saga.replyDecoder.decode(message.payload)) match
       case (Right(state), Right(reply)) =>
         val envelope = SagaReply(
           payload = reply,
