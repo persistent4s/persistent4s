@@ -16,10 +16,13 @@
 
 package persistent4s
 
+import scala.concurrent.duration.*
 import fs2.Stream
+import fs2.concurrent.Topic
 import cats.effect.Async
 import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.otel4s.metrics.Meter
+import java.util.UUID
 
 /** A Projector is responsible for running a Projection. It manages the lifecycle of the projection, including loading
   * the last checkpoint, subscribing to event notifications, and ensuring that events are processed in the correct
@@ -48,8 +51,14 @@ trait Projector[F[_], A <: Event]:
     *
     * @param projection
     *   the projection to run
+    * @param topic
+    *   an optional topic to publish the projection state after a batch is processed. Used by [[SyncCommandHandler]] to
+    *   wait for the projection to catch up before returning from a command.
     */
-  def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit]
+  def run[K, S](
+    projection: Projection[F, A, K, S],
+    topic: Option[Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])]] = None,
+  ): Stream[F, Unit]
 
 object Projector:
 
@@ -67,5 +76,6 @@ object Projector:
     eventStore: EventStore[F, A] & EventNotification[F],
     checkpoint: ProjectionCheckpoint[F],
     batchSize: Int = 100,
+    publishTimeout: FiniteDuration = 1.second,
   ): Projector[F, A] =
-    DefaultProjector(eventStore, checkpoint, batchSize)
+    DefaultProjector(eventStore, checkpoint, batchSize, publishTimeout = publishTimeout)

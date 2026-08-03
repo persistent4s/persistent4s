@@ -16,6 +16,7 @@
 
 package persistent4s
 
+import scala.concurrent.duration.*
 import cats.Applicative
 import cats.effect.Async
 import cats.effect.Deferred
@@ -26,6 +27,8 @@ import org.typelevel.otel4s.Attribute
 import org.typelevel.otel4s.metrics.{Counter, Histogram, Meter}
 import org.typelevel.otel4s.trace.Tracer
 import persistent4s.EventStoreNotification.*
+import fs2.concurrent.Topic
+import java.util.UUID
 
 /** The default [[Projector]] implementation.
   *
@@ -54,6 +57,7 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
   checkpoint: ProjectionCheckpoint[F],
   batchSize: Int = 100,
   maxBatchPerPass: Int = 10,
+  publishTimeout: FiniteDuration = 1.second,
 ) extends Projector[F, A]:
 
   final private case class Work(
@@ -71,6 +75,7 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
     stateCache: Map[K, Option[S]],
     dirtyKeys: Set[K],
     lastProcessedPosition: Option[Long],
+    processedEvents: List[EventEnvelope[A]] = Nil,
   )
 
   // TODO How should we handle failure? What do we do if the process dies?
@@ -81,7 +86,10 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
   // The projector can then reprocess all events since the last processed request to catch up on missed notifications.
   // Also note that currently, only the last user intent is stored if multiple notifications arrive during a batch processing.
 
-  override def run[K, S](projection: Projection[F, A, K, S]): Stream[F, Unit] = {
+  override def run[K, S](
+    projection: Projection[F, A, K, S],
+    topic: Option[Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])]] = None,
+  ): Stream[F, Unit] = {
 
     Stream
       .eval(makeInstruments)
@@ -106,7 +114,18 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
             _ <- projection.persistStates(statesToPersist)
             _ <- checkpoint.save(next)
             _ <- projectionState.set(next)
+            _ <- publishResults(progress)
           } yield ()
+
+        def publishResults(progress: BatchProgress[K, S]): F[Unit] =
+          topic.traverse_ { t =>
+            progress.processedEvents.traverse_ { event =>
+              val keys = projection.resolveKeys(event)
+              val payload = keys.map(k => k -> progress.stateCache.getOrElse(k, None)).toMap
+              Async[F]
+                .timeoutTo(t.publish1((event.metadata.id, Right(payload))).void, publishTimeout, Applicative[F].unit)
+            }
+          }
 
         def processEvent(
           progress: BatchProgress[K, S],
@@ -125,6 +144,7 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
                 stateCache = stateCacheN,
                 dirtyKeys = progress.dirtyKeys ++ eventKeys,
                 lastProcessedPosition = Some(event.metadata.globalPosition),
+                processedEvents = progress.processedEvents :+ event,
               )
             }
 
@@ -147,7 +167,15 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
                 finalProgress <-
                   batch.foldLeftM(progress0) { (progress, event) =>
                     processEvent(progress, event).handleErrorWith { error =>
-                      persistProgress(progress, projectionState, Some(error)) *> Async[F].raiseError(error)
+                      persistProgress(progress, projectionState, Some(error)) *>
+                        topic.traverse_(t =>
+                          Async[F].timeoutTo(
+                            t.publish1((event.metadata.id, Left(error))).void,
+                            publishTimeout,
+                            Applicative[F].unit,
+                          ),
+                        ) *>
+                        Async[F].raiseError(error)
                     }
                   }
 

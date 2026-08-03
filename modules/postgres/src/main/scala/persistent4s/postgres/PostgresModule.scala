@@ -17,7 +17,7 @@
 package persistent4s.postgres
 
 import cats.effect.*
-import cats.effect.std.Console
+import cats.effect.std.{Console, SecureRandom}
 import cats.syntax.all.*
 import fs2.io.net.Network
 import org.typelevel.otel4s.trace.Tracer
@@ -103,7 +103,7 @@ object PostgresModule:
     *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint, or fails with a clear error
     *   message
     */
-  def make[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
+  def make[F[_]: Async: Network: Tracer: Meter: Console: SecureRandom, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
   ): Resource[F, Components[F, A]] =
@@ -137,7 +137,7 @@ object PostgresModule:
     * @return
     *   a Resource containing the PostgresEventStore and PostgresProjectionCheckpoint
     */
-  def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console, A <: Event](
+  def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console: SecureRandom, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
   ): Resource[F, Components[F, A]] =
@@ -248,6 +248,7 @@ object PostgresModule:
         tags            JSONB       NOT NULL DEFAULT '[]',
         payload         JSONB       NOT NULL DEFAULT '{}',
         is_external     BOOLEAN     NOT NULL,
+        headers         JSONB       NOT NULL DEFAULT '{}',
         recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
 
         CONSTRAINT unique_event_id UNIQUE (event_id)

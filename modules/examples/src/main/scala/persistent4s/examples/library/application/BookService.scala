@@ -21,13 +21,16 @@ import java.util.UUID
 import cats.effect.IO
 import org.typelevel.otel4s.trace.Tracer
 
-import persistent4s.EventStore
+import persistent4s.{EventStore, SyncCommandHandler}
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
 import persistent4s.CommandHandlerMetrics
 
-class BookServiceImpl(repository: BookRepository[IO])(using
+class BookServiceImpl(
+  repository: BookRepository[IO],
+  syncHandler: SyncCommandHandler[IO, AddBook, AddBookState, LibraryEvent, UUID, BookState],
+)(using
   EventStore[IO, LibraryEvent],
   Tracer[IO],
   CommandHandlerMetrics[IO],
@@ -35,9 +38,20 @@ class BookServiceImpl(repository: BookRepository[IO])(using
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
     (for
-      bookId <- IO(UUID.randomUUID())
-      _      <- AddBookHandler.run[IO](AddBook(bookId, title, author, totalCopies))
-    yield AddBookOutput(bookId.toString())).adaptError { case e => ValidationError(e.getMessage) }
+      bookId    <- IO(UUID.randomUUID())
+      states    <- syncHandler.runSync(AddBook(bookId, title, author, totalCopies))
+      bookState <- IO.fromOption(states.get(bookId).flatten)(
+                     new Exception(s"BookProjection produced no state for $bookId"),
+                   )
+    yield AddBookOutput(
+      BookItem(bookState.bookId.toString(), bookState.title, bookState.author, bookState.totalCopies,
+        bookState.availableCopies),
+    )).adaptError {
+      case _: java.util.concurrent.TimeoutException =>
+        ProjectionTimeoutError("The book was created, but its view hasn't caught yet - please retry your read")
+      case e =>
+        ValidationError(e.getMessage)
+    }
 
   def getBooks(): IO[GetBooksOutput] =
     repository.getBooks.map(books =>

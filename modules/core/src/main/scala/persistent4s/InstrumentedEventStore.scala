@@ -23,8 +23,6 @@ import org.typelevel.otel4s.Attribute
 import org.typelevel.otel4s.metrics.{Counter, Histogram, Meter}
 import org.typelevel.otel4s.trace.Tracer
 
-import java.util.UUID
-
 /** Decorates any [[EventStore]] with otel4s spans and metrics.
   *
   * Emits:
@@ -48,8 +46,8 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
   override def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
-    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
-  ): F[List[A]] =
+    events: List[PendingEvent[A]]*,
+  ): F[List[EventEnvelope[A]]] =
     val eventCount = events.flatten.size.toLong
     val spanAttrs = spanAttributes(eventFilter)
     val metricAttrs = metricAttributes(eventFilter)
@@ -70,8 +68,8 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
       )
 
   override def appendUnchecked(
-    events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
-  ): F[List[A]] =
+    events: List[PendingEvent[A]]*,
+  ): F[List[EventEnvelope[A]]] =
     val eventCount = events.flatten.size.toLong
     Tracer[F]
       .spanBuilder("persistent4s.eventstore.append_unchecked")

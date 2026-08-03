@@ -73,8 +73,8 @@ object CommandHandlerSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*,
-    ): IO[List[A]] =
+      evts: List[PendingEvent[A]]*,
+    ): IO[List[EventEnvelope[A]]] =
       ref.modify { current =>
         val relevant = current.filter { env =>
           (eventFilter.tags.isEmpty || env.metadata.tags.exists(eventFilter.tags.contains)) &&
@@ -84,23 +84,24 @@ object CommandHandlerSuite extends SimpleIOSuite:
         if actualIdx != expectedIndex then (current, Left(IndexConflictException(expectedIndex, actualIdx)))
         else
           val last = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-          val newEvt = evts.flatten.zipWithIndex.map { case ((maybeId, tags, et, isExternal, ev), i) =>
+          val newEvt = evts.flatten.zipWithIndex.map { case (pending, i) =>
             EventEnvelope(
               EventMetadata(
                 last + i.toLong + 1L,
-                maybeId.getOrElse(UUID.randomUUID()),
-                tags,
-                et,
-                isExternal,
+                pending.id.getOrElse(UUID.randomUUID()),
+                pending.tags,
+                pending.eventType,
+                pending.isExternal,
                 java.time.Instant.now(),
+                pending.headers,
               ),
-              ev,
+              pending.payload,
             )
           }
-          (current ++ newEvt, Right(evts.flatten.map(_._5).toList))
+          (current ++ newEvt, Right(newEvt.toList))
       }.flatMap(_.fold(IO.raiseError, IO.pure))
 
-    def appendUnchecked(evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, A)]*): IO[List[A]] =
+    def appendUnchecked(evts: List[PendingEvent[A]]*): IO[List[EventEnvelope[A]]] =
       IO.pure(List.empty) // not needed for these tests
 
     def readFrom(
@@ -145,12 +146,12 @@ object CommandHandlerSuite extends SimpleIOSuite:
                         def append(
                           ef: EventFilter,
                           ei: Long,
-                          evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
-                        ): IO[List[TestEvent]] =
+                          evts: List[PendingEvent[TestEvent]]*,
+                        ): IO[List[EventEnvelope[TestEvent]]] =
                           attemptsRef.update(_ + 1) *> IO.raiseError(IndexConflictException(0L, 1L))
                         def appendUnchecked(
-                          evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
-                        ): IO[List[TestEvent]] =
+                          evts: List[PendingEvent[TestEvent]]*,
+                        ): IO[List[EventEnvelope[TestEvent]]] =
                           IO.pure(List.empty)
                         def readFrom(
                           fp: Long,
