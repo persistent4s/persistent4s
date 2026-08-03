@@ -62,28 +62,29 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+      evts: List[PendingEvent[TestEvent]]*,
     ): IO[List[EventEnvelope[TestEvent]]] =
       events.modify { current =>
         val lastPos = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-        val newEvts = evts.flatten.zipWithIndex.map { case ((maybeId, tags, eventType, isExternal, evt), i) =>
+        val newEvts = evts.flatten.zipWithIndex.map { case (pending, i) =>
           EventEnvelope(
             EventMetadata(
               lastPos + i.toLong + 1L,
-              maybeId.getOrElse(UUID.randomUUID()),
-              tags,
-              eventType,
-              isExternal,
+              pending.id.getOrElse(UUID.randomUUID()),
+              pending.tags,
+              pending.eventType,
+              pending.isExternal,
               java.time.Instant.now(),
+              pending.headers,
             ),
-            evt,
+            pending.payload,
           )
         }
         (current ++ newEvts, newEvts)
       }.map(_.toList)
 
     def appendUnchecked(
-      events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+      events: List[PendingEvent[TestEvent]]*,
     ): IO[List[EventEnvelope[TestEvent]]] = IO.pure(List.empty)
 
     def readFrom(
@@ -109,22 +110,23 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     def append(
       eventFilter: EventFilter,
       expectedIndex: Long,
-      evts: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+      evts: List[PendingEvent[TestEvent]]*,
     ): IO[List[EventEnvelope[TestEvent]]] =
       for
         current <- events.get
         lastPos  = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-        newEvts  = evts.flatten.toList.zipWithIndex.map { case ((maybeId, tags, eventType, isExternal, evt), i) =>
+        newEvts  = evts.flatten.toList.zipWithIndex.map { case (pending, i) =>
                     EventEnvelope(
                       EventMetadata(
                         lastPos + i.toLong + 1L,
-                        maybeId.getOrElse(UUID.randomUUID()),
-                        tags,
-                        eventType,
-                        isExternal,
+                        pending.id.getOrElse(UUID.randomUUID()),
+                        pending.tags,
+                        pending.eventType,
+                        pending.isExternal,
                         java.time.Instant.now(),
+                        pending.headers,
                       ),
-                      evt,
+                      pending.payload,
                     )
                   }
         _ <- events.update(_ ++ newEvts)
@@ -136,7 +138,7 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
       yield newEvts
 
     def appendUnchecked(
-      events: List[(Option[UUID], Set[Tag], EventTypeName, Boolean, TestEvent)]*,
+      events: List[PendingEvent[TestEvent]]*,
     ): IO[List[EventEnvelope[TestEvent]]] = IO.pure(List.empty)
 
     def readFrom(
