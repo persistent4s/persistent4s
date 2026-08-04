@@ -20,12 +20,18 @@ import java.util.UUID
 
 import cats.effect.IO
 
-import persistent4s.EventStore
+import org.typelevel.otel4s.trace.Tracer
+
+import persistent4s.{CommandHandlerMetrics, EventStore}
 import persistent4s.examples.courses.catalog.api.*
 import persistent4s.examples.courses.catalog.domain.CatalogEvent
 import persistent4s.examples.courses.catalog.domain.course.*
 
-class CourseServiceImpl(repository: CourseRepository[IO])(using EventStore[IO, CatalogEvent]) extends CourseService[IO]:
+class CourseServiceImpl(repository: CourseRepository[IO])(using
+  EventStore[IO, CatalogEvent],
+  CommandHandlerMetrics[IO],
+  Tracer[IO],
+) extends CourseService[IO]:
 
   def openCourse(code: String, title: String, capacity: Int, instructor: String): IO[OpenCourseOutput] =
     (for

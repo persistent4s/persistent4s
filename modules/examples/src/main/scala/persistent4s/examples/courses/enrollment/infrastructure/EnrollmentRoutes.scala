@@ -22,7 +22,7 @@ import org.http4s.HttpRoutes
 import smithy4s.http4s.SimpleRestJsonBuilder
 import smithy4s.http4s.swagger.docs
 
-import persistent4s.EventStore
+import persistent4s.{CommandHandlerMetrics, EventStore}
 import persistent4s.examples.courses.enrollment.api.*
 import persistent4s.examples.courses.enrollment.application.*
 import persistent4s.examples.courses.enrollment.domain.SchoolEvent
@@ -31,6 +31,8 @@ object EnrollmentRoutes:
 
   def make(module: EnrollmentModule): Resource[IO, HttpRoutes[IO]] =
     given EventStore[IO, SchoolEvent] = module.store
+
+    given CommandHandlerMetrics[IO] = module.commandMetrics
 
     for
       studentRoutes    <- SimpleRestJsonBuilder.routes(StudentServiceImpl(module.studentRepository)).resource

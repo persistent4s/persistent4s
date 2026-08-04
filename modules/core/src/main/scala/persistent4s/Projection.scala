@@ -16,9 +16,10 @@
 
 package persistent4s
 
+import scala.reflect.TypeTest
+
 import cats.Applicative
 import cats.syntax.all.*
-import scala.reflect.TypeTest
 
 /** A Projection defines how to process events from the event store.
   *
@@ -99,9 +100,17 @@ trait Projection[F[_]: Applicative, A <: Event, K, S]:
   final def persistStates(states: Map[K, Option[S]]): F[Unit] =
     val toDelete = states.collect { case (key, None) => key }.toList
     val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
-    val deleteF = if (toDelete.nonEmpty) repository.deleteMany(toDelete) else Applicative[F].unit
-    val upsertF = if (toUpsert.nonEmpty) repository.upsertMany(toUpsert) else Applicative[F].unit
-    deleteF *> upsertF
+    repository.persist(toUpsert, toDelete)
+
+  /** Atomically persist state and checkpoint when the repository supports [[AtomicRepository]]. */
+  final private[persistent4s] def persistStatesAtomically(
+    states: Map[K, Option[S]],
+    expectedPosition: Long,
+    checkpoint: ProjectionCheckpointState,
+  ): Option[F[Unit]] =
+    val toDelete = states.collect { case (key, None) => key }.toList
+    val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
+    repository.atomicPersist(ProjectionCommit(toUpsert, toDelete, expectedPosition, checkpoint))
 
   /** View this projection as one over a wider event type `B >: A`. Events that are not actually `A` are ignored (no
     * key, no state change).

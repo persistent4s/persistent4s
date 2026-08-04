@@ -16,13 +16,16 @@
 
 package persistent4s.monitoring
 
+import scala.concurrent.duration.*
+
 import cats.effect.{Async, Resource}
-import com.comcast.ip4s.*
+
 import fs2.io.net.Network
-import org.http4s.ember.server.EmberServerBuilder
+
 import persistent4s.{EventStoreNotification, ProjectionCheckpoint}
 
-import scala.concurrent.duration.*
+import com.comcast.ip4s.*
+import org.http4s.ember.server.EmberServerBuilder
 
 object MonitoringServer:
 
@@ -39,7 +42,7 @@ object MonitoringServer:
     * @param checkpoint
     *   the Postgres checkpoint store used to load all projection states
     * @param sendNotification
-    *   function to send a control notification (typically `components.eventStore.notify`)
+    *   function to send a control notification (typically `components.sendNotification`)
     * @param port
     *   the port to bind on (default: 9595)
     */
