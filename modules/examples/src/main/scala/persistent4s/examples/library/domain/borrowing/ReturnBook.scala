@@ -16,49 +16,51 @@
 
 package persistent4s.examples.library.domain.borrowing
 
-import persistent4s.{CommandHandler, EventTypeName, Tag}
-import persistent4s.examples.library.domain.*
 import java.time.OffsetDateTime
 import java.util.UUID
+
+import io.circe.{Decoder, Encoder}
+
+import persistent4s.EventSourcedCommandHandler
+import persistent4s.circe.given
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
 final case class ReturnBook(
   bookId: UUID,
   memberId: UUID,
+  returnedAt: OffsetDateTime = OffsetDateTime.now(),
 )
 
-final case class ReturnBookState(
-  hasBorrowing: Boolean,
-  alreadyReturned: Boolean,
-)
+object ReturnBook:
 
-object ReturnBookHandler extends CommandHandler[ReturnBook, ReturnBookState, LibraryEvent]:
+  final case class State(
+    hasBorrowing: Boolean = false,
+    alreadyReturned: Boolean = false,
+  ) derives Encoder,
+        Decoder
 
-  override def eventTypes: Option[Set[EventTypeName]] =
-    Some(Set(EventTypeName.of[BookBorrowed], EventTypeName.of[BookReturned]))
+  enum Error:
 
-  def tags(command: ReturnBook): Set[Tag] =
-    Set(Tag("book", command.bookId), Tag("member", command.memberId))
+    case BorrowingNotFound(bookId: UUID, memberId: UUID)
 
-  def initial: ReturnBookState =
-    ReturnBookState(hasBorrowing = false, alreadyReturned = false)
+    case AlreadyReturned(bookId: UUID, memberId: UUID)
 
-  def evolve(command: ReturnBook, state: ReturnBookState, event: LibraryEvent): ReturnBookState =
-    event match
-      case BookBorrowed(command.bookId, command.memberId, _, _) =>
-        state.copy(hasBorrowing = true, alreadyReturned = false)
-      case BookReturned(command.bookId, command.memberId, _) =>
-        state.copy(alreadyReturned = true)
-      case _ => state
+  object Handler extends EventSourcedCommandHandler[ReturnBook, State, LibraryEvent, Error]:
 
-  def validate(state: ReturnBookState, command: ReturnBook): Either[Throwable, Unit] =
-    if (!state.hasBorrowing) Left(new Exception("Borrowing not found"))
-    else if (state.alreadyReturned) Left(new Exception("Book already returned"))
-    else Right(())
+    override protected val behavior = handler(State()):
+      scope(LibraryScopes.Book)(_.bookId)
+      scope(LibraryScopes.Member)(_.memberId)
+      snapshot("library.return-book")
 
-  def decide(state: ReturnBookState, command: ReturnBook): List[(Set[Tag], LibraryEvent)] =
-    List(
-      (
-        Set(Tag("book", command.bookId), Tag("member", command.memberId)),
-        BookReturned(command.bookId, command.memberId, OffsetDateTime.now()),
-      ),
-    )
+      on[BookBorrowed].withinAll.evolve(state => state.copy(hasBorrowing = true, alreadyReturned = false))
+
+      on[BookReturned].withinAll.evolve(state => state.copy(alreadyReturned = true))
+
+      reject:
+        case (state, command) if !state.hasBorrowing =>
+          Error.BorrowingNotFound(command.bookId, command.memberId)
+        case (state, command) if state.alreadyReturned =>
+          Error.AlreadyReturned(command.bookId, command.memberId)
+
+      emit: command =>
+        BookReturned(command.bookId, command.memberId, command.returnedAt)

@@ -16,9 +16,10 @@
 
 package persistent4s
 
+import scala.reflect.TypeTest
+
 import cats.Applicative
 import cats.syntax.all.*
-import scala.reflect.TypeTest
 
 /** A Projection defines how to process events from the event store.
   *
@@ -33,10 +34,7 @@ import scala.reflect.TypeTest
   */
 trait Projection[F[_]: Applicative, A <: Event, K, S]:
 
-  /** Repository for fetching and persisting projection state. The projector will call `fetchStates` to get the current
-    * state for relevant keys before processing a batch of events, and will call `upsertMany` and `deleteMany` after
-    * processing a batch to save the updated state.
-    */
+  /** Storage backend for this projection's read-model state. */
   protected val repository: Repository[F, K, S]
 
   /** The name of the projection, used for checkpointing.
@@ -92,32 +90,27 @@ trait Projection[F[_]: Applicative, A <: Event, K, S]:
     */
   def handle(state: Option[S], event: EventEnvelope[A]): F[Option[S]]
 
-  /** Fetch the current state for multiple keys. This method will be called before processing a batch of events to get
-    * the current state for all relevant keys.
-    *
-    * @param keys
-    *   the keys for which to fetch the state
-    * @return
-    *   a map of keys to their corresponding state, or `None` if no state exists for a key
-    */
+  /** Provided by the framework. Fetches current state for the given keys via [[repository]]. */
   final def fetchStates(keys: List[K]): F[Map[K, Option[S]]] =
     repository.findMany(keys)
 
-  /** Persist the current state for a given key. This method will be called after processing an event to save the
-    * updated state. The implementation can choose how to store the state, such as using a database or an in-memory
-    * cache. Passing None indicates that the state should be removed for that key.
-    *
-    * @param states
-    *   a map of keys to their corresponding state, or `None` if the state should be deleted for a key
-    * @return
-    *   a F[Unit] that completes when the state has been persisted
+  /** Provided by the framework. Persists a batch of state updates via [[repository]]: `None` values trigger deletion,
+    * `Some` values trigger upsert.
     */
   final def persistStates(states: Map[K, Option[S]]): F[Unit] =
     val toDelete = states.collect { case (key, None) => key }.toList
     val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
-    val deleteF = if (toDelete.nonEmpty) repository.deleteMany(toDelete) else Applicative[F].unit
-    val upsertF = if (toUpsert.nonEmpty) repository.upsertMany(toUpsert) else Applicative[F].unit
-    deleteF *> upsertF
+    repository.persist(toUpsert, toDelete)
+
+  /** Atomically persist state and checkpoint when the repository supports [[AtomicRepository]]. */
+  final private[persistent4s] def persistStatesAtomically(
+    states: Map[K, Option[S]],
+    expectedPosition: Long,
+    checkpoint: ProjectionCheckpointState,
+  ): Option[F[Unit]] =
+    val toDelete = states.collect { case (key, None) => key }.toList
+    val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
+    repository.atomicPersist(ProjectionCommit(toUpsert, toDelete, expectedPosition, checkpoint))
 
   /** View this projection as one over a wider event type `B >: A`. Events that are not actually `A` are ignored (no
     * key, no state change).

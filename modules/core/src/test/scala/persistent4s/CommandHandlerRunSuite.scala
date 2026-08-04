@@ -19,6 +19,8 @@ package persistent4s
 import cats.effect.{Async, Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
+import org.typelevel.otel4s.metrics.Counter
+import org.typelevel.otel4s.trace.Tracer
 import weaver.SimpleIOSuite
 
 import java.util.UUID
@@ -27,6 +29,10 @@ import persistent4s.CommandHandlerRunSuite.TestEvent.StudentDeleted
 import persistent4s.CommandHandlerRunSuite.CounterEvent.Incremented
 
 object CommandHandlerRunSuite extends SimpleIOSuite:
+
+  given Tracer[IO] = Tracer.Implicits.noop
+
+  given CommandHandlerMetrics[IO] = CommandHandlerMetrics(Counter.noop[IO, Long])
 
   // ---------------------------------------------------------------------------
   // Minimal in-memory EventStore for testing — no testkit dependency needed
@@ -42,7 +48,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       filter: EventFilter,
       expectedIndex: Long,
       events: List[PendingEvent[A]]*,
-    ): F[List[A]] =
+    ): F[List[EventEnvelope[A]]] =
       store.modify { currentEvents =>
         val incomingTags = events.flatten.flatMap(_.tags).toSet
         val relevantEvents = currentEvents.filter(env => env.metadata.tags.exists(incomingTags.contains))
@@ -65,14 +71,18 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
               pending.payload,
             )
           }
-          (currentEvents ++ newEvents, Right(events.flatten.map(_.payload).toList))
+          (currentEvents ++ newEvents, Right(newEvents.toList))
       }.flatMap {
         case Left(error)   => Async[F].raiseError(error)
         case Right(result) => Async[F].pure(result)
       }
 
-    override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[A]] =
+    override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[EventEnvelope[A]]] =
       Async[F].pure(List.empty) // not needed for these tests
+
+    def currentRevision(eventFilter: EventFilter): F[Long] =
+      readFrom(0L, eventFilter, None).compile.toList
+        .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
     override def readFrom(
       fromPosition: Long,
@@ -155,10 +165,18 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     gate: Deferred[IO, Unit],
   ): EventStore[IO, A] =
     new EventStore[IO, A]:
-      def append(filter: EventFilter, expectedIndex: Long, events: List[PendingEvent[A]]*): IO[List[A]] =
+      def append(
+        filter: EventFilter,
+        expectedIndex: Long,
+        events: List[PendingEvent[A]]*,
+      ): IO[List[EventEnvelope[A]]] =
         underlying.append(filter, expectedIndex, events*)
-      def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[A]] =
+      def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[EventEnvelope[A]]] =
         underlying.appendUnchecked(events*)
+      def currentRevision(eventFilter: EventFilter): IO[Long] =
+        readFrom(0L, eventFilter, None).compile.toList
+          .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
       def readFrom(
         fromPosition: Long,
         eventFilter: EventFilter,
