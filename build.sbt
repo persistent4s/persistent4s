@@ -86,11 +86,11 @@ lazy val core = (project in file("modules/core"))
   .settings(
     name                 := "persistent4s-core",
     libraryDependencies ++= List(
-      "org.typelevel" %% "cats-effect"    % CatsEffectV,
-      "co.fs2"        %% "fs2-core"       % Fs2V,
-      "org.typelevel" %% "log4cats-slf4j" % Log4CatsV,
-      "org.typelevel" %% "otel4s-core"    % Otel4sV,
-      "org.typelevel" %% "weaver-cats"    % WeaverV % Test,
+      "org.typelevel" %% "cats-effect"   % CatsEffectV,
+      "co.fs2"        %% "fs2-core"      % Fs2V,
+      "org.typelevel" %% "log4cats-core" % Log4CatsV,
+      "org.typelevel" %% "otel4s-core"   % Otel4sV,
+      "org.typelevel" %% "weaver-cats"   % WeaverV % Test,
     ),
   )
 
@@ -102,10 +102,12 @@ lazy val postgres = (project in file("modules/postgres"))
       "org.tpolecat"          %% "skunk-core"      % SkunkV,
       "org.tpolecat"          %% "skunk-circe"     % SkunkV,
       "org.typelevel"         %% "otel4s-core"     % Otel4sV,
+      "org.typelevel"         %% "log4cats-core"   % Log4CatsV,
       "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
       "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
       "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
       "org.testcontainers"     % "postgresql"      % TestcontainersV % Test,
+      "org.typelevel"         %% "log4cats-noop"   % Log4CatsV       % Test,
     ),
   )
 
@@ -122,14 +124,17 @@ lazy val circe = (project in file("modules/circe"))
   )
 
 lazy val kafka = (project in file("modules/kafka"))
-  .dependsOn(core)
+  .dependsOn(core, circe % Test)
   .settings(
     name                 := "persistent4s-kafka",
     libraryDependencies ++= List(
-      "org.typelevel"     %% "fs2-kafka"       % Fs2KafkaV,
-      "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
-      "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
-      "org.testcontainers" % "kafka"           % TestcontainersV % Test,
+      "org.typelevel"     %% "fs2-kafka"           % Fs2KafkaV,
+      "io.circe"          %% "circe-core"          % CirceV,
+      "io.circe"          %% "circe-parser"        % CirceV,
+      "org.typelevel"     %% "weaver-cats"         % WeaverV         % Test,
+      "org.typelevel"     %% "cats-effect-testkit" % CatsEffectV     % Test,
+      "ch.qos.logback"     % "logback-classic"     % LogbackV        % Test,
+      "org.testcontainers" % "kafka"               % TestcontainersV % Test,
     ),
   )
 
@@ -155,10 +160,11 @@ lazy val tests = (project in file("modules/tests"))
   )
 
 lazy val examples = (project in file("modules/examples"))
-  .dependsOn(core, testkit, postgres, circe, monitoring)
+  .dependsOn(core, testkit, postgres, circe, kafka, monitoring)
   .enablePlugins(NoPublishPlugin, Smithy4sCodegenPlugin)
   .settings(
     name                 := "persistent4s-examples",
+    fork                 := true,
     libraryDependencies ++= List(
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s"         % Smithy4sV,
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s-swagger" % Smithy4sV,
@@ -179,6 +185,7 @@ lazy val monitoring = (project in file("modules/monitoring"))
       "org.testcontainers" % "postgresql"          % TestcontainersV % Test,
       "org.http4s"        %% "http4s-ember-client" % Http4sV         % Test,
       "org.typelevel"     %% "otel4s-core"         % Otel4sV,
+      "org.typelevel"     %% "log4cats-noop"       % Log4CatsV       % Test,
     ),
   )
 

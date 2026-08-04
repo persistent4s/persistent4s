@@ -16,13 +16,16 @@
 
 package persistent4s.postgres
 
+import cats.MonadThrow
 import cats.effect.*
 import cats.syntax.all.*
-import skunk.*
-import skunk.implicits.*
-import skunk.codec.all.*
+import org.typelevel.log4cats.Logger
 
-import persistent4s.{ProjectionCheckpoint, ProjectionCheckpointState}
+import persistent4s.{ProjectionCheckpoint, ProjectionCheckpointConflict, ProjectionCheckpointState}
+
+import skunk.*
+import skunk.codec.all.*
+import skunk.implicits.*
 
 /** A PostgreSQL-backed implementation of ProjectionCheckpoint. Checkpoints are stored in a `projection_checkpoints`
   * table, keyed by projection name. This survives application restarts, allowing projectors to resume from where they
@@ -31,7 +34,7 @@ import persistent4s.{ProjectionCheckpoint, ProjectionCheckpointState}
   * @param pool
   *   a resource for obtaining database sessions
   */
-final class PostgresProjectionCheckpoint[F[_]: Async] private (
+final class PostgresProjectionCheckpoint[F[_]: Async: Logger] private (
   pool: Resource[F, Session[F]],
 ) extends ProjectionCheckpoint[F]:
 
@@ -47,6 +50,11 @@ final class PostgresProjectionCheckpoint[F[_]: Async] private (
           state.projectionName *: state.globalPosition *: state.running *: state.error *: EmptyTuple,
         ),
       )
+      .handleErrorWith { error =>
+        Logger[F].error(error)(
+          s"Failed to save checkpoint for projection ${state.projectionName} at position ${state.globalPosition}",
+        ) *> Async[F].raiseError(error)
+      }
       .void
 
   /** Load all checkpoints stored in the database.
@@ -61,6 +69,35 @@ final class PostgresProjectionCheckpoint[F[_]: Async] private (
     pool.use(_.execute(loadAllQuery))
 
 object PostgresProjectionCheckpoint:
+
+  private[postgres] def compareAndSet[F[_]: MonadThrow](
+    session: Session[F],
+    expectedPosition: Long,
+    state: ProjectionCheckpointState,
+  ): F[Unit] =
+    val update =
+      if expectedPosition == -1L then
+        session.option(insertInitialQuery)(
+          state.projectionName *:
+            state.globalPosition *:
+            state.running *:
+            state.error *:
+            EmptyTuple,
+        )
+      else
+        session.option(updateIfCurrentQuery)(
+          state.globalPosition *:
+            state.running *:
+            state.error *:
+            state.projectionName *:
+            expectedPosition *:
+            EmptyTuple,
+        )
+
+    update.flatMap {
+      case Some(_) => ().pure[F]
+      case None    => ProjectionCheckpointConflict(state.projectionName, expectedPosition).raiseError[F, Unit]
+    }
 
   private val loadQuery: Query[String, ProjectionCheckpointState] =
     sql"""
@@ -86,6 +123,30 @@ object PostgresProjectionCheckpoint:
         error = EXCLUDED.error
     """.command
 
+  private val insertInitialQuery: Query[String *: Long *: Boolean *: Option[String] *: EmptyTuple, Long] =
+    sql"""
+      INSERT INTO projection_checkpoints (projection_name, global_position, running, error)
+      VALUES ($text, $int8, $bool, ${text.opt})
+      ON CONFLICT (projection_name) DO UPDATE SET
+        global_position = EXCLUDED.global_position,
+        running = EXCLUDED.running,
+        error = EXCLUDED.error
+      WHERE projection_checkpoints.global_position = -1
+      RETURNING global_position
+    """.query(int8)
+
+  private val updateIfCurrentQuery: Query[Long *: Boolean *: Option[String] *: String *: Long *: EmptyTuple, Long] =
+    sql"""
+      UPDATE projection_checkpoints
+      SET
+        global_position = $int8,
+        running = $bool,
+        error = ${text.opt}
+      WHERE projection_name = $text
+        AND global_position = $int8
+      RETURNING global_position
+    """.query(int8)
+
   val createTableCommand: Command[Void] =
     sql"""
       CREATE TABLE IF NOT EXISTS projection_checkpoints (
@@ -96,5 +157,5 @@ object PostgresProjectionCheckpoint:
       )
     """.command
 
-  def make[F[_]: Async](pool: Resource[F, Session[F]]): PostgresProjectionCheckpoint[F] =
+  def make[F[_]: Async: Logger](pool: Resource[F, Session[F]]): PostgresProjectionCheckpoint[F] =
     new PostgresProjectionCheckpoint(pool)

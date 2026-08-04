@@ -14,11 +14,15 @@
  * limitations under the License.
  */
 
-package persistent4s.kafka
+package persistent4s.examples.library.domain
 
-import fs2.Stream
-import persistent4s.{Event, EventEnvelope}
+import java.util.UUID
 
-trait EventSubscriber[F[_], A <: Event]:
+import persistent4s.Scope
 
-  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, EventEnvelope[A]]
+/** Stable histories and consistency boundaries used by the library domain. */
+object LibraryScopes:
+
+  val Book: Scope[UUID] = Scope[UUID]("book")
+
+  val Member: Scope[UUID] = Scope[UUID]("member")
