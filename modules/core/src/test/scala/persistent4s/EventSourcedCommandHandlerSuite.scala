@@ -1,0 +1,691 @@
+/*
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package persistent4s
+
+import java.time.Instant
+import java.util.UUID
+
+import scala.util.Try
+
+import cats.effect.{Concurrent, IO}
+
+import fs2.Stream
+
+import weaver.SimpleIOSuite
+
+object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
+
+  final case class TestCommand(id: String, blocked: Boolean = false)
+
+  final case class TestState(exists: Boolean, value: Int)
+
+  enum TestRejection:
+
+    case Missing, Blocked
+
+  sealed trait TestEvent extends Event
+
+  final case class Created(id: String, value: Int) extends TestEvent
+
+  final case class Incremented(id: String, amount: Int) extends TestEvent
+
+  final case class Observed(id: String) extends TestEvent
+
+  final case class Ignored(id: String) extends TestEvent
+
+  final case class LegacyObserved(id: String) extends TestEvent
+
+  final case class CrossScoped(id: String, ownerId: String) extends TestEvent
+
+  final case class MultiScoped(ids: List[String]) extends TestEvent
+
+  private object Expected:
+
+    final case class Same(id: String) extends TestEvent
+
+  private object Actual:
+
+    final case class Same(id: String) extends TestEvent
+
+  private val EntityScope = Scope[String]("test.entity")
+
+  private val OwnerScope = Scope[String]("test.owner")
+
+  private given createdSchema: EventSchema[Created] =
+    EventSchema[Created]("test.created").scopedBy(EntityScope)(_.id)
+
+  private given incrementedSchema: EventSchema[Incremented] =
+    EventSchema[Incremented]("test.incremented").scopedBy(EntityScope)(_.id)
+
+  private given observedSchema: EventSchema[Observed] =
+    EventSchema[Observed]("test.observed").scopedBy(EntityScope)(_.id)
+
+  private given ignoredSchema: EventSchema[Ignored] =
+    EventSchema[Ignored]("test.ignored").scopedBy(EntityScope)(_.id)
+
+  private given legacyObservedSchema: EventSchema[LegacyObserved] =
+    EventSchema[LegacyObserved]("test.legacy-observed")
+
+  private given crossScopedSchema: EventSchema[CrossScoped] =
+    EventSchema[CrossScoped]("test.cross-scoped")
+      .scopedBy(EntityScope)(_.id)
+      .scopedBy(OwnerScope)(_.ownerId)
+
+  private given multiScopedSchema: EventSchema[MultiScoped] =
+    EventSchema[MultiScoped]("test.multi-scoped").scopedByMany(EntityScope)(_.ids)
+
+  private given expectedSameSchema: EventSchema[Expected.Same] =
+    EventSchema[Expected.Same]("test.expected-same")
+
+  private given testStateSnapshotCodec: SnapshotCodec[TestState] with
+
+    def encode(state: TestState): String =
+      s"${state.exists}:${state.value}"
+
+    def decode(payload: String): Either[Throwable, TestState] =
+      payload.split(":", 2) match
+        case Array(exists, value) =>
+          Try(TestState(exists.toBoolean, value.toInt)).toEither
+        case _ =>
+          Left(new IllegalArgumentException(s"Invalid test snapshot: $payload"))
+
+  private val missing = TestRejection.Missing
+
+  private val blocked = TestRejection.Blocked
+
+  private val snapshotId = SnapshotId("test-command")
+
+  private val subject = new EventSourcedCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
+
+    protected val behavior = handler(TestState(exists = false, value = 0)):
+      scope(EntityScope)(_.id)
+
+      on[Created]
+        .matching(_.id, _.id)
+        .evolve((state, event) => state.copy(exists = true, value = event.value))
+
+      on[Incremented]
+        .within(EntityScope)
+        .evolve((state, event) => state.copy(value = state.value + event.amount))
+
+      on[Observed].within(EntityScope).ignore
+
+      reject:
+        case (state, _) if !state.exists     => missing
+        case (_, command) if command.blocked => blocked
+
+      snapshot(snapshotId, every = 2)
+
+      emit((state, command) => Incremented(command.id, state.value + 1))
+
+  private def envelope[E <: TestEvent: EventSchema](
+    position: Long,
+    payload: E,
+    tags: Set[Tag],
+  ): EventEnvelope[TestEvent] =
+    EventEnvelope(
+      EventMetadata(
+        position,
+        UUID.randomUUID(),
+        tags,
+        summon[EventSchema[E]].eventType,
+        isExternal = false,
+        Instant.now(),
+        Map.empty,
+        summon[EventSchema[E]].version,
+      ),
+      payload,
+    )
+
+  private def envelopeAs(
+    position: Long,
+    payload: TestEvent,
+    tags: Set[Tag],
+    eventType: EventTypeName,
+  ): EventEnvelope[TestEvent] =
+    EventEnvelope(
+      EventMetadata(position, UUID.randomUUID(), tags, eventType, isExternal = false, Instant.now(), Map.empty),
+      payload,
+    )
+
+  final private class RecordingStore(
+    history: List[EventEnvelope[TestEvent]],
+    readFailure: Option[Throwable] = None,
+    schema: TestEvent => Option[EventStorageSchema] = _ => None,
+  ) extends EventStore[IO, TestEvent]:
+
+    var readFromPosition: Option[Long] = None
+
+    var readFilter: Option[EventFilter] = None
+
+    var readCount: Int = 0
+
+    var appended: Option[(EventFilter, Long, List[PendingEvent[TestEvent]])] = None
+
+    private def matches(event: EventEnvelope[TestEvent], filter: EventFilter): Boolean =
+      val eventTypeMatches = filter.eventTypes.isEmpty || filter.eventTypes.contains(event.metadata.eventType)
+      val tagMatches = filter.tags.isEmpty || event.metadata.tags.exists(filter.tags.contains)
+      eventTypeMatches && tagMatches
+
+    def currentRevision(eventFilter: EventFilter): IO[Long] =
+      IO.pure(history.filter(matches(_, eventFilter)).lastOption.fold(0L)(_.metadata.globalPosition))
+
+    override def storageSchema(event: TestEvent): Option[EventStorageSchema] =
+      schema(event)
+
+    def readFrom(
+      fromPosition: Long,
+      eventFilter: EventFilter,
+      maxEvents: Option[Int],
+    ): Stream[IO, EventEnvelope[TestEvent]] =
+      readCount += 1
+      readFromPosition = Some(fromPosition)
+      readFilter = Some(eventFilter)
+      readFailure.fold(Stream.emits(history).covary[IO])(Stream.raiseError[IO])
+
+    def append(
+      eventFilter: EventFilter,
+      expectedIndex: Long,
+      events: List[PendingEvent[TestEvent]]*,
+    ): IO[List[EventEnvelope[TestEvent]]] =
+      val flattened = events.toList.flatten
+      appended = Some((eventFilter, expectedIndex, flattened))
+      IO.pure(flattened.map(envelopeFor))
+
+    def appendUnchecked(
+      events: List[PendingEvent[TestEvent]]*,
+    ): IO[List[EventEnvelope[TestEvent]]] =
+      IO.pure(events.toList.flatten.map(envelopeFor))
+
+    private def envelopeFor(pending: PendingEvent[TestEvent]): EventEnvelope[TestEvent] =
+      EventEnvelope(
+        EventMetadata(
+          history.lastOption.fold(0L)(_.metadata.globalPosition) + 1L,
+          pending.id.getOrElse(UUID.randomUUID()),
+          pending.tags,
+          pending.eventType,
+          pending.isExternal,
+          Instant.now(),
+          pending.headers,
+        ),
+        pending.payload,
+      )
+
+  final private class RecordingSnapshotStore(initial: Option[StoredCommandSnapshot]) extends CommandSnapshotStore[IO]:
+
+    var current: Option[StoredCommandSnapshot] = initial
+
+    var loaded: Option[(SnapshotId, String, Int)] = None
+
+    var saved: Option[(SnapshotId, String, Int, StoredCommandSnapshot)] = None
+
+    var deleted: Option[(SnapshotId, String, Int)] = None
+
+    def load(snapshotId: SnapshotId, key: String, version: Int): IO[Option[StoredCommandSnapshot]] =
+      loaded = Some((snapshotId, key, version))
+      IO.pure(current)
+
+    def save(snapshotId: SnapshotId, key: String, version: Int, snapshot: StoredCommandSnapshot): IO[Unit] =
+      saved = Some((snapshotId, key, version, snapshot))
+      current = Some(snapshot)
+      IO.unit
+
+    def delete(snapshotId: SnapshotId, key: String, version: Int): IO[Unit] =
+      deleted = Some((snapshotId, key, version))
+      current = None
+      IO.unit
+
+  final private class FailingSnapshotStore(error: Throwable) extends CommandSnapshotStore[IO]:
+
+    def load(snapshotId: SnapshotId, key: String, version: Int): IO[Option[StoredCommandSnapshot]] =
+      IO.raiseError(error)
+
+    def save(snapshotId: SnapshotId, key: String, version: Int, snapshot: StoredCommandSnapshot): IO[Unit] =
+      IO.raiseError(error)
+
+    def delete(snapshotId: SnapshotId, key: String, version: Int): IO[Unit] =
+      IO.raiseError(error)
+
+  pureTest("event types are derived from typed state transitions and stable schemas") {
+    expect(
+      subject.eventTypes == Set(
+        createdSchema.eventType,
+        incrementedSchema.eventType,
+        observedSchema.eventType,
+      ),
+    ) and expect(!subject.eventTypes.contains(ignoredSchema.eventType))
+  }
+
+  pureTest("matching and within transitions evolve only the command's scoped state") {
+    val command = TestCommand("target")
+    val initial = subject.initial
+    val otherCreated = subject.evolve(command, initial, Created("other", 10))
+    val created = subject.evolve(command, otherCreated, Created("target", 10))
+    val otherIncrement = subject.evolve(command, created, Incremented("other", 2))
+    val updated = subject.evolve(command, otherIncrement, Incremented("target", 2))
+    val observed = subject.evolve(command, updated, Observed("target"))
+    val ignored = subject.evolve(command, observed, Ignored("target"))
+
+    expect(subject.scopes(command) == Set(EntityScope("target"))) and
+      expect(subject.tags(command) == Set(EntityScope("target").toTag)) and
+      expect(otherCreated == initial) and
+      expect(created == TestState(exists = true, value = 10)) and
+      expect(otherIncrement == created) and
+      expect(updated == TestState(exists = true, value = 12)) and
+      expect(observed == updated) and
+      expect(ignored == updated)
+  }
+
+  pureTest("a single shared typed scope is inferred for a bare on handler") {
+    val inferredHandler = new EventSourcedCommandHandler[TestCommand, Int, TestEvent, Unit]:
+      protected val behavior = handler(0):
+        scope(EntityScope)(_.id)
+        on[Created].evolve((state, event) => state + event.value)
+        emit(command => Created(command.id, 1))
+
+    val command = TestCommand("target")
+    expect(inferredHandler.evolve(command, 0, Created("target", 2)) == 2) and
+      expect(inferredHandler.evolve(command, 0, Created("other", 2)) == 0)
+  }
+
+  pureTest("a typed event with no shared command scope requires allEvents") {
+    val missingIntent = Try {
+      new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        protected val behavior = handler(()):
+          scope(EntityScope)(_.id)
+          on[LegacyObserved].ignore
+          emit(command => LegacyObserved(command.id))
+    }
+
+    val explicitHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        scope(EntityScope)(_.id)
+        on[LegacyObserved].allEvents.ignore
+        emit(command => LegacyObserved(command.id))
+
+    expect(missingIntent.failed.toOption.exists(_.getMessage.contains("shares no typed scope"))) and
+      expect(explicitHandler.eventTypes == Set(legacyObservedSchema.eventType))
+  }
+
+  pureTest("an event sharing several command scopes requires explicit matching intent") {
+    val ambiguous = Try {
+      new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        protected val behavior = handler(()):
+          scope(EntityScope)(_.id)
+          scope(OwnerScope)(_.id)
+          on[CrossScoped].ignore
+          emit(command => CrossScoped(command.id, command.id))
+    }
+
+    expect(ambiguous.failed.toOption.exists(_.getMessage.contains("shares multiple command scopes"))) and
+      expect(ambiguous.failed.toOption.exists(_.getMessage.contains("withinAll")))
+  }
+
+  pureTest("withinAll requires every shared scope key to match") {
+    final case class CrossCommand(id: String, ownerId: String)
+
+    val withinAllHandler = new EventSourcedCommandHandler[CrossCommand, Int, TestEvent, Unit]:
+      protected val behavior = handler(0):
+        scope(EntityScope)(_.id)
+        scope(OwnerScope)(_.ownerId)
+        on[CrossScoped].withinAll.evolve(_ + 1)
+        emit(command => CrossScoped(command.id, command.ownerId))
+
+    val command = CrossCommand("entity-a", "owner-a")
+    expect(withinAllHandler.evolve(command, 0, CrossScoped("entity-a", "owner-a")) == 1) and
+      expect(withinAllHandler.evolve(command, 0, CrossScoped("other", "owner-a")) == 0) and
+      expect(withinAllHandler.evolve(command, 0, CrossScoped("entity-a", "other")) == 0)
+  }
+
+  pureTest("the first matching typed rejection wins") {
+    expect(subject.validate(subject.initial, TestCommand("a", blocked = true)) == Left(missing)) and
+      expect(
+        subject.validate(TestState(exists = true, value = 1), TestCommand("a", blocked = true)) == Left(blocked),
+      ) and
+      expect(subject.validate(TestState(exists = true, value = 1), TestCommand("a")) == Right(()))
+  }
+
+  pureTest("emitted events inherit their declared event scopes") {
+    val command = TestCommand("a")
+    val tags = Set(EntityScope("a").toTag)
+    expect(
+      subject.decide(TestState(exists = true, value = 2), command) ==
+        List(tags -> Incremented("a", 3)),
+    )
+  }
+
+  pureTest("scopeMany acquires and emits several keys from the same durable scope") {
+    final case class MultiCommand(ids: List[String])
+
+    val multiHandler = new EventSourcedCommandHandler[MultiCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        scopeMany(EntityScope)(_.ids)
+        on[MultiScoped].within(EntityScope).ignore
+        emit(command => MultiScoped(command.ids))
+
+    val command = MultiCommand(List("a", "b", "a"))
+    val expectedScopes = Set(EntityScope("a"), EntityScope("b"))
+
+    expect(multiHandler.scopes(command) == expectedScopes) and
+      expect(multiHandler.decide((), command) == List(expectedScopes.map(_.toTag) -> MultiScoped(command.ids)))
+  }
+
+  test("run uses the scope filter, last position, stable schema, and returns accepted events") {
+    val commandTags = Set(EntityScope("a").toTag)
+    val store = new RecordingStore(List(envelope(7L, Created("a", 2), commandTags)))
+    val runtime = CommandRuntime.eventStoreOnly(store)
+
+    subject.run[IO](TestCommand("a"))(using summon[Concurrent[IO]], runtime).map { result =>
+      val expectedFilter = EventFilter(Set.empty, commandTags)
+      val expectedEvent = Incremented("a", 3)
+
+      expect(result.map(_.map(_.payload)) == Right(List(expectedEvent))) and
+        expect(store.readFromPosition.contains(0L)) and
+        expect(store.readFilter.contains(expectedFilter)) and
+        expect(
+          store.appended.contains(
+            (
+              expectedFilter,
+              7L,
+              List(
+                PendingEvent(expectedEvent, commandTags, incrementedSchema.eventType, isExternal = false),
+              ),
+            ),
+          ),
+        )
+    }
+  }
+
+  test("CommandRuntime executes handlers without repeating the effect type and can discard accepted events") {
+    val tags = Set(EntityScope("a").toTag)
+    val acceptedRuntime = CommandRuntime.eventStoreOnly(
+      new RecordingStore(List(envelope(1L, Created("a", 2), tags))),
+    )
+    val rejectedRuntime = CommandRuntime.eventStoreOnly(new RecordingStore(Nil))
+    val mapped = new RuntimeException("mapped rejection")
+
+    for
+      accepted <- acceptedRuntime.execute(subject, TestCommand("a"))
+      rejected <- rejectedRuntime.executeUnit(subject, TestCommand("a"))
+      raised   <- rejectedRuntime
+                  .executeOrRaise(subject, TestCommand("a"))(_ => mapped)
+                  .attempt
+    yield expect(accepted.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
+      expect(rejected == Left(TestRejection.Missing)) and
+      expect(raised == Left(mapped))
+  }
+
+  test("readAllEventTypes retains the legacy open-filter escape hatch") {
+    val openFilterHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      override protected def readAllEventTypes = true
+      protected val behavior = handler(()):
+        tags(_ => Set(Tag("entity", "a")))
+        on[LegacyObserved].ignore
+        emit(_ => LegacyObserved("a"))
+
+    val store = new RecordingStore(Nil)
+    openFilterHandler
+      .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
+      .map(result =>
+        expect(result.map(_.map(_.payload)) == Right(List(LegacyObserved("a")))) and expect(
+          store.readFilter.exists(_.eventTypes.isEmpty),
+        ),
+      )
+  }
+
+  pureTest("explicitly tagged unscoped emissions can differ from legacy command tags") {
+    val outputTags = Set(Tag("output", "a"))
+    val taggedHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        tags(_ => Set(Tag("input", "a")))
+        on[LegacyObserved].ignore
+        emitTagged(_ => outputTags -> LegacyObserved("a"))
+
+    expect(taggedHandler.decide((), TestCommand("a")) == List(outputTags -> LegacyObserved("a")))
+  }
+
+  pureTest("duplicate event handlers are rejected") {
+    val result = Try {
+      new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        protected val behavior = handler(()):
+          tags(_ => Set(Tag("entity", "a")))
+          on[LegacyObserved].ignore
+          on[LegacyObserved].ignore
+          emit(_ => LegacyObserved("a"))
+    }
+
+    result.failed.toOption match
+      case Some(error: IllegalArgumentException) =>
+        expect(error.getMessage.contains(s"Duplicate command event handlers: ${legacyObservedSchema.eventType.value}"))
+      case other => failure(s"Expected duplicate handler error, got $other")
+  }
+
+  pureTest("incomplete behavior declarations are rejected") {
+    val result = Try {
+      new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        protected val behavior = handler(()):
+          on[LegacyObserved].ignore
+          emit(_ => LegacyObserved("a"))
+    }
+
+    result.failed.toOption match
+      case Some(error: IllegalArgumentException) => expect(error.getMessage.contains("at least one scope"))
+      case other                                 => failure(s"Expected missing scope error, got $other")
+  }
+
+  test("metadata selecting a differently typed payload fails descriptively") {
+    val mismatchHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        tags(_ => Set(Tag("entity", "a")))
+        on[Expected.Same].ignore
+        emit(_ => Expected.Same("a"))
+
+    val history = List(
+      envelopeAs(1L, Actual.Same("a"), Set(Tag("entity", "a")), expectedSameSchema.eventType),
+    )
+    val store = new RecordingStore(history)
+
+    mismatchHandler
+      .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
+      .attempt
+      .map {
+        case Left(error: EventPayloadTypeMismatch) =>
+          expect(error.eventType == expectedSameSchema.eventType) and expect(error.actualClass.contains("Actual"))
+        case other => failure(s"Expected EventPayloadTypeMismatch, got $other")
+      }
+  }
+
+  test("synchronous callback failures are captured by run") {
+    val expected = new RuntimeException("tag failure")
+    val failingHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        tags(_ => throw expected)
+        on[LegacyObserved].ignore
+        emit(_ => LegacyObserved("a"))
+
+    val store = new RecordingStore(Nil)
+    val runtime = CommandRuntime.eventStoreOnly(store)
+
+    IO(Try(failingHandler.run[IO](TestCommand("a"))(using summon[Concurrent[IO]], runtime))).flatMap {
+      case scala.util.Success(effect) => effect.attempt.map(result => expect(result == Left(expected)))
+      case scala.util.Failure(error)  => IO.pure(failure(s"run construction threw $error"))
+    }
+  }
+
+  test("typed rejection is returned while infrastructure failure fails the effect") {
+    val infrastructureFailure = new RuntimeException("store unavailable")
+    val rejectingStore = new RecordingStore(Nil)
+    val failingStore = new RecordingStore(Nil, readFailure = Some(infrastructureFailure))
+
+    for
+      rejected <- subject.run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime.eventStoreOnly(rejectingStore),
+                  )
+      failed <- subject
+                  .run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime.eventStoreOnly(failingStore),
+                  )
+                  .attempt
+    yield expect(rejected == Left(TestRejection.Missing)) and expect(failed == Left(infrastructureFailure))
+  }
+
+  test("handler and storage event schema disagreement fails before append") {
+    val tags = Set(EntityScope("a").toTag)
+    val storageSchema = EventStorageSchema(EventTypeName.fromString("storage.incremented"), version = 2)
+    val store = new RecordingStore(
+      List(envelope(1L, Created("a", 1), tags)),
+      schema = _ => Some(storageSchema),
+    )
+
+    subject
+      .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
+      .attempt
+      .map {
+        case Left(error: EventSchemaMismatch) =>
+          expect(error.declared == EventStorageSchema(incrementedSchema.eventType, incrementedSchema.version)) and
+            expect(error.storage == storageSchema) and
+            expect(store.appended.isEmpty)
+        case other => failure(s"Expected EventSchemaMismatch, got $other")
+      }
+  }
+
+  test("an IndexConflictException outside append is not misclassified as retryable concurrency") {
+    val callbackConflict = IndexConflictException(1L, 2L)
+    val conflictingHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        scope(EntityScope)(_.id)
+        on[Created]
+          .within(EntityScope)
+          .evolve((_: Unit, _: Created) => throw callbackConflict)
+        emit(command => Observed(command.id))
+
+    val tags = Set(EntityScope("a").toTag)
+    val store = new RecordingStore(List(envelope(1L, Created("a", 1), tags)))
+
+    conflictingHandler
+      .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
+      .attempt
+      .map(result => expect(result == Left(callbackConflict)) and expect(store.readCount == 1))
+  }
+
+  test("snapshot resumes from its offset and saves caught-up state with a stable fingerprint") {
+    val tags = Set(EntityScope("a").toTag)
+    val fingerprint =
+      "events=14:test.created@1|18:test.incremented@1|15:test.observed@1;scopes=13:test.entity:a"
+    val snapshotKey = "13:test.entity:a"
+    val snapshots = new RecordingSnapshotStore(
+      Some(StoredCommandSnapshot(5L, 1L, fingerprint, "true:10")),
+    )
+    val store = new RecordingStore(List(envelope(7L, Incremented("a", 2), tags)))
+    val runtime = CommandRuntime(store, Some(snapshots))
+
+    subject.run[IO](TestCommand("a"))(using summon[Concurrent[IO]], runtime).map { result =>
+      val expectedEvent = Incremented("a", 13)
+      val expectedSnapshot = StoredCommandSnapshot(7L, 2L, fingerprint, "true:12")
+
+      expect(result.map(_.map(_.payload)) == Right(List(expectedEvent))) and
+        expect(store.readFromPosition.contains(5L)) and
+        expect(store.appended.exists(_._2 == 7L)) and
+        expect(snapshots.loaded.contains((snapshotId, snapshotKey, 1))) and
+        expect(snapshots.saved.contains((snapshotId, snapshotKey, 1, expectedSnapshot)))
+    }
+  }
+
+  test("best-effort snapshot failures fall back to replay without hiding command outcomes") {
+    val snapshotFailure = new RuntimeException("snapshot unavailable")
+    val snapshots = new FailingSnapshotStore(snapshotFailure)
+    val tags = Set(EntityScope("a").toTag)
+    val acceptedStore = new RecordingStore(
+      List(
+        envelope(1L, Created("a", 2), tags),
+        envelope(2L, Incremented("a", 1), tags),
+      ),
+    )
+    val rejectedStore = new RecordingStore(Nil)
+
+    for
+      accepted <- subject.run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime(acceptedStore, Some(snapshots)),
+                  )
+      rejected <- subject.run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime(rejectedStore, Some(snapshots)),
+                  )
+    yield expect(accepted.map(_.map(_.payload)) == Right(List(Incremented("a", 4)))) and
+      expect(rejected == Left(TestRejection.Missing))
+  }
+
+  test("snapshot with another filter fingerprint is deleted and ignored") {
+    val tags = Set(EntityScope("a").toTag)
+    val snapshots = new RecordingSnapshotStore(
+      Some(StoredCommandSnapshot(99L, 10L, "different-filter", "true:99")),
+    )
+    val store = new RecordingStore(List(envelope(2L, Created("a", 4), tags)))
+    val runtime = CommandRuntime(store, Some(snapshots))
+
+    subject.run[IO](TestCommand("a"))(using summon[Concurrent[IO]], runtime).map { result =>
+      expect(result.map(_.map(_.payload)) == Right(List(Incremented("a", 5)))) and
+        expect(store.readFromPosition.contains(0L)) and
+        expect(snapshots.saved.isEmpty) and
+        expect(snapshots.deleted.nonEmpty)
+    }
+  }
+
+  test("snapshot ahead of the authoritative scope revision is deleted and replayed cold") {
+    val tags = Set(EntityScope("a").toTag)
+    val fingerprint =
+      "events=14:test.created@1|18:test.incremented@1|15:test.observed@1;scopes=13:test.entity:a"
+    val snapshots = new RecordingSnapshotStore(
+      Some(StoredCommandSnapshot(99L, 10L, fingerprint, "true:99")),
+    )
+    val store = new RecordingStore(List(envelope(2L, Created("a", 4), tags)))
+    val runtime = CommandRuntime(store, Some(snapshots))
+
+    subject.run[IO](TestCommand("a"))(using summon[Concurrent[IO]], runtime).map { result =>
+      expect(result.map(_.map(_.payload)) == Right(List(Incremented("a", 5)))) and
+        expect(store.readFromPosition.contains(0L)) and
+        expect(snapshots.deleted.nonEmpty) and
+        expect(store.appended.exists(_._2 == 2L))
+    }
+  }
+
+  test("emitting an event outside the acquired typed scopes fails") {
+    val scopeViolationHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        scope(EntityScope)(_.id)
+        on[CrossScoped].within(EntityScope).ignore
+        emit(command => CrossScoped(command.id, "owner-a"))
+
+    val store = new RecordingStore(Nil)
+
+    scopeViolationHandler
+      .run[IO](TestCommand("a"))(using
+        summon[Concurrent[IO]],
+        CommandRuntime.eventStoreOnly(store),
+      )
+      .attempt
+      .map {
+        case Left(error: CommandScopeViolation) =>
+          expect(error.eventType == crossScopedSchema.eventType) and
+            expect(error.missingScopes == Set(OwnerScope("owner-a"))) and
+            expect(store.appended.isEmpty)
+        case other => failure(s"Expected CommandScopeViolation, got $other")
+      }
+  }

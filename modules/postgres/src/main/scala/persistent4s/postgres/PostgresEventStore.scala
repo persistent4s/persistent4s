@@ -16,29 +16,46 @@
 
 package persistent4s.postgres
 
+import java.time.OffsetDateTime
+import java.util.UUID
+
 import cats.effect.*
+import cats.effect.std.{SecureRandom, UUIDGen}
 import cats.syntax.all.*
+
 import fs2.Stream
+
 import io.circe.Json
 import io.circe.parser.parse as parseJson
+import org.typelevel.log4cats.Logger
+
+import persistent4s.*
+
 import skunk.*
 import skunk.circe.codec.all.jsonb
 import skunk.codec.all.*
 import skunk.data.Identifier
 import skunk.implicits.*
 
-import persistent4s.*
-import java.util.UUID
-import java.time.OffsetDateTime
+/** A pending event's storage form: the schema the codec owns plus its payload parsed as JSON. */
+final private case class EncodedStorageRow(
+  eventType: EventTypeName,
+  version: Int,
+  payload: Json,
+)
 
 /** A PostgreSQL-backed implementation of the EventStore trait. This implementation uses Skunk for database access and
   * implements optimistic concurrency control for event appending.
   *
   * Events are stored in a table with the following schema:
   *   - sequence_number: BIGSERIAL PRIMARY KEY (global position)
+  *   - event_id: UUID NOT NULL UNIQUE (idempotency key)
   *   - event_type: TEXT NOT NULL
+  *   - event_version: INTEGER NOT NULL
   *   - tags: JSONB NOT NULL (array of tag strings)
   *   - payload: JSONB NOT NULL
+  *   - is_external: BOOLEAN NOT NULL
+  *   - headers: JSONB NOT NULL
   *   - recorded_at: TIMESTAMPTZ NOT NULL
   *
   * [[readFrom]] streams events lazily using a PostgreSQL server-side cursor (fetching 256 rows per round-trip), so it
@@ -52,50 +69,84 @@ import java.time.OffsetDateTime
   * @param pool
   *   a resource for obtaining database sessions
   * @param codec
-  *   the event codec for serializing/deserializing events
+  *   the event codec for serializing/deserializing events; encoded payload strings must be valid JSON
+  * @param outboxEnabled
+  *   when true, every newly-inserted non-external event also enqueues an outbox row in the same transaction
   */
-final class PostgresEventStore[F[_]: Async, A <: Event] private (
+final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] private (
   pool: Resource[F, Session[F]],
   codec: EventCodec[A],
   channelId: Identifier,
+  outboxEnabled: Boolean,
 ) extends EventStore[F, A]
     with EventNotification[F]:
 
   import PostgresEventStore.*
 
+  override def storageSchema(event: A): Option[EventStorageSchema] =
+    Some(EventStorageSchema(codec.eventType(event), codec.eventVersion(event)))
+
+  override def currentRevision(eventFilter: EventFilter): F[Long] =
+    pool.use(session => currentRevision(session, eventFilter.tags, eventFilter.eventTypes))
+
   override def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
     events: List[PendingEvent[A]]*,
-  ): F[List[A]] =
-    val flatEvents = events.flatten.toList
-    if flatEvents.isEmpty then Async[F].pure(List.empty)
-    else
-      val allTags = eventFilter.tags
-      val eventTypes = eventFilter.eventTypes
-      pool.use { session =>
-        session.transaction.use { _ =>
-          for
-            _ <- acquireAppendLocks(session, allTags)
-            _ <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
-            _ <- flatEvents.traverse_(pending => insertEvent(session, pending).void)
-            _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
-          yield flatEvents.map(_.payload)
-        }
-      }
+  ): F[List[EventEnvelope[A]]] =
+    runAppend(Some((eventFilter, expectedIndex)), events.flatten.toList, Nil)
 
   override def appendUnchecked(
     events: List[PendingEvent[A]]*,
-  ): F[List[A]] =
-    val flatEvents = events.flatten.toList
-    if flatEvents.isEmpty then Async[F].pure(List.empty)
+  ): F[List[EventEnvelope[A]]] =
+    runAppend(None, events.flatten.toList, Nil)
+
+  /** Atomic append with optimistic-concurrency check, plus message enqueue in the same transaction. */
+  def appendWithMessages(
+    eventFilter: EventFilter,
+    expectedIndex: Long,
+    messages: List[OutgoingMessage],
+    events: List[PendingEvent[A]]*,
+  ): F[List[EventEnvelope[A]]] =
+    runAppend(Some((eventFilter, expectedIndex)), events.flatten.toList, messages)
+
+  /** Atomic append without OCC, plus message enqueue in the same transaction. */
+  def appendUncheckedWithMessages(
+    messages: List[OutgoingMessage],
+    events: List[PendingEvent[A]]*,
+  ): F[List[EventEnvelope[A]]] =
+    runAppend(None, events.flatten.toList, messages)
+
+  /** Shared transactional body for all four append entry points: optional OCC check, batched event insert, outbox and
+    * message enqueues, then the notifications — all committed together or not at all.
+    */
+  private def runAppend(
+    occ: Option[(EventFilter, Long)],
+    flatEvents: List[PendingEvent[A]],
+    messages: List[OutgoingMessage],
+  ): F[List[EventEnvelope[A]]] =
+    if flatEvents.isEmpty && messages.isEmpty then Async[F].pure(List.empty)
     else
       pool.use { session =>
         session.transaction.use { _ =>
           for
-            _ <- flatEvents.traverse_(pending => insertEvent(session, pending).void)
-            _ <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
-          yield flatEvents.map(_.payload)
+            _ <- occ match
+                   case Some((filter, expectedIndex)) if flatEvents.nonEmpty =>
+                     acquireAppendLocks(session, filter.tags) *>
+                       checkForConflicts(session, filter.tags, filter.eventTypes, expectedIndex)
+                   case _ => Async[F].unit
+            envelopes <- if flatEvents.nonEmpty then insertEvents(session, flatEvents) else Async[F].pure(List.empty)
+            _         <- enqueueMessages(session, messages)
+            _         <-
+              if flatEvents.nonEmpty then
+                session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
+              else Async[F].unit
+            // Assumes the message relay listens on PostgresMessageOutbox's default channel, as PostgresModule wires
+            // both sides. If the outbox is built with a custom channel, this notify would need to be told about it.
+            _ <-
+              if messages.nonEmpty then session.channel(PostgresMessageOutbox.NotificationChannel).notify("")
+              else Async[F].unit
+          yield envelopes
         }
       }
 
@@ -160,17 +211,19 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
                   _.stream(fromPosition *: eventTypesList *: tagsList *: max *: EmptyTuple, FetchSize),
                 )
 
-        rowStream.evalMap { case (seqNum, eventId, eventType, tags, payload, isExternal, headers, recordedAt) =>
-          val eventTypeName = EventTypeName.fromString(eventType)
-          parsePayload(eventTypeName, payload).map { event =>
-            EventEnvelope(
-              EventMetadata(
-                globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName, isExternal = isExternal,
-                timestamp = recordedAt.toInstant, headers = headers,
-              ),
-              event,
-            )
-          }
+        rowStream.evalMap {
+          case (seqNum, eventId, eventType, eventVersion, tags, payload, isExternal, headers, recordedAt) =>
+            val eventTypeName = EventTypeName.fromString(eventType)
+            parsePayload(seqNum, eventTypeName, eventVersion, payload).map { event =>
+              EventEnvelope(
+                EventMetadata(
+                  globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName,
+                  isExternal = isExternal, timestamp = recordedAt.toInstant, headers = headers,
+                  eventVersion = eventVersion,
+                ),
+                event,
+              )
+            }
         }
       }
     }
@@ -208,29 +261,32 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
     eventTypes: Set[EventTypeName],
     expectedIndex: Long,
   ): F[Unit] =
+    for
+      actualIndex <- currentRevision(session, tags, eventTypes)
+      _           <-
+        if actualIndex != expectedIndex then Async[F].raiseError(IndexConflictException(expectedIndex, actualIndex))
+        else Async[F].unit
+    yield ()
+
+  private def currentRevision(
+    session: Session[F],
+    tags: Set[Tag],
+    eventTypes: Set[EventTypeName],
+  ): F[Long] =
     val tagList = tags.toList.map(_.value)
     val eventTypeList = eventTypes.toList.map(_.value)
 
-    for
-      actualIndex <- (tagList.isEmpty, eventTypeList.isEmpty) match
-                       case (true, true) =>
-                         session.unique(lastConflictingSequenceQuery)(expectedIndex)
-                       case (true, false) =>
-                         session.unique(lastConflictingSequenceByEventTypesQuery(eventTypeList.size))(
-                           expectedIndex *: eventTypeList *: EmptyTuple,
-                         )
-                       case (false, true) =>
-                         session.unique(lastConflictingSequenceByTagsQuery(tagList.size))(
-                           expectedIndex *: tagList *: EmptyTuple,
-                         )
-                       case (false, false) =>
-                         session.unique(lastConflictingSequenceByBothQuery(tagList.size, eventTypeList.size))(
-                           expectedIndex *: tagList *: eventTypeList *: EmptyTuple,
-                         )
-      _ <-
-        if actualIndex > 0 then Async[F].raiseError(IndexConflictException(expectedIndex, actualIndex))
-        else Async[F].unit
-    yield ()
+    (tagList.isEmpty, eventTypeList.isEmpty) match
+      case (true, true) =>
+        session.unique(lastSequenceQuery)
+      case (true, false) =>
+        session.unique(lastSequenceByEventTypesQuery(eventTypeList.size))(eventTypeList)
+      case (false, true) =>
+        session.unique(lastSequenceByTagsQuery(tagList.size))(tagList)
+      case (false, false) =>
+        session.unique(lastSequenceByBothQuery(tagList.size, eventTypeList.size))(
+          tagList *: eventTypeList *: EmptyTuple,
+        )
 
   private def acquireAppendLocks(
     session: Session[F],
@@ -240,43 +296,98 @@ final class PostgresEventStore[F[_]: Async, A <: Event] private (
       .sortBy(_.value)
       .traverse_(tag => session.unique(acquireTagLockQuery)(tag.value).void)
 
-  private def insertEvent(
+  private def insertEvents(
     session: Session[F],
-    pending: PendingEvent[A],
-  ): F[Long] =
-    val tagsJson = tagsToJson(pending.tags)
-    val headersJson = headersToJson(pending.headers)
-    val payloadJson = parseJson(codec.encode(pending.payload)).getOrElse(Json.obj())
+    events: List[PendingEvent[A]],
+  ): F[List[EventEnvelope[A]]] =
     for
-      sequenceNumber <- pending.id match
-                          case Some(eventId) =>
-                            session.unique(insertEventWithIdQuery)(
-                              eventId *: pending.eventType.value *: tagsJson *: payloadJson *: pending.isExternal *: headersJson *: EmptyTuple,
-                            )
-                          case None =>
-                            session.unique(insertEventQuery)(
-                              pending.eventType.value *: tagsJson *: payloadJson *: pending.isExternal *: headersJson *: EmptyTuple,
-                            )
-      _ <- insertEventTags(session, sequenceNumber, pending.tags)
-    yield sequenceNumber
-
-  private def insertEventTags(
-    session: Session[F],
-    sequenceNumber: Long,
-    tags: Set[Tag],
-  ): F[Unit] =
-    tags.toList.traverse_ { tag =>
-      session
-        .execute(insertEventTagCommand)(
-          tag.value *: sequenceNumber *: EmptyTuple,
-        )
-        .void
+      encoded  <- events.traverse(pending => encodeForStorage(pending).map(pending -> _))
+      resolved <- encoded.traverse { case (pending, enc) =>
+                    resolveId(pending.id).map(id => (id, pending, enc))
+                  }
+      uniqueByEventId = resolved.distinctBy(_._1)
+      rows            = uniqueByEventId.map { case (id, pending, enc) =>
+               id *: enc.eventType.value *: enc.version *: tagsToJson(pending.tags) *: enc.payload *:
+                 pending.isExternal *: headersToJson(pending.headers) *: EmptyTuple
+             }
+      idToRow <- chunked(rows, paramsPerRow = 7)
+                   .flatTraverse(chunk => session.execute(insertEventsQuery(chunk.size))(chunk))
+                   .map(_.map { case id *: seq *: recordedAt *: inserted *: EmptyTuple =>
+                     id -> (seq, recordedAt, inserted)
+                   }.toMap)
+      tagPairs = uniqueByEventId.flatMap { case (id, pending, _) =>
+                   pending.tags.toList.map(tag => tag.value *: idToRow(id)._1 *: EmptyTuple)
+                 }
+      _ <- chunked(tagPairs, paramsPerRow = 2)
+             .traverse_(chunk => session.execute(insertEventTagsCommand(chunk.size))(chunk).void)
+      // Only genuinely-new, non-external events get relayed: a redelivered event_id resolves to the existing row
+      // (inserted = false) and must not be published a second time.
+      _ <- enqueueOutbox(
+             session,
+             uniqueByEventId.collect {
+               case (id, pending, _) if idToRow(id)._3 && !pending.isExternal => idToRow(id)._1
+             },
+           )
+    yield resolved.map { case (id, pending, enc) =>
+      val (sequenceNumber, recordedAt, _) = idToRow(id)
+      EventEnvelope(
+        EventMetadata(
+          globalPosition = sequenceNumber, id = id, tags = pending.tags, eventType = enc.eventType,
+          isExternal = pending.isExternal, timestamp = recordedAt.toInstant, headers = pending.headers,
+          eventVersion = enc.version,
+        ),
+        pending.payload,
+      )
     }
 
-  private def parsePayload(eventType: EventTypeName, payload: Json): F[A] =
-    codec.decode(eventType, payload.noSpaces) match
+  private def enqueueOutbox(session: Session[F], globalPositions: List[Long]): F[Unit] =
+    if !outboxEnabled || globalPositions.isEmpty then Async[F].unit
+    else session.prepare(PostgresOutbox.insertCommand).flatMap(cmd => globalPositions.traverse_(cmd.execute))
+
+  private def enqueueMessages(session: Session[F], messages: List[OutgoingMessage]): F[Unit] =
+    if messages.isEmpty then Async[F].unit
+    else session.prepare(PostgresMessageOutbox.insertCommand).flatMap(cmd => messages.traverse_(cmd.execute))
+
+  /** The storage form of a pending event: the schema the codec owns plus its payload as JSON.
+    *
+    * Fails fast when the caller's declared `eventType` disagrees with the codec's registered schema (the legacy
+    * class-name identity is still accepted), and surfaces payload-encoding errors instead of silently writing `{}`.
+    */
+  private def encodeForStorage(pending: PendingEvent[A]): F[EncodedStorageRow] =
+    val schemaEventType = codec.eventType(pending.payload)
+    val version = codec.eventVersion(pending.payload)
+    val storage = EventStorageSchema(schemaEventType, version)
+    val declared = EventStorageSchema(pending.eventType, version)
+    val legacyEventType = EventTypeName.fromInstance(pending.payload)
+
+    if pending.eventType != schemaEventType && pending.eventType != legacyEventType then
+      Async[F].raiseError(EventSchemaMismatch(declared, storage, pending.payload.getClass.getName))
+    else
+      codec.encodeWithSchema(pending.payload) match
+        case Left(error) =>
+          Async[F].raiseError(new RuntimeException(s"EventCodec failed to encode event: ${error.getMessage}", error))
+        case Right(encoded) =>
+          parseJson(encoded.payload) match
+            case Left(error)        => Async[F].raiseError(error)
+            case Right(payloadJson) => Async[F].pure(EncodedStorageRow(encoded.eventType, encoded.version, payloadJson))
+
+  private def resolveId(idOpt: Option[UUID]): F[UUID] = idOpt.fold(UUIDGen.randomUUID[F])(_.pure[F])
+
+  private def chunked[T](rows: List[T], paramsPerRow: Int): List[List[T]] =
+    rows.grouped(MaxUsableBindParams / paramsPerRow).toList
+
+  private def parsePayload(
+    globalPosition: Long,
+    eventType: EventTypeName,
+    eventVersion: Int,
+    payload: Json,
+  ): F[A] =
+    codec.decode(eventType, eventVersion, payload.noSpaces) match
       case Right(event) => Async[F].pure(event)
-      case Left(error)  => Async[F].raiseError(error)
+      case Left(error)  =>
+        Logger[F].error(error)(
+          s"Failed to decode event of type ${eventType.value} at position $globalPosition",
+        ) *> Async[F].raiseError(error)
 
   private def tagsToJson(tags: Set[Tag]): Json =
     Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*)
@@ -294,6 +405,13 @@ object PostgresEventStore:
         sys.error("Invalid channel identifier"),
       )
 
+  /** Max number of parameters supported by PostgreSQL within a query */
+  private val MaxBindParams: Int = 32767
+
+  private val BindParamSafetyMargin: Int = 16
+
+  private val MaxUsableBindParams: Int = MaxBindParams - BindParamSafetyMargin
+
   /** Number of rows fetched per cursor round-trip when streaming events from PostgreSQL. */
   private val FetchSize: Int = 256
 
@@ -308,12 +426,13 @@ object PostgresEventStore:
     * @return
     *   a new PostgresEventStore instance
     */
-  def apply[F[_]: Async, A <: Event](
+  def apply[F[_]: Async: Logger: SecureRandom, A <: Event](
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
     channelId: Identifier = NotificationChannel,
+    outboxEnabled: Boolean = false,
   ): PostgresEventStore[F, A] =
-    new PostgresEventStore[F, A](pool, codec, channelId)
+    new PostgresEventStore[F, A](pool, codec, channelId, outboxEnabled)
 
   private val tagsCodec: Codec[Set[Tag]] = jsonb.imap { json =>
     json.asArray
@@ -327,82 +446,85 @@ object PostgresEventStore:
       .getOrElse(Map.empty)
   }(headers => Json.obj(headers.view.mapValues(Json.fromString).toSeq*))
 
-  private val eventDecoder: Decoder[
-    Long *: UUID *: String *: Set[Tag] *: Json *: Boolean *: Map[String, String] *: OffsetDateTime *: EmptyTuple,
-  ] =
-    int8 *: uuid *: text *: tagsCodec *: jsonb *: bool *: headersCodec *: timestamptz
+  private[postgres] val eventDecoder: Decoder[EventRow] =
+    int8 *: uuid *: text *: int4 *: tagsCodec *: jsonb *: bool *: headersCodec *: timestamptz
 
   private val acquireTagLockQuery: Query[String, String] =
     sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
 
-  private val insertEventQuery: Query[String *: Json *: Json *: Boolean *: Json *: EmptyTuple, Long] =
+  /** The no-op `DO UPDATE` makes a duplicate `event_id` still produce a `RETURNING` row, so the caller always gets the
+    * committed envelope. `xmax = 0` then distinguishes a freshly inserted row from one that already existed: on a real
+    * insert the row carries no updating transaction id, whereas the upsert path leaves `xmax` set. That flag is what
+    * keeps the outbox from re-publishing a redelivered event.
+    */
+  private def insertEventsQuery(
+    n: Int,
+  ): Query[
+    List[UUID *: String *: Int *: Json *: Json *: Boolean *: Json *: EmptyTuple],
+    UUID *: Long *: OffsetDateTime *: Boolean *: EmptyTuple,
+  ] =
+    val rows = (uuid *: text *: int4 *: jsonb *: jsonb *: bool *: jsonb).values.list(n)
     sql"""
-      INSERT INTO events (event_type, tags, payload, is_external, headers)
-      VALUES ($text, $jsonb, $jsonb, $bool, $jsonb)
-      RETURNING sequence_number
-    """.query(int8)
-
-  private val insertEventWithIdQuery: Query[UUID *: String *: Json *: Json *: Boolean *: Json *: EmptyTuple, Long] =
-    sql"""
-      INSERT INTO events (event_id, event_type, tags, payload, is_external, headers)
-      VALUES ($uuid, $text, $jsonb, $jsonb, $bool, $jsonb)
+      INSERT INTO events (event_id, event_type, event_version, tags, payload, is_external, headers)
+      VALUES $rows
       ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
-      RETURNING sequence_number
-    """.query(int8)
+      RETURNING event_id, sequence_number, recorded_at, (xmax = 0) AS inserted
+    """.query(uuid *: int8 *: timestamptz *: bool)
 
-  private val insertEventTagCommand: Command[String *: Long *: EmptyTuple] =
+  private def insertEventTagsCommand(
+    n: Int,
+  ): Command[List[String *: Long *: EmptyTuple]] =
+    val pairs = (text *: int8).values.list(n)
     sql"""
       INSERT INTO event_tags (tag, sequence_number)
-      VALUES ($text, $int8)
+      VALUES $pairs
       ON CONFLICT DO NOTHING
     """.command
 
-  private val lastConflictingSequenceQuery: Query[Long, Long] =
+  private val lastSequenceQuery: Query[Void, Long] =
     sql"""
       SELECT COALESCE(MAX(sequence_number), 0)
       FROM events
-      WHERE sequence_number > $int8
     """.query(int8)
 
-  private def lastConflictingSequenceByEventTypesQuery(
+  private def lastSequenceByEventTypesQuery(
     numEventTypes: Int,
-  ): Query[Long *: List[String] *: EmptyTuple, Long] =
+  ): Query[List[String], Long] =
     sql"""
       SELECT COALESCE(MAX(sequence_number), 0)
       FROM events
-      WHERE sequence_number > $int8
-        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+      WHERE event_type = ANY(ARRAY[${text.list(numEventTypes)}])
     """.query(int8)
 
-  private def lastConflictingSequenceByTagsQuery(
+  private def lastSequenceByTagsQuery(
     numTags: Int,
-  ): Query[Long *: List[String] *: EmptyTuple, Long] =
+  ): Query[List[String], Long] =
     sql"""
       SELECT COALESCE(MAX(et.sequence_number), 0)
       FROM event_tags et
-      WHERE et.sequence_number > $int8
-        AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+      WHERE et.tag = ANY(ARRAY[${text.list(numTags)}])
     """.query(int8)
 
-  private def lastConflictingSequenceByBothQuery(
+  private def lastSequenceByBothQuery(
     numTags: Int,
     numEventTypes: Int,
-  ): Query[Long *: List[String] *: List[String] *: EmptyTuple, Long] =
+  ): Query[List[String] *: List[String] *: EmptyTuple, Long] =
     sql"""
       SELECT COALESCE(MAX(et.sequence_number), 0)
       FROM event_tags et
       JOIN events e ON e.sequence_number = et.sequence_number
-      WHERE et.sequence_number > $int8
-        AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+      WHERE et.tag = ANY(ARRAY[${text.list(numTags)}])
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
     """.query(int8)
 
-  private type EventRow =
-    Long *: UUID *: String *: Set[Tag] *: Json *: Boolean *: Map[String, String] *: OffsetDateTime *: EmptyTuple
+  // Widened so PostgresOutbox can reuse the same row shape and decoder for its join against `events`; keeping one
+  // definition is what stops the two SELECT column lists from drifting apart.
+  private[postgres] type EventRow =
+    Long *: UUID *: String *: Int *: Set[Tag] *: Json *: Boolean *: Map[String, String] *: OffsetDateTime *: EmptyTuple
 
   private val readAllQuery: Query[Long, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, tags, payload, is_external, headers, recorded_at
+      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at
       FROM events
       WHERE sequence_number > $int8
       ORDER BY sequence_number ASC
@@ -410,7 +532,7 @@ object PostgresEventStore:
 
   private val readAllLimitedQuery: Query[Long *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, tags, payload, is_external, headers, recorded_at
+      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at
       FROM events
       WHERE sequence_number > $int8
       ORDER BY sequence_number ASC
@@ -421,7 +543,7 @@ object PostgresEventStore:
     numEventTypes: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, tags, payload, is_external, headers, recorded_at
+      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at
       FROM events
       WHERE sequence_number > $int8
         AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -432,7 +554,7 @@ object PostgresEventStore:
     numEventTypes: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, tags, payload, is_external, headers, recorded_at
+      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at
       FROM events
       WHERE sequence_number > $int8 
         AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -444,7 +566,8 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.headers, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+             e.headers, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND EXISTS (
@@ -460,7 +583,8 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.headers, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+             e.headers, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND EXISTS (
@@ -478,7 +602,8 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.headers, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+             e.headers, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -496,7 +621,8 @@ object PostgresEventStore:
     numTags: Int,
   ): Query[Long *: List[String] *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.headers, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+             e.headers, e.recorded_at
       FROM events e
       WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])

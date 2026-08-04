@@ -14,10 +14,20 @@
  * limitations under the License.
  */
 
-package persistent4s.kafka
+package persistent4s
 
-import persistent4s.{Event, EventEnvelope}
+import fs2.Stream
 
-trait EventPublisher[F[_], A <: Event]:
+/** Subscribes to a topic and streams [[EventEnvelope]]s.
+  *
+  * Each emitted element is paired with an acknowledge action (`F[Unit]`) that must be invoked after successfully
+  * processing the envelope.
+  */
+trait EventSubscriber[F[_], A <: Event]:
 
-  def publish(topic: String, event: EventEnvelope[A]): F[Unit]
+  /** Stream decoded envelopes from `topic`, each paired with an acknowledge action.
+    *
+    * @param fromBeginning
+    *   if true, start from the earliest available record when no prior position is known.
+    */
+  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, (EventEnvelope[A], F[Unit])]

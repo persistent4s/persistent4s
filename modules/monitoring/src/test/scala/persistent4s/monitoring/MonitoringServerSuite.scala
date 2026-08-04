@@ -17,24 +17,30 @@
 package persistent4s.monitoring
 
 import cats.effect.{IO, Resource}
-import com.comcast.ip4s.*
-import io.circe.{Decoder, Encoder}
+
 import io.circe.syntax.*
+import io.circe.{Decoder, Encoder}
+
+import persistent4s.Event
+import persistent4s.circe.CirceEventCodec
+import persistent4s.postgres.{PostgresConfig, PostgresModule}
+
+import com.comcast.ip4s.*
 import org.http4s.*
 import org.http4s.client.Client
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.implicits.*
 import org.testcontainers.containers.PostgreSQLContainer
-import persistent4s.Event
-import persistent4s.circe.CirceEventCodec
-import persistent4s.postgres.{PostgresConfig, PostgresModule}
-import weaver.IOSuite
-import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.log4cats.Logger
+import org.typelevel.otel4s.trace.Tracer
+import weaver.IOSuite
 
 given Tracer[IO] = org.typelevel.otel4s.trace.Tracer.Implicits.noop
 
 given Meter[IO] = org.typelevel.otel4s.metrics.Meter.Implicits.noop
+
+given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
 object MonitoringServerSuite extends IOSuite:
 
@@ -72,7 +78,7 @@ object MonitoringServerSuite extends IOSuite:
       components <- PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec)
       _          <- MonitoringServer.make[IO](
              components.checkpoint,
-             components.eventStore.notify,
+             components.sendNotification,
              port"9092",
            )
       client <- EmberClientBuilder.default[IO].build

@@ -16,8 +16,14 @@
 
 package persistent4s
 
+import scala.util.control.NonFatal
+
 import cats.effect.Concurrent
 import cats.syntax.all.*
+import org.typelevel.otel4s.Attribute
+import org.typelevel.otel4s.metrics.Counter
+import org.typelevel.otel4s.trace.Tracer
+
 import scala.annotation.unused
 
 /** A CommandHandler defines how a command is processed in an event-sourced system. It reads events from the store to
@@ -54,6 +60,12 @@ trait CommandHandler[C, S, E <: Event]:
     */
   def decide(state: S, command: C): List[(Set[Tag], E)]
 
+  /** Internal decision hook that receives the already-resolved command tags. Implementations that default emitted
+    * events to the command's read scope can override this to avoid evaluating [[tags]] twice.
+    */
+  protected def decide(state: S, command: C, @unused commandTags: Set[Tag]): List[(Set[Tag], E)] =
+    decide(state, command)
+
   /** Additional metadata to attach to every event produced by this command. Override to add. Defaults to none. */
   def headers(@unused command: C): Map[String, String] = Map.empty
 
@@ -64,38 +76,54 @@ trait CommandHandler[C, S, E <: Event]:
     * (IndexConflictException), the command is automatically retried with fresh state up to maxRetries times. The
     * command is re-validated against the new state and may still succeed.
     */
-  def run[F[_]: Concurrent](command: C)(using
+  def run[F[_]: Concurrent: Tracer](command: C)(using
     eventStore: EventStore[F, E],
-  ): F[List[E]] =
-    runWithRetry(command, maxRetries)
+    metrics: CommandHandlerMetrics[F],
+  ): F[List[EventEnvelope[E]]] =
+    val cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
+    Tracer[F]
+      .spanBuilder("persistent4s.commandhandler.handle")
+      .addAttribute(cmdAttr)
+      .build
+      .surround(runWithRetry(command, maxRetries, metrics.retries, cmdAttr))
 
-  private def runWithRetry[F[_]: Concurrent](command: C, retriesLeft: Int)(using
-    eventStore: EventStore[F, E],
-  ): F[List[E]] =
+  private def runWithRetry[F[_]: Concurrent](
+    command: C,
+    retriesLeft: Int,
+    retriesCounter: Counter[F, Long],
+    cmdAttr: Attribute[String],
+  )(using eventStore: EventStore[F, E]): F[List[EventEnvelope[E]]] =
     attempt(command).handleErrorWith {
       case _: IndexConflictException if retriesLeft > 0 =>
-        runWithRetry(command, retriesLeft - 1)
+        retriesCounter.add(1L, cmdAttr) *> runWithRetry(command, retriesLeft - 1, retriesCounter, cmdAttr)
       case e =>
         Concurrent[F].raiseError(e)
     }
 
   private def attempt[F[_]: Concurrent](
     command: C,
-  )(using eventStore: EventStore[F, E]): F[List[E]] =
+  )(using eventStore: EventStore[F, E]): F[List[EventEnvelope[E]]] =
     for
-      tags      <- Concurrent[F].pure(tags(command))
+      tags      <- suspend(tags(command))
       filter     = EventFilter(eventTypes.getOrElse(Set.empty), tags)
       envelopes <- eventStore.readFrom(0L, filter).compile.toList
-      state      = envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload))
+      state     <- suspend(envelopes.foldLeft(initial)((s, env) => evolve(command, s, env.payload)))
       index      = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
-      _         <- validate(state, command) match
+      result    <- suspend(validate(state, command))
+      _         <- result match
              case Left(e)  => Concurrent[F].raiseError(e)
              case Right(_) => Concurrent[F].unit
-      decided      = decide(state, command)
-      eventHeaders = headers(command)
-      events       = decided.map((tags, event) =>
-                 PendingEvent(payload = event, tags = tags, eventType = EventTypeName.fromInstance(event),
-                   isExternal = false, id = None, headers = eventHeaders),
-               )
+      decided      <- suspend(decide(state, command, tags))
+      eventHeaders <- suspend(headers(command))
+      events       <- suspend(
+                  decided.map((tags, event) =>
+                    PendingEvent(payload = event, tags = tags, eventType = EventTypeName.fromInstance(event),
+                      isExternal = false, id = None, headers = eventHeaders),
+                  ),
+                )
       appendedEvents <- eventStore.append(filter, index, events)
     yield appendedEvents
+
+  private def suspend[F[_]: Concurrent, B](value: => B): F[B] =
+    try Concurrent[F].pure(value)
+    catch case NonFatal(error) => Concurrent[F].raiseError(error)
