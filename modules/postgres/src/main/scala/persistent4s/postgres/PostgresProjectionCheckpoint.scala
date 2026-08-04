@@ -19,6 +19,7 @@ package persistent4s.postgres
 import cats.MonadThrow
 import cats.effect.*
 import cats.syntax.all.*
+import org.typelevel.log4cats.Logger
 
 import persistent4s.{ProjectionCheckpoint, ProjectionCheckpointConflict, ProjectionCheckpointState}
 
@@ -33,7 +34,7 @@ import skunk.implicits.*
   * @param pool
   *   a resource for obtaining database sessions
   */
-final class PostgresProjectionCheckpoint[F[_]: Async] private (
+final class PostgresProjectionCheckpoint[F[_]: Async: Logger] private (
   pool: Resource[F, Session[F]],
 ) extends ProjectionCheckpoint[F]:
 
@@ -49,6 +50,11 @@ final class PostgresProjectionCheckpoint[F[_]: Async] private (
           state.projectionName *: state.globalPosition *: state.running *: state.error *: EmptyTuple,
         ),
       )
+      .handleErrorWith { error =>
+        Logger[F].error(error)(
+          s"Failed to save checkpoint for projection ${state.projectionName} at position ${state.globalPosition}",
+        ) *> Async[F].raiseError(error)
+      }
       .void
 
   /** Load all checkpoints stored in the database.
@@ -151,5 +157,5 @@ object PostgresProjectionCheckpoint:
       )
     """.command
 
-  def make[F[_]: Async](pool: Resource[F, Session[F]]): PostgresProjectionCheckpoint[F] =
+  def make[F[_]: Async: Logger](pool: Resource[F, Session[F]]): PostgresProjectionCheckpoint[F] =
     new PostgresProjectionCheckpoint(pool)

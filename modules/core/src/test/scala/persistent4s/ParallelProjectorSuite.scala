@@ -25,12 +25,17 @@ import cats.effect.{Deferred, IO, Ref}
 import cats.syntax.all.*
 
 import fs2.Stream
+import fs2.concurrent.Topic
+
+import org.typelevel.log4cats.Logger
 
 import persistent4s.EventStoreNotification.*
 
 import weaver.SimpleIOSuite
 
 object ParallelProjectorSuite extends SimpleIOSuite:
+
+  given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   // ---------------------------------------------------------------------------
   // Test domain
@@ -566,5 +571,71 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       saved.get("tracking").map(_.globalPosition) == Some(-1L),
       saved.get("tracking").exists(!_.running), // projector is paused
       saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")),
+    )
+  }
+
+  // ---------------------------------------------------------------------------
+  // Topic publishing (the channel SyncCommandHandler waits on)
+  // ---------------------------------------------------------------------------
+
+  test("publishes each processed event's state to the topic after persisting") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states)
+      topic      <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      _          <- seed(
+             store,
+             (Set(entityTag("a")), TestEvent.Created("a")),
+             (Set(entityTag("b")), TestEvent.Created("b")),
+           )
+      appended  <- store.readFrom(0L, EventFilter()).compile.toList
+      published <- topic
+                     .subscribeAwait(16)
+                     .use { stream =>
+                       ParallelProjector(store, checkpoint)
+                         .run(projection, Some(topic))
+                         .compile
+                         .drain
+                         .background
+                         .use(_ => stream.take(2).compile.toList.timeout(5.seconds))
+                     }
+    yield expect.all(
+      // one publish per processed event, keyed by that event's id, in order
+      published.map(_._1) == appended.map(_.metadata.id),
+      // each carries the state for that event's own key
+      published.map(_._2) == List(Right(Map("a" -> Some(1))), Right(Map("b" -> Some(1)))),
+    )
+  }
+
+  test("publishes the failure to the topic from the sequential fallback when an event fails to process") {
+    // The failure reaches the topic only from the sequential fallback path, so a fallback that
+    // persists and pauses but never publishes would leave every synchronous command on this
+    // projection hanging until its timeout.
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states, failOnPosition = Some(1L))
+      topic      <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      _          <- seed(store, (Set(entityTag("a")), TestEvent.Created("a")))
+      appended   <- store.readFrom(0L, EventFilter()).compile.toList
+      published  <- topic
+                     .subscribeAwait(16)
+                     .use { stream =>
+                       ParallelProjector(store, checkpoint)
+                         .run(projection, Some(topic))
+                         .compile
+                         .drain
+                         .attempt
+                         .background
+                         .use(_ => stream.head.compile.lastOrError.timeout(5.seconds))
+                     }
+    yield expect.all(
+      published._1 == appended.head.metadata.id,
+      published._2.left.toOption.exists(_.getMessage.contains("simulated")),
     )
   }

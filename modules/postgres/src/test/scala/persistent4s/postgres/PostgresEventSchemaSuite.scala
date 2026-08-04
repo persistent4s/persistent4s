@@ -38,6 +38,7 @@ import persistent4s.{
 }
 
 import org.testcontainers.containers.PostgreSQLContainer
+import org.typelevel.log4cats.Logger
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 import skunk.*
@@ -49,6 +50,8 @@ import weaver.IOSuite
 object PostgresEventSchemaSuite extends IOSuite:
 
   override def maxParallelism: Int = 1
+
+  private given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   private given Tracer[IO] = Tracer.Implicits.noop
 

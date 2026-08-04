@@ -27,10 +27,6 @@ import io.circe.{Decoder, Encoder}
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 
-given Tracer[IO] = Tracer.Implicits.noop
-
-given Meter[IO] = Meter.Implicits.noop
-
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
 import persistent4s.{EventFilter, EventStoreNotification, IndexConflictException, Tag}
@@ -39,8 +35,15 @@ import persistent4s.EventTypeName
 import persistent4s.Event
 import persistent4s.EventStore
 import persistent4s.PendingEvent
+import org.typelevel.log4cats.Logger
+
+given Tracer[IO] = Tracer.Implicits.noop
+
+given Meter[IO] = Meter.Implicits.noop
 
 object PostgresEventStoreSuite extends IOSuite:
+
+  given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   override def maxParallelism: Int = 1
 

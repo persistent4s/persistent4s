@@ -32,12 +32,15 @@ import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.implicits.*
 import org.testcontainers.containers.PostgreSQLContainer
 import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.log4cats.Logger
 import org.typelevel.otel4s.trace.Tracer
 import weaver.IOSuite
 
 given Tracer[IO] = org.typelevel.otel4s.trace.Tracer.Implicits.noop
 
 given Meter[IO] = org.typelevel.otel4s.metrics.Meter.Implicits.noop
+
+given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
 object MonitoringServerSuite extends IOSuite:
 

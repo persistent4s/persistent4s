@@ -23,11 +23,14 @@ import cats.effect.Deferred
 import cats.effect.Ref
 import cats.syntax.all.*
 import fs2.Stream
+import org.typelevel.log4cats.Logger
 import org.typelevel.otel4s.Attribute
 import org.typelevel.otel4s.metrics.{Counter, Histogram, Meter}
 import org.typelevel.otel4s.trace.Tracer
 import persistent4s.EventStoreNotification.*
 import fs2.concurrent.Topic
+import java.io.PrintWriter
+import java.io.StringWriter
 import java.util.UUID
 
 /** The default [[Projector]] implementation.
@@ -52,7 +55,7 @@ import java.util.UUID
   *   maximum number of events processed in a single batch (default: 100). A larger value reduces checkpoint overhead
   *   but increases memory usage and the reprocessing window after a failure.
   */
-final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
+final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
   checkpoint: ProjectionCheckpoint[F],
   batchSize: Int = 100,
@@ -78,14 +81,6 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
     processedEvents: List[EventEnvelope[A]] = Nil,
   )
 
-  // TODO How should we handle failure? What do we do if the process dies?
-  // Answer: On failure, push the error in the checkpoint state and wait on the Defer until the dev restart or fix the issue.
-
-  // TODO Projection can miss some notifications due to connexion issue or restart.
-  // A solution would be to store user requests in postgres and keep track of the last processed request in the checkpoint.
-  // The projector can then reprocess all events since the last processed request to catch up on missed notifications.
-  // Also note that currently, only the last user intent is stored if multiple notifications arrive during a batch processing.
-
   override def run[K, S](
     projection: Projection[F, A, K, S],
     topic: Option[Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])]] = None,
@@ -109,7 +104,7 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
             next     = current.copy(
                      globalPosition = progress.lastProcessedPosition.getOrElse(current.globalPosition),
                      running = if (error.isEmpty) current.running else false,
-                     error = error.map(formatError),
+                     error = error.map(e => formatError(e)),
                    )
             atomicCommit = projection.persistStatesAtomically(statesToPersist, current.globalPosition, next)
             _           <- atomicCommit.getOrElse(projection.persistStates(statesToPersist) *> checkpoint.save(next))
@@ -277,24 +272,39 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
 
           notif match {
             case PauseProjection(_) =>
-              saveState(_.copy(running = false))
+              Logger[F].info(s"Pausing projection ${projection.name}") *>
+                saveState(_.copy(running = false))
             case ResumeProjection(_) =>
-              saveState(_.copy(running = true, error = None)) *> markPending(wakeupState)
+              Logger[F].info(s"Resuming projection ${projection.name}") *>
+                saveState(_.copy(running = true, error = None)) *> markPending(wakeupState)
             case UpdateCheckpointIndex(_, index) =>
-              saveState(_.copy(globalPosition = index, error = None)) *> markPending(wakeupState)
+              Logger[F].info(s"Updating checkpoint for projection ${projection.name} to index $index") *>
+                saveState(_.copy(globalPosition = index, error = None)) *> markPending(wakeupState)
             case _ => Applicative[F].unit
           }
 
-        def formatError(e: Throwable): String =
-          s"${e.getClass.getSimpleName}: ${e.getMessage}\n${e.getStackTrace.mkString("\n")}"
+        def formatError(e: Throwable, maxLength: Int = 32_000): String = {
+          val sw = new StringWriter()
+          val pw = new PrintWriter(sw)
+          e.printStackTrace(pw)
+          pw.flush()
+
+          val s = sw.toString
+          if (s.length <= maxLength) s
+          else s.take(maxLength) + s"\n... truncated, original length=${s.length}"
+        }
 
         def pauseWithError(projectionState: Ref[F, ProjectionCheckpointState])(error: Throwable): F[Unit] =
           for {
             current <- projectionState.get
-            next     = current.copy(running = false, error = Some(formatError(error)))
-            _       <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
-            _       <- projectionState.set(next)
-            _       <- pausedCounter.add(1L, projAttr)
+            _       <-
+              Logger[F].error(error)(
+                s"Error processing projection ${projection.name} on index ${current.globalPosition}",
+              )
+            next = current.copy(running = false, error = Some(formatError(error)))
+            _   <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
+            _   <- projectionState.set(next)
+            _   <- pausedCounter.add(1L, projAttr)
           } yield ()
 
         def retryAfterConflict(
@@ -308,7 +318,18 @@ final case class DefaultProjector[F[_]: Async: Tracer: Meter, A <: Event](
 
         Stream.eval {
           for {
-            maybeState      <- checkpoint.load(projection.name)
+            maybeState <- checkpoint.load(projection.name)
+            _          <- maybeState match
+                   case Some(state) if !state.running && state.error.isDefined =>
+                     Logger[F].warn(s"Projection ${projection.name} is currently paused with error")
+                   case Some(state) if !state.running =>
+                     Logger[F].warn(s"Projection ${projection.name} is currently paused without error")
+                   case Some(state) =>
+                     Logger[F].info(s"Resuming projection ${projection.name} from position ${state.globalPosition}")
+                   case None =>
+                     Logger[F].info(
+                       s"No checkpoint found for projection ${projection.name}, starting from the beginning",
+                     )
             initialState     = maybeState.getOrElse(ProjectionCheckpointState(projection.name, -1L, true, None))
             projectionState <- Ref.of[F, ProjectionCheckpointState](initialState)
             initialSignal   <- Deferred[F, Unit]

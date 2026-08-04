@@ -27,6 +27,7 @@ import fs2.Stream
 
 import io.circe.Json
 import io.circe.parser.parse as parseJson
+import org.typelevel.log4cats.Logger
 
 import persistent4s.*
 
@@ -67,7 +68,7 @@ final private case class EncodedStorageRow(
   payload: Json,
 )
 
-final class PostgresEventStore[F[_]: Async: SecureRandom, A <: Event] private (
+final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] private (
   pool: Resource[F, Session[F]],
   codec: EventCodec[A],
   channelId: Identifier,
@@ -182,7 +183,7 @@ final class PostgresEventStore[F[_]: Async: SecureRandom, A <: Event] private (
         rowStream.evalMap {
           case (seqNum, eventId, eventType, eventVersion, tags, payload, isExternal, headers, recordedAt) =>
             val eventTypeName = EventTypeName.fromString(eventType)
-            parsePayload(eventTypeName, eventVersion, payload).map { event =>
+            parsePayload(seqNum, eventTypeName, eventVersion, payload).map { event =>
               EventEnvelope(
                 EventMetadata(
                   globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName,
@@ -321,10 +322,18 @@ final class PostgresEventStore[F[_]: Async: SecureRandom, A <: Event] private (
   private def chunked[T](rows: List[T], paramsPerRow: Int): List[List[T]] =
     rows.grouped(MaxUsableBindParams / paramsPerRow).toList
 
-  private def parsePayload(eventType: EventTypeName, eventVersion: Int, payload: Json): F[A] =
+  private def parsePayload(
+    globalPosition: Long,
+    eventType: EventTypeName,
+    eventVersion: Int,
+    payload: Json,
+  ): F[A] =
     codec.decode(eventType, eventVersion, payload.noSpaces) match
       case Right(event) => Async[F].pure(event)
-      case Left(error)  => Async[F].raiseError(error)
+      case Left(error)  =>
+        Logger[F].error(error)(
+          s"Failed to decode event of type ${eventType.value} at position $globalPosition",
+        ) *> Async[F].raiseError(error)
 
   private def tagsToJson(tags: Set[Tag]): Json =
     Json.arr(tags.map(t => Json.fromString(t.value)).toSeq*)
@@ -363,7 +372,7 @@ object PostgresEventStore:
     * @return
     *   a new PostgresEventStore instance
     */
-  def apply[F[_]: Async: SecureRandom, A <: Event](
+  def apply[F[_]: Async: Logger: SecureRandom, A <: Event](
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
     channelId: Identifier = NotificationChannel,

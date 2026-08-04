@@ -31,10 +31,14 @@ import persistent4s.EventStoreNotification.*
 
 import weaver.SimpleIOSuite
 
+import org.typelevel.log4cats.Logger
+
 object DefaultProjectorSuite extends SimpleIOSuite:
 
   import org.typelevel.otel4s.metrics.Meter
   import org.typelevel.otel4s.trace.Tracer
+
+  given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   given Tracer[IO] = Tracer.Implicits.noop
 

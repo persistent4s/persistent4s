@@ -23,7 +23,6 @@ import cats.syntax.all.*
 import fs2.io.net.Network
 import org.typelevel.otel4s.metrics.Histogram
 import org.typelevel.log4cats.Logger
-import org.typelevel.log4cats.slf4j.Slf4jLogger
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 import pureconfig.ConfigSource
@@ -106,7 +105,7 @@ object PostgresModule:
     val commandRuntime: CommandRuntime[F, A] =
       CommandRuntime(eventStore, Some(snapshotStore))
 
-    def projectionRuntime(using Async[F], Tracer[F], Meter[F]): ProjectionRuntime[F, A] =
+    def projectionRuntime(using Async[F], Logger[F], Tracer[F], Meter[F]): ProjectionRuntime[F, A] =
       ProjectionRuntime(DefaultProjector(eventStore, checkpoint))
 
     /** Build an atomic projection repository from derived PostgreSQL table metadata using this module's shared session
@@ -134,20 +133,19 @@ object PostgresModule:
     *   initialized event, command-snapshot, checkpoint and shared-session components, or a clear connection/config
     *   failure
     */
-  def make[F[_]: Async: Network: Tracer: Meter: Console: SecureRandom, A <: Event](
+  def make[F[_]: Async: Network: Logger: Tracer: Meter: Console: SecureRandom, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
   ): Resource[F, Components[F, A]] =
     for
-      logger <- Resource.eval(Slf4jLogger.create[F])
       config <- Resource.eval(loadConfig[F](configPath))
       _      <- Resource.eval(
-             logger.info(
+             Logger[F].info(
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
       pool       <- createSessionPool[F](config)
-      _          <- Resource.eval(initializeDatabase[F](pool, logger))
+      _          <- Resource.eval(initializeDatabase[F](pool))
       components <- components[F, A](pool, codec)
     yield components
 
@@ -160,26 +158,25 @@ object PostgresModule:
     * @return
     *   initialized event, command-snapshot, checkpoint and shared-session components
     */
-  def makeWithConfig[F[_]: Async: Network: Tracer: Meter: Console: SecureRandom, A <: Event](
+  def makeWithConfig[F[_]: Async: Network: Logger: Tracer: Meter: Console: SecureRandom, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
   ): Resource[F, Components[F, A]] =
     for
-      logger <- Resource.eval(Slf4jLogger.create[F])
-      _      <- Resource.eval(
-             logger.info(
+      _ <- Resource.eval(
+             Logger[F].info(
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
       pool       <- createSessionPool[F](config)
-      _          <- Resource.eval(initializeDatabase[F](pool, logger))
+      _          <- Resource.eval(initializeDatabase[F](pool))
       components <- components[F, A](pool, codec)
     yield components
 
   /** Wire the raw PostgreSQL store, wrap it with otel4s instrumentation, and expose the shared pool alongside command
     * snapshots so one configuration serves events, snapshots and read models.
     */
-  private def components[F[_]: Async: Tracer: Meter: SecureRandom, A <: Event](
+  private def components[F[_]: Async: Logger: Tracer: Meter: SecureRandom, A <: Event](
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
   ): Resource[F, Components[F, A]] =
@@ -243,16 +240,15 @@ object PostgresModule:
       },
     )
 
-  private def initializeDatabase[F[_]: Async](
+  private def initializeDatabase[F[_]: Async: Logger](
     pool: Resource[F, Session[F]],
-    logger: Logger[F],
   ): F[Unit] =
     pool.use { session =>
       for
         eventsTableExists <- checkTableExists(session, "events")
         _                 <-
-          if !eventsTableExists then logger.info("Event store schema not found, creating schema...")
-          else logger.info("Event store schema already exists, ensuring required objects are present")
+          if !eventsTableExists then Logger[F].info("Event store schema not found, creating schema...")
+          else Logger[F].info("Event store schema already exists, ensuring required objects are present")
         _ <- createSchema(session)
       yield ()
     }

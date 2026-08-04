@@ -24,12 +24,15 @@ import cats.syntax.all.*
 import persistent4s.{ProjectionCheckpointConflict, ProjectionCheckpointState, ProjectionCommit}
 
 import org.testcontainers.containers.PostgreSQLContainer
+import org.typelevel.log4cats.Logger
 import skunk.*
 import skunk.codec.all.*
 import skunk.implicits.*
 import weaver.IOSuite
 
 object PostgresAtomicRepositorySuite extends IOSuite:
+
+  given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   override def maxParallelism: Int = 1
 
