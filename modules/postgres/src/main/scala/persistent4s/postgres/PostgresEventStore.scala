@@ -37,15 +37,25 @@ import skunk.codec.all.*
 import skunk.data.Identifier
 import skunk.implicits.*
 
+/** A pending event's storage form: the schema the codec owns plus its payload parsed as JSON. */
+final private case class EncodedStorageRow(
+  eventType: EventTypeName,
+  version: Int,
+  payload: Json,
+)
+
 /** A PostgreSQL-backed implementation of the EventStore trait. This implementation uses Skunk for database access and
   * implements optimistic concurrency control for event appending.
   *
   * Events are stored in a table with the following schema:
   *   - sequence_number: BIGSERIAL PRIMARY KEY (global position)
+  *   - event_id: UUID NOT NULL UNIQUE (idempotency key)
   *   - event_type: TEXT NOT NULL
   *   - event_version: INTEGER NOT NULL
   *   - tags: JSONB NOT NULL (array of tag strings)
   *   - payload: JSONB NOT NULL
+  *   - is_external: BOOLEAN NOT NULL
+  *   - headers: JSONB NOT NULL
   *   - recorded_at: TIMESTAMPTZ NOT NULL
   *
   * [[readFrom]] streams events lazily using a PostgreSQL server-side cursor (fetching 256 rows per round-trip), so it
@@ -60,18 +70,14 @@ import skunk.implicits.*
   *   a resource for obtaining database sessions
   * @param codec
   *   the event codec for serializing/deserializing events; encoded payload strings must be valid JSON
+  * @param outboxEnabled
+  *   when true, every newly-inserted non-external event also enqueues an outbox row in the same transaction
   */
-/** A pending event's storage form: the schema the codec owns plus its payload parsed as JSON. */
-final private case class EncodedStorageRow(
-  eventType: EventTypeName,
-  version: Int,
-  payload: Json,
-)
-
 final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] private (
   pool: Resource[F, Session[F]],
   codec: EventCodec[A],
   channelId: Identifier,
+  outboxEnabled: Boolean,
 ) extends EventStore[F, A]
     with EventNotification[F]:
 
@@ -88,33 +94,58 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
     expectedIndex: Long,
     events: List[PendingEvent[A]]*,
   ): F[List[EventEnvelope[A]]] =
-    val flatEvents = events.flatten.toList
-    if flatEvents.isEmpty then Async[F].pure(List.empty)
-    else
-      val allTags = eventFilter.tags
-      val eventTypes = eventFilter.eventTypes
-      pool.use { session =>
-        session.transaction.use { _ =>
-          for
-            _         <- acquireAppendLocks(session, allTags)
-            _         <- checkForConflicts(session, allTags, eventTypes, expectedIndex)
-            envelopes <- insertEvents(session, flatEvents)
-            _         <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
-          yield envelopes
-        }
-      }
+    runAppend(Some((eventFilter, expectedIndex)), events.flatten.toList, Nil)
 
   override def appendUnchecked(
     events: List[PendingEvent[A]]*,
   ): F[List[EventEnvelope[A]]] =
-    val flatEvents = events.flatten.toList
-    if flatEvents.isEmpty then Async[F].pure(List.empty)
+    runAppend(None, events.flatten.toList, Nil)
+
+  /** Atomic append with optimistic-concurrency check, plus message enqueue in the same transaction. */
+  def appendWithMessages(
+    eventFilter: EventFilter,
+    expectedIndex: Long,
+    messages: List[OutgoingMessage],
+    events: List[PendingEvent[A]]*,
+  ): F[List[EventEnvelope[A]]] =
+    runAppend(Some((eventFilter, expectedIndex)), events.flatten.toList, messages)
+
+  /** Atomic append without OCC, plus message enqueue in the same transaction. */
+  def appendUncheckedWithMessages(
+    messages: List[OutgoingMessage],
+    events: List[PendingEvent[A]]*,
+  ): F[List[EventEnvelope[A]]] =
+    runAppend(None, events.flatten.toList, messages)
+
+  /** Shared transactional body for all four append entry points: optional OCC check, batched event insert, outbox and
+    * message enqueues, then the notifications — all committed together or not at all.
+    */
+  private def runAppend(
+    occ: Option[(EventFilter, Long)],
+    flatEvents: List[PendingEvent[A]],
+    messages: List[OutgoingMessage],
+  ): F[List[EventEnvelope[A]]] =
+    if flatEvents.isEmpty && messages.isEmpty then Async[F].pure(List.empty)
     else
       pool.use { session =>
         session.transaction.use { _ =>
           for
-            envelopes <- insertEvents(session, flatEvents)
-            _         <- session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
+            _ <- occ match
+                   case Some((filter, expectedIndex)) if flatEvents.nonEmpty =>
+                     acquireAppendLocks(session, filter.tags) *>
+                       checkForConflicts(session, filter.tags, filter.eventTypes, expectedIndex)
+                   case _ => Async[F].unit
+            envelopes <- if flatEvents.nonEmpty then insertEvents(session, flatEvents) else Async[F].pure(List.empty)
+            _         <- enqueueMessages(session, messages)
+            _         <-
+              if flatEvents.nonEmpty then
+                session.channel(channelId).notify(PostgresNotification.encode(EventStoreNotification.EventsAppended))
+              else Async[F].unit
+            // Assumes the message relay listens on PostgresMessageOutbox's default channel, as PostgresModule wires
+            // both sides. If the outbox is built with a custom channel, this notify would need to be told about it.
+            _ <-
+              if messages.nonEmpty then session.channel(PostgresMessageOutbox.NotificationChannel).notify("")
+              else Async[F].unit
           yield envelopes
         }
       }
@@ -281,14 +312,24 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
              }
       idToRow <- chunked(rows, paramsPerRow = 7)
                    .flatTraverse(chunk => session.execute(insertEventsQuery(chunk.size))(chunk))
-                   .map(_.map { case id *: seq *: recordedAt *: EmptyTuple => id -> (seq, recordedAt) }.toMap)
+                   .map(_.map { case id *: seq *: recordedAt *: inserted *: EmptyTuple =>
+                     id -> (seq, recordedAt, inserted)
+                   }.toMap)
       tagPairs = uniqueByEventId.flatMap { case (id, pending, _) =>
                    pending.tags.toList.map(tag => tag.value *: idToRow(id)._1 *: EmptyTuple)
                  }
       _ <- chunked(tagPairs, paramsPerRow = 2)
              .traverse_(chunk => session.execute(insertEventTagsCommand(chunk.size))(chunk).void)
+      // Only genuinely-new, non-external events get relayed: a redelivered event_id resolves to the existing row
+      // (inserted = false) and must not be published a second time.
+      _ <- enqueueOutbox(
+             session,
+             uniqueByEventId.collect {
+               case (id, pending, _) if idToRow(id)._3 && !pending.isExternal => idToRow(id)._1
+             },
+           )
     yield resolved.map { case (id, pending, enc) =>
-      val (sequenceNumber, recordedAt) = idToRow(id)
+      val (sequenceNumber, recordedAt, _) = idToRow(id)
       EventEnvelope(
         EventMetadata(
           globalPosition = sequenceNumber, id = id, tags = pending.tags, eventType = enc.eventType,
@@ -299,23 +340,36 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
       )
     }
 
+  private def enqueueOutbox(session: Session[F], globalPositions: List[Long]): F[Unit] =
+    if !outboxEnabled || globalPositions.isEmpty then Async[F].unit
+    else session.prepare(PostgresOutbox.insertCommand).flatMap(cmd => globalPositions.traverse_(cmd.execute))
+
+  private def enqueueMessages(session: Session[F], messages: List[OutgoingMessage]): F[Unit] =
+    if messages.isEmpty then Async[F].unit
+    else session.prepare(PostgresMessageOutbox.insertCommand).flatMap(cmd => messages.traverse_(cmd.execute))
+
   /** The storage form of a pending event: the schema the codec owns plus its payload as JSON.
     *
     * Fails fast when the caller's declared `eventType` disagrees with the codec's registered schema (the legacy
     * class-name identity is still accepted), and surfaces payload-encoding errors instead of silently writing `{}`.
     */
   private def encodeForStorage(pending: PendingEvent[A]): F[EncodedStorageRow] =
-    val encoded = codec.encodeWithSchema(pending.payload)
-    val storage = EventStorageSchema(encoded.eventType, encoded.version)
-    val declared = EventStorageSchema(pending.eventType, encoded.version)
+    val schemaEventType = codec.eventType(pending.payload)
+    val version = codec.eventVersion(pending.payload)
+    val storage = EventStorageSchema(schemaEventType, version)
+    val declared = EventStorageSchema(pending.eventType, version)
     val legacyEventType = EventTypeName.fromInstance(pending.payload)
 
-    if pending.eventType != encoded.eventType && pending.eventType != legacyEventType then
+    if pending.eventType != schemaEventType && pending.eventType != legacyEventType then
       Async[F].raiseError(EventSchemaMismatch(declared, storage, pending.payload.getClass.getName))
     else
-      parseJson(encoded.payload) match
-        case Left(error)        => Async[F].raiseError(error)
-        case Right(payloadJson) => Async[F].pure(EncodedStorageRow(encoded.eventType, encoded.version, payloadJson))
+      codec.encodeWithSchema(pending.payload) match
+        case Left(error) =>
+          Async[F].raiseError(new RuntimeException(s"EventCodec failed to encode event: ${error.getMessage}", error))
+        case Right(encoded) =>
+          parseJson(encoded.payload) match
+            case Left(error)        => Async[F].raiseError(error)
+            case Right(payloadJson) => Async[F].pure(EncodedStorageRow(encoded.eventType, encoded.version, payloadJson))
 
   private def resolveId(idOpt: Option[UUID]): F[UUID] = idOpt.fold(UUIDGen.randomUUID[F])(_.pure[F])
 
@@ -376,8 +430,9 @@ object PostgresEventStore:
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
     channelId: Identifier = NotificationChannel,
+    outboxEnabled: Boolean = false,
   ): PostgresEventStore[F, A] =
-    new PostgresEventStore[F, A](pool, codec, channelId)
+    new PostgresEventStore[F, A](pool, codec, channelId, outboxEnabled)
 
   private val tagsCodec: Codec[Set[Tag]] = jsonb.imap { json =>
     json.asArray
@@ -391,27 +446,30 @@ object PostgresEventStore:
       .getOrElse(Map.empty)
   }(headers => Json.obj(headers.view.mapValues(Json.fromString).toSeq*))
 
-  private val eventDecoder: Decoder[
-    Long *: UUID *: String *: Int *: Set[Tag] *: Json *: Boolean *: Map[String, String] *: OffsetDateTime *: EmptyTuple,
-  ] =
+  private[postgres] val eventDecoder: Decoder[EventRow] =
     int8 *: uuid *: text *: int4 *: tagsCodec *: jsonb *: bool *: headersCodec *: timestamptz
 
   private val acquireTagLockQuery: Query[String, String] =
     sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
 
+  /** The no-op `DO UPDATE` makes a duplicate `event_id` still produce a `RETURNING` row, so the caller always gets the
+    * committed envelope. `xmax = 0` then distinguishes a freshly inserted row from one that already existed: on a real
+    * insert the row carries no updating transaction id, whereas the upsert path leaves `xmax` set. That flag is what
+    * keeps the outbox from re-publishing a redelivered event.
+    */
   private def insertEventsQuery(
     n: Int,
   ): Query[
     List[UUID *: String *: Int *: Json *: Json *: Boolean *: Json *: EmptyTuple],
-    UUID *: Long *: OffsetDateTime *: EmptyTuple,
+    UUID *: Long *: OffsetDateTime *: Boolean *: EmptyTuple,
   ] =
     val rows = (uuid *: text *: int4 *: jsonb *: jsonb *: bool *: jsonb).values.list(n)
     sql"""
       INSERT INTO events (event_id, event_type, event_version, tags, payload, is_external, headers)
       VALUES $rows
       ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
-      RETURNING event_id, sequence_number, recorded_at
-    """.query(uuid *: int8 *: timestamptz)
+      RETURNING event_id, sequence_number, recorded_at, (xmax = 0) AS inserted
+    """.query(uuid *: int8 *: timestamptz *: bool)
 
   private def insertEventTagsCommand(
     n: Int,
@@ -459,7 +517,9 @@ object PostgresEventStore:
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
     """.query(int8)
 
-  private type EventRow =
+  // Widened so PostgresOutbox can reuse the same row shape and decoder for its join against `events`; keeping one
+  // definition is what stops the two SELECT column lists from drifting apart.
+  private[postgres] type EventRow =
     Long *: UUID *: String *: Int *: Set[Tag] *: Json *: Boolean *: Map[String, String] *: OffsetDateTime *: EmptyTuple
 
   private val readAllQuery: Query[Long, EventRow] =

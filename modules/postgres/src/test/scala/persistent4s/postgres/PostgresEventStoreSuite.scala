@@ -26,6 +26,7 @@ import io.circe.{Decoder, Encoder}
 
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.log4cats.Logger
 
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
@@ -35,7 +36,6 @@ import persistent4s.EventTypeName
 import persistent4s.Event
 import persistent4s.EventStore
 import persistent4s.PendingEvent
-import org.typelevel.log4cats.Logger
 
 given Tracer[IO] = Tracer.Implicits.noop
 
@@ -115,7 +115,7 @@ object PostgresEventStoreSuite extends IOSuite:
     IO(s"$prefix-${UUID.randomUUID().toString}")
 
   test("append stores event with correct payload, tags, and event type") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id     <- freshId("student")
         tag     = Tag("student", id)
@@ -130,47 +130,49 @@ object PostgresEventStoreSuite extends IOSuite:
       )
   }
 
-  test("append round-trips non-empty headers through the store") { case PostgresModule.Components(store, _, _, _, _) =>
-    val headers = Map("correlationId" -> "abc-123", "userId" -> "42")
-    for
-      id <- freshId("student")
-      tag = Tag("student", id)
-      _  <- store
-             .append(
-               EventFilter(Set.empty, Set(tag)),
-               0L,
-               List(
-                 PendingEvent(
-                   TestEvent("hello"),
-                   Set(tag),
-                   EventTypeName.of[TestEvent],
-                   isExternal = false,
-                   headers = headers,
+  test("append round-trips non-empty headers through the store") {
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
+      val headers = Map("correlationId" -> "abc-123", "userId" -> "42")
+      for
+        id <- freshId("student")
+        tag = Tag("student", id)
+        _  <- store
+               .append(
+                 EventFilter(Set.empty, Set(tag)),
+                 0L,
+                 List(
+                   PendingEvent(
+                     TestEvent("hello"),
+                     Set(tag),
+                     EventTypeName.of[TestEvent],
+                     isExternal = false,
+                     headers = headers,
+                   ),
                  ),
-               ),
-             )
-             .void
-      events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
-    yield expect.all(
-      events.length == 1,
-      events.head.metadata.headers == headers,
-    )
+               )
+               .void
+        events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
+      yield expect.all(
+        events.length == 1,
+        events.head.metadata.headers == headers,
+      )
   }
 
-  test("append defaults to empty headers when none are provided") { case PostgresModule.Components(store, _, _, _, _) =>
-    for
-      id     <- freshId("student")
-      tag     = Tag("student", id)
-      _      <- appendOne(store, 0L, Set(tag), "hello")
-      events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
-    yield expect.all(
-      events.length == 1,
-      events.head.metadata.headers.isEmpty,
-    )
+  test("append defaults to empty headers when none are provided") {
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
+      for
+        id     <- freshId("student")
+        tag     = Tag("student", id)
+        _      <- appendOne(store, 0L, Set(tag), "hello")
+        events <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
+      yield expect.all(
+        events.length == 1,
+        events.head.metadata.headers.isEmpty,
+      )
   }
 
   test("a multi-event append keeps each event's own headers, tags and isExternal") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       // Multiple events go out as a single multi-row INSERT, so a misaligned bind parameter would
       // silently attach one event's headers to another. Distinct values per row catch that.
       for
@@ -224,7 +226,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("a duplicate UUID within a single append is written once and shares the same metadata") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id     <- freshId("batchdedup")
         tag     = Tag("batchdedup", id)
@@ -261,29 +263,30 @@ object PostgresEventStoreSuite extends IOSuite:
       )
   }
 
-  test("readFrom skips events at or before the given position") { case PostgresModule.Components(store, _, _, _, _) =>
-    // In Postgres the expectedIndex is the actual globalPosition of the last matching event,
-    // not a per-tag counter — so we read it back after each append rather than hardcoding.
-    for
-      id        <- freshId("student")
-      tag        = Tag("student", id)
-      readFilter = EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))
-      _         <- appendOne(store, 0L, Set(tag), "e1")
-      pos1      <- store.readFrom(0L, readFilter).compile.toList.map(_.head.metadata.globalPosition)
-      _         <- appendOne(store, pos1, Set(tag), "e2")
-      pos2      <- store.readFrom(0L, readFilter).compile.toList.map(_.last.metadata.globalPosition)
-      _         <- appendOne(store, pos2, Set(tag), "e3")
-      all       <- store.readFrom(0L, readFilter).compile.toList
-      after     <- store.readFrom(pos1, readFilter).compile.toList
-    yield expect.all(
-      all.length == 3,
-      after.length == 2,
-      after.map(_.payload) == List(TestEvent("e2"), TestEvent("e3")),
-    )
+  test("readFrom skips events at or before the given position") {
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
+      // In Postgres the expectedIndex is the actual globalPosition of the last matching event,
+      // not a per-tag counter — so we read it back after each append rather than hardcoding.
+      for
+        id        <- freshId("student")
+        tag        = Tag("student", id)
+        readFilter = EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))
+        _         <- appendOne(store, 0L, Set(tag), "e1")
+        pos1      <- store.readFrom(0L, readFilter).compile.toList.map(_.head.metadata.globalPosition)
+        _         <- appendOne(store, pos1, Set(tag), "e2")
+        pos2      <- store.readFrom(0L, readFilter).compile.toList.map(_.last.metadata.globalPosition)
+        _         <- appendOne(store, pos2, Set(tag), "e3")
+        all       <- store.readFrom(0L, readFilter).compile.toList
+        after     <- store.readFrom(pos1, readFilter).compile.toList
+      yield expect.all(
+        all.length == 3,
+        after.length == 2,
+        after.map(_.payload) == List(TestEvent("e2"), TestEvent("e3")),
+      )
   }
 
   test("readFrom with empty event type filter matches all event types") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id     <- freshId("student")
         tag     = Tag("student", id)
@@ -296,7 +299,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("concurrent appends with the same tag allow only one success") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id             <- freshId("student")
         tag             = Tag("student", id)
@@ -326,7 +329,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("concurrent appends with overlapping tag sets allow only one success") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         studentId      <- freshId("student")
         courseId       <- freshId("course")
@@ -346,26 +349,27 @@ object PostgresEventStoreSuite extends IOSuite:
       )
   }
 
-  test("many concurrent appends with distinct tags all succeed") { case PostgresModule.Components(store, _, _, _, _) =>
-    val numberOfEvents = 50
+  test("many concurrent appends with distinct tags all succeed") {
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
+      val numberOfEvents = 50
 
-    for
-      runId   <- freshId("distinct")
-      tags     = (1 to numberOfEvents).map(index => Tag("student", s"$runId-$index")).toList
-      results <- tags.parTraverse { tag =>
-                   appendOne(store, 0L, Set(tag), tag.id).attempt
-                 }
-      events   <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), tags.toSet)).compile.toList
-      positions = events.map(_.metadata.globalPosition)
-    yield expect.all(
-      results.forall(_.isRight),
-      events.length == numberOfEvents,
-      positions.distinct.length == numberOfEvents,
-    )
+      for
+        runId   <- freshId("distinct")
+        tags     = (1 to numberOfEvents).map(index => Tag("student", s"$runId-$index")).toList
+        results <- tags.parTraverse { tag =>
+                     appendOne(store, 0L, Set(tag), tag.id).attempt
+                   }
+        events   <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), tags.toSet)).compile.toList
+        positions = events.map(_.metadata.globalPosition)
+      yield expect.all(
+        results.forall(_.isRight),
+        events.length == numberOfEvents,
+        positions.distinct.length == numberOfEvents,
+      )
   }
 
   test("appends with fresh tags can start from expected index zero after prior events") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         firstTag  <- freshId("first").map(id => Tag("student", id))
         secondTag <- freshId("second").map(id => Tag("student", id))
@@ -380,7 +384,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("append rejects an expected index ahead of the scoped revision") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id     <- freshId("future-index")
         tag     = Tag("student", id)
@@ -392,7 +396,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("append with empty tags uses all tags for conflict detection") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         firstTag  <- freshId("first").map(id => Tag("student", id))
         secondTag <- freshId("second").map(id => Tag("student", id))
@@ -417,38 +421,39 @@ object PostgresEventStoreSuite extends IOSuite:
       yield expect(isConflict(result))
   }
 
-  test("notify completes without error") { case PostgresModule.Components(_, _, _, _, sendNotification) =>
+  test("notify completes without error") { case PostgresModule.Components(_, _, _, _, _, _, _, _, sendNotification) =>
     sendNotification(EventStoreNotification.PauseProjection("test-proj")).as(success)
   }
 
-  test("appending with a provided UUID sets isExternal to true") { case PostgresModule.Components(store, _, _, _, _) =>
-    for
-      id  <- freshId("external")
-      tag  = Tag("external", id)
-      uuid = UUID.randomUUID()
-      _   <- store.append(
-             EventFilter(Set.empty, Set(tag)),
-             0L,
-             List(
-               PendingEvent(
-                 TestEvent("external-event"),
-                 Set(tag),
-                 EventTypeName.of[TestEvent],
-                 true,
-                 Some(uuid),
-                 Map.empty,
+  test("appending with a provided UUID sets isExternal to true") {
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
+      for
+        id  <- freshId("external")
+        tag  = Tag("external", id)
+        uuid = UUID.randomUUID()
+        _   <- store.append(
+               EventFilter(Set.empty, Set(tag)),
+               0L,
+               List(
+                 PendingEvent(
+                   TestEvent("external-event"),
+                   Set(tag),
+                   EventTypeName.of[TestEvent],
+                   true,
+                   Some(uuid),
+                   Map.empty,
+                 ),
                ),
-             ),
-           )
-      events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
-    yield expect.all(
-      events.length == 1,
-      events.head.metadata.isExternal == true,
-    )
+             )
+        events <- store.readFrom(0L, EventFilter(Set(EventTypeName.of[TestEvent]), Set(tag))).compile.toList
+      yield expect.all(
+        events.length == 1,
+        events.head.metadata.isExternal == true,
+      )
   }
 
   test("appending without a provided UUID sets isExternal to false") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id     <- freshId("internal")
         tag     = Tag("internal", id)
@@ -461,7 +466,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("appending a duplicate UUID is a no-op and returns the original global position") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id  <- freshId("dedup")
         tag  = Tag("dedup", id)
@@ -495,7 +500,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("appendUnchecked stores event with correct payload, tags, event type, and isExternal") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id     <- freshId("imported")
         tag     = Tag("imported", id)
@@ -512,7 +517,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("concurrent appendUnchecked calls with the same tag all succeed (no OCC)") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       // Unlike append, appendUnchecked performs no conflict check, so parallel writes with overlapping tags
       // do not race — both events land in the store.
       for
@@ -530,7 +535,7 @@ object PostgresEventStoreSuite extends IOSuite:
   }
 
   test("appendUnchecked with a duplicate UUID is a no-op and returns the original global position") {
-    case PostgresModule.Components(store, _, _, _, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
       for
         id   <- freshId("dedup-unchecked")
         tag   = Tag("imported", id)
@@ -550,7 +555,7 @@ object PostgresEventStoreSuite extends IOSuite:
       )
   }
 
-  test("appendUnchecked with no events is a no-op") { case PostgresModule.Components(store, _, _, _, _) =>
+  test("appendUnchecked with no events is a no-op") { case PostgresModule.Components(store, _, _, _, _, _, _, _, _) =>
     for
       before <- store.readFrom(0L, EventFilter(Set.empty, Set.empty)).compile.toList.map(_.length)
       _      <- store.appendUnchecked()

@@ -19,6 +19,7 @@ package persistent4s.examples.library.infrastructure
 import java.util.UUID
 import scala.concurrent.duration.*
 import cats.effect.*
+import com.comcast.ip4s.*
 
 import fs2.concurrent.Topic
 import fs2.io.net.Network
@@ -55,21 +56,27 @@ final class LibraryModule private (
 
 object LibraryModule:
 
-  def make(configPath: String = "persistent4s.postgres"): Resource[IO, LibraryModule] =
+  def make(
+    configPath: String = "persistent4s.postgres",
+    monitoringPort: Port = port"9595",
+  ): Resource[IO, LibraryModule] =
 
     for
       resources    <- PostgresModule.make[IO, LibraryEvent](LibraryEvent.eventCodec, configPath)
       store         = resources.eventStore
       commands      = resources.commandRuntime
       checkpoint    = resources.checkpoint
-      _            <- MonitoringServer.make(checkpoint, resources.sendNotification)
+      _            <- MonitoringServer.make(checkpoint, resources.sendNotification, monitoringPort)
       bookRepo      = BookRepository.make(resources.sessions)
       memberRepo    = MemberRepository.make(resources.sessions)
       borrowingRepo = BorrowingRepository.make(resources.sessions)
       bookProj      = BookProjection(bookRepo)
       // AddBook answers with the projected book, so its projection publishes to a topic the command waits on.
-      bookTopic   <- Resource.eval(Topic[IO, (UUID, Either[Throwable, Map[UUID, Option[BookState]]])])
-      projections <- resources.projectionRuntime.startAll { registered =>
+      bookTopic <- Resource.eval(Topic[IO, (UUID, Either[Throwable, Map[UUID, Option[BookState]]])])
+      // Each projection's loop runs under leader election. With several instances of this service pointed at the
+      // same database, only the elected leader drives a given projection, so they never race the shared
+      // checkpoint; another instance takes over automatically if the leader stops.
+      projections <- resources.leaderElectedProjectionRuntime.startAll { registered =>
                        registered.run(bookProj, Some(bookTopic))
                        registered.run(MemberProjection(memberRepo))
                        registered.run(BorrowingProjection(borrowingRepo))

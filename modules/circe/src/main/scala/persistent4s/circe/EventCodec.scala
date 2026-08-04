@@ -41,8 +41,8 @@ object CirceEventCodec:
     decodeEvent: (EventTypeName, Json) => Either[Throwable, A],
   ): EventCodec[A] =
     new EventCodec[A]:
-      def encode(event: A): String =
-        encodeEvent(event).noSpaces
+      def encode(event: A): Either[Throwable, String] =
+        scala.util.Try(encodeEvent(event).noSpaces).toEither
 
       def decode(eventType: EventTypeName, payload: String): Either[Throwable, A] =
         parser.parse(payload).left.map(e => e: Throwable).flatMap(json => decodeEvent(eventType, json))
@@ -113,8 +113,10 @@ object CirceEventCodec:
         .toRight(new RuntimeException(s"Unknown event type: ${eventType.value}"))
 
     new EventCodec[A]:
-      def encode(event: A): String =
-        leafFor(event).encoder(event).noSpaces
+      // `leafFor` throws when no encoder was derived for the event's concrete class; surfacing that as a `Left` keeps
+      // the failure on the codec's declared error channel, as in `make` above.
+      def encode(event: A): Either[Throwable, String] =
+        scala.util.Try(leafFor(event).encoder(event).noSpaces).toEither
 
       override def eventType(event: A): EventTypeName =
         leafFor(event).eventType

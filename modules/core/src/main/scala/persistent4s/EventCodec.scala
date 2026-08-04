@@ -24,8 +24,10 @@ package persistent4s
   */
 trait EventCodec[A <: Event]:
 
-  /** Serialize an event to a String representation. */
-  def encode(event: A): String
+  /** Serialize an event to a String representation. Returns `Left` if encoding fails for any reason (e.g. the codec has
+    * no encoder registered for the event's concrete type, or the underlying serializer rejects the value).
+    */
+  def encode(event: A): Either[Throwable, String]
 
   /** Resolve the durable event identifier written alongside an encoded payload. Legacy codecs retain class-name-based
     * identity; schema-aware codecs override this with the registered [[EventSchema]].
@@ -36,9 +38,11 @@ trait EventCodec[A <: Event]:
   /** Resolve the schema version written alongside an encoded payload. */
   def eventVersion(event: A): Int = 1
 
-  /** Encode a payload and its storage metadata in one operation. */
-  final def encodeWithSchema(event: A): EncodedEvent =
-    EncodedEvent(eventType(event), eventVersion(event), encode(event))
+  /** Encode a payload and its storage metadata in one operation. Propagates the `Left` from [[encode]] rather than
+    * persisting a payload the codec could not produce.
+    */
+  final def encodeWithSchema(event: A): Either[Throwable, EncodedEvent] =
+    encode(event).map(EncodedEvent(eventType(event), eventVersion(event), _))
 
   /** Deserialize an event from its type name and String representation. */
   def decode(eventType: EventTypeName, payload: String): Either[Throwable, A]

@@ -25,30 +25,18 @@ import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.otel4s.metrics.Meter
 import java.util.UUID
 
-/** A Projector is responsible for running a Projection. It manages the lifecycle of the projection, including loading
-  * the last checkpoint, subscribing to event notifications, and ensuring that events are processed in the correct
-  * order. The projector should handle any necessary error handling and retries to ensure that the projection processes
-  * events reliably.
-  *
-  * Delivery semantics are projector-dependent. The default implementation processes events sequentially within each
-  * batch while keeping the intermediate state in memory. When a batch completes successfully, it persists the updated
-  * states and advances the checkpoint once for the last processed event. If handling an event fails, it persists the
-  * successfully computed state up to the previous event and saves the checkpoint for that last fully processed event
-  * before failing the stream. Unless state persistence and checkpoint persistence are committed atomically, processing
-  * remains at-least-once and projection persistence should therefore be idempotent.
-  *
-  * @tparam F
-  *   the effect type, such as IO
-  * @tparam A
-  *   the event type, which must extend the Event trait
-  * @tparam K
-  *   the key type for fetching and persisting state
+/** Drives a [[Projection]] by reading events from an [[EventStore]], tracking progress via a [[ProjectionCheckpoint]],
+  * and reacting to [[EventNotification]]s. Delivery semantics (batching, retry, checkpoint frequency) are determined by
+  * the implementation.
   */
 trait Projector[F[_], A <: Event]:
 
-  /** Run the given projection. This should start the projection and keep it running, processing events as they come in.
-    * The returned stream may replay already processed events after a failure unless the projection state updates and
-    * checkpoint updates are persisted atomically. The default projector only checkpoints fully processed events.
+  /** Run the projection as an infinite stream. The stream only terminates on an unrecoverable error; the caller is
+    * responsible for restart logic.
+    *
+    * '''Single runner:''' a projection shares one checkpoint, so running this on multiple instances concurrently races
+    * the checkpoint and double-applies events. Wrap it in a [[LeaderElection]] so only one instance drives a given
+    * projection at a time.
     *
     * @param projection
     *   the projection to run

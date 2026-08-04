@@ -19,22 +19,20 @@ package persistent4s
 import java.time.Instant
 import java.util.UUID
 
-/** EventMetadata contains metadata about an event, such as its global position in the event store, its tags, its type,
-  * and the timestamp of when the event was created. This metadata is used to provide context about the event and can be
-  * used for filtering and querying events in the event store.
+/** Metadata attached to every stored event.
   *
   * @param globalPosition
-  *   the global position of the event in the event store
+  *   the event's position in the global sequence
   * @param id
-  *   the UUID of the event
+  *   unique identifier for the event, used for idempotent re-ingestion
   * @param tags
   *   the tags associated with the event
   * @param eventType
   *   the type of the event
   * @param isExternal
-  *   whether the event was come from an external domain or not
+  *   whether the event originated from an external domain
   * @param timestamp
-  *   the timestamp of when the event was created
+  *   the instant at which the event was recorded
   * @param headers
   *   arbitrary author-supplied key-value metadata
   * @param eventVersion

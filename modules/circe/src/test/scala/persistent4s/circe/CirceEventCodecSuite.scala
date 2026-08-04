@@ -101,7 +101,8 @@ object CirceEventCodecSuite extends SimpleIOSuite:
 
   pureTest("encode and decode form a round-trip") {
     val event = MyEvent("hello")
-    expect(codec.decode(eventType, codec.encode(event)) == Right(event))
+    val roundTrip = codec.encode(event).flatMap(s => codec.decode(eventType, s))
+    expect(roundTrip == Right(event))
   }
 
   pureTest("decode returns Left for invalid JSON") {
@@ -114,15 +115,28 @@ object CirceEventCodecSuite extends SimpleIOSuite:
   }
 
   pureTest("encode produces compact JSON without whitespace") {
-    val encoded = codec.encode(MyEvent("hello"))
-    expect(!encoded.contains(" ") && !encoded.contains("\n"))
+    codec.encode(MyEvent("hello")) match
+      case Right(s) => expect(!s.contains(" ") && !s.contains("\n"))
+      case Left(e)  => failure(s"encode failed: ${e.getMessage}")
+  }
+
+  pureTest("encode returns Left when the underlying encoder throws") {
+    val brokenCodec = CirceEventCodec.make[MyEvent](
+      encodeEvent = _ => throw new RuntimeException("boom"),
+      decodeEvent = (_, json) => json.as[MyEvent].left.map(identity),
+    )
+    brokenCodec.encode(MyEvent("hello")) match
+      case Left(e)  => expect(e.getMessage == "boom")
+      case Right(_) => failure("expected Left from a throwing encoder")
   }
 
   pureTest("builder combines independently sealed event families") {
     val events: List[OpenEvent] = List(FirstEvent("hello"), SecondEvent(42))
     expect(
       events.forall { event =>
-        openHierarchyCodec.decode(EventTypeName.fromInstance(event), openHierarchyCodec.encode(event)) == Right(event)
+        openHierarchyCodec
+          .encode(event)
+          .flatMap(payload => openHierarchyCodec.decode(EventTypeName.fromInstance(event), payload)) == Right(event)
       },
     )
   }
@@ -139,9 +153,11 @@ object CirceEventCodecSuite extends SimpleIOSuite:
     val event = NameChanged("current")
     val encoded = evolvingCodec.encodeWithSchema(event)
 
-    expect(encoded.eventType.value == "library.name-changed") and
-      expect(encoded.version == 3) and
-      expect(evolvingCodec.decode(encoded.eventType, encoded.version, encoded.payload) == Right(event))
+    expect(encoded.map(_.eventType.value) == Right("library.name-changed")) and
+      expect(encoded.map(_.version) == Right(3)) and
+      expect(
+        encoded.flatMap(e => evolvingCodec.decode(e.eventType, e.version, e.payload)) == Right(event),
+      )
   }
 
   pureTest("versioned decoding applies every JSON upcast step in order") {
@@ -168,7 +184,7 @@ object CirceEventCodecSuite extends SimpleIOSuite:
     val event = NameChanged("current")
     val encoded = evolvingCodec.encodeWithSchema(event)
 
-    expect(evolvingCodec.decode(encoded.eventType, encoded.payload) == Right(event))
+    expect(encoded.flatMap(e => evolvingCodec.decode(e.eventType, e.payload)) == Right(event))
   }
 
   pureTest("versioned decoding reports a missing evolution step") {

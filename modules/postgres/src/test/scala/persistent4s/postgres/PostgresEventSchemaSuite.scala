@@ -179,7 +179,8 @@ object PostgresEventSchemaSuite extends IOSuite:
 
   test("append rejects malformed JSON from a custom codec instead of storing an empty object") { resources =>
     val malformedCodec = new EventCodec[VersionedEvent]:
-      def encode(event: VersionedEvent): String = "not-json"
+      // Encoding succeeds; the payload just isn't JSON, which is what the store must reject.
+      def encode(event: VersionedEvent): Either[Throwable, String] = Right("not-json")
       def decode(eventType: EventTypeName, payload: String): Either[Throwable, VersionedEvent] =
         Left(new UnsupportedOperationException)
 

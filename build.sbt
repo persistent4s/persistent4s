@@ -124,14 +124,17 @@ lazy val circe = (project in file("modules/circe"))
   )
 
 lazy val kafka = (project in file("modules/kafka"))
-  .dependsOn(core)
+  .dependsOn(core, circe % Test)
   .settings(
     name                 := "persistent4s-kafka",
     libraryDependencies ++= List(
-      "org.typelevel"     %% "fs2-kafka"       % Fs2KafkaV,
-      "org.typelevel"     %% "weaver-cats"     % WeaverV         % Test,
-      "ch.qos.logback"     % "logback-classic" % LogbackV        % Test,
-      "org.testcontainers" % "kafka"           % TestcontainersV % Test,
+      "org.typelevel"     %% "fs2-kafka"           % Fs2KafkaV,
+      "io.circe"          %% "circe-core"          % CirceV,
+      "io.circe"          %% "circe-parser"        % CirceV,
+      "org.typelevel"     %% "weaver-cats"         % WeaverV         % Test,
+      "org.typelevel"     %% "cats-effect-testkit" % CatsEffectV     % Test,
+      "ch.qos.logback"     % "logback-classic"     % LogbackV        % Test,
+      "org.testcontainers" % "kafka"               % TestcontainersV % Test,
     ),
   )
 
@@ -157,10 +160,11 @@ lazy val tests = (project in file("modules/tests"))
   )
 
 lazy val examples = (project in file("modules/examples"))
-  .dependsOn(core, testkit, postgres, circe, monitoring)
+  .dependsOn(core, testkit, postgres, circe, kafka, monitoring)
   .enablePlugins(NoPublishPlugin, Smithy4sCodegenPlugin)
   .settings(
     name                 := "persistent4s-examples",
+    fork                 := true,
     libraryDependencies ++= List(
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s"         % Smithy4sV,
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s-swagger" % Smithy4sV,

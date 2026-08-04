@@ -27,7 +27,7 @@ object EventSchemaSuite extends SimpleIOSuite:
   final case class TestEvent(value: String, entityId: UUID = new UUID(0L, 0L)) extends Event
 
   private val legacyCodec = new EventCodec[TestEvent]:
-    def encode(event: TestEvent): String = event.value
+    def encode(event: TestEvent): Either[Throwable, String] = Right(event.value)
 
     def decode(eventType: EventTypeName, payload: String): Either[Throwable, TestEvent] =
       Right(TestEvent(payload))
@@ -81,9 +81,9 @@ object EventSchemaSuite extends SimpleIOSuite:
     val event = TestEvent("payload")
     val encoded = legacyCodec.encodeWithSchema(event)
 
-    expect(encoded.eventType == EventTypeName.of[TestEvent]) and
-      expect(encoded.version == 1) and
-      expect(encoded.payload == "payload")
+    expect(encoded.map(_.eventType) == Right(EventTypeName.of[TestEvent])) and
+      expect(encoded.map(_.version) == Right(1)) and
+      expect(encoded.map(_.payload) == Right("payload"))
   }
 
   pureTest("legacy codecs reject unknown payload versions") {

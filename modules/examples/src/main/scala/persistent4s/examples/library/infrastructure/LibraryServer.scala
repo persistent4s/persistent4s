@@ -18,25 +18,45 @@ package persistent4s.examples.library.infrastructure
 
 import scala.concurrent.duration.*
 
-import cats.effect.{IO, IOApp}
+import cats.effect.{ExitCode, IO, IOApp}
 
 import com.comcast.ip4s.*
 import org.http4s.ember.server.EmberServerBuilder
 
-object LibraryServer extends IOApp.Simple:
+object LibraryServer extends IOApp:
 
-  def run: IO[Unit] =
-    LibraryModule.make().use { module =>
-      LibraryRoutes.make(module).use { routes =>
-        EmberServerBuilder
-          .default[IO]
-          .withHost(host"0.0.0.0")
-          .withPort(port"8182")
-          .withShutdownTimeout(2.seconds)
-          .withHttpApp(routes.orNotFound)
-          .build
-          .useForever
-          .race(module.projections.await)
-          .void
+  private val DefaultHost: Host = host"0.0.0.0"
+
+  private val DefaultPort: Port = port"8182"
+
+  private val DefaultMonitoringPort: Port = port"9595"
+
+  private def httpConfig(args: List[String]): (Host, Port, Port) =
+    val host = args.lift(0).orElse(sys.env.get("LIBRARY_HTTP_HOST")).flatMap(Host.fromString).getOrElse(DefaultHost)
+    val port = args.lift(1).orElse(sys.env.get("LIBRARY_HTTP_PORT")).flatMap(Port.fromString).getOrElse(DefaultPort)
+    val monitoringPort = args
+      .lift(2)
+      .orElse(sys.env.get("LIBRARY_MONITORING_PORT"))
+      .flatMap(Port.fromString)
+      .getOrElse(DefaultMonitoringPort)
+    (host, port, monitoringPort)
+
+  def run(args: List[String]): IO[ExitCode] =
+    val (host, port, monitoringPort) = httpConfig(args)
+    LibraryModule
+      .make(monitoringPort = monitoringPort)
+      .use { module =>
+        LibraryRoutes.make(module).use { routes =>
+          EmberServerBuilder
+            .default[IO]
+            .withHost(host)
+            .withPort(port)
+            .withShutdownTimeout(2.seconds)
+            .withHttpApp(routes.orNotFound)
+            .build
+            .useForever
+            .race(module.projections.await)
+            .void
+        }
       }
-    }
+      .as(ExitCode.Success)

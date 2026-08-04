@@ -14,10 +14,13 @@
  * limitations under the License.
  */
 
-package persistent4s.kafka
+package persistent4s
 
-import persistent4s.{Event, EventEnvelope}
-
+/** Publishes [[EventEnvelope]]s to a topic. */
 trait EventPublisher[F[_], A <: Event]:
 
-  def publish(topic: String, event: EventEnvelope[A]): F[Unit]
+  /** Publish a single envelope to `topic`. */
+  def publish(topic: String, envelope: EventEnvelope[A]): F[Unit]
+
+  /** Publish a batch of envelopes to `topic` in order. */
+  def publish(topic: String, envelopes: List[EventEnvelope[A]]): F[Unit]
