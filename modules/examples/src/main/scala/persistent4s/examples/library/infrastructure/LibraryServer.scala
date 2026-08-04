@@ -16,11 +16,12 @@
 
 package persistent4s.examples.library.infrastructure
 
+import scala.concurrent.duration.*
+
 import cats.effect.{IO, IOApp}
+
 import com.comcast.ip4s.*
 import org.http4s.ember.server.EmberServerBuilder
-
-import scala.concurrent.duration.*
 
 object LibraryServer extends IOApp.Simple:
 
@@ -35,5 +36,7 @@ object LibraryServer extends IOApp.Simple:
           .withHttpApp(routes.orNotFound)
           .build
           .useForever
+          .race(module.projections.await)
+          .void
       }
     }

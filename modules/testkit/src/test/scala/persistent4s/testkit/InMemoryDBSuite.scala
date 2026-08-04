@@ -17,6 +17,7 @@
 package persistent4s.testkit
 
 import cats.effect.IO
+
 import weaver.SimpleIOSuite
 
 object InMemoryDBSuite extends SimpleIOSuite:

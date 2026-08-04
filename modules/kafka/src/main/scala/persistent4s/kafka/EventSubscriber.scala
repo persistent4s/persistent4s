@@ -17,6 +17,7 @@
 package persistent4s.kafka
 
 import fs2.Stream
+
 import persistent4s.{Event, EventEnvelope}
 
 trait EventSubscriber[F[_], A <: Event]:

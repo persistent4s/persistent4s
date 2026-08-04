@@ -16,9 +16,10 @@
 
 package persistent4s.examples.library.domain.book
 
-import persistent4s.{CommandHandler, Tag}
-import persistent4s.examples.library.domain.{BookAdded, LibraryEvent}
 import java.util.UUID
+
+import persistent4s.EventSourcedCommandHandler
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
 final case class AddBook(
   bookId: UUID,
@@ -27,28 +28,21 @@ final case class AddBook(
   totalCopies: Int,
 )
 
-final case class AddBookState(exists: Boolean)
+object AddBook:
 
-object AddBookHandler extends CommandHandler[AddBook, AddBookState, LibraryEvent]:
+  enum Error:
 
-  def tags(command: AddBook): Set[Tag] =
-    Set(Tag("book", command.bookId))
+    case AlreadyExists(bookId: UUID)
 
-  def initial: AddBookState =
-    AddBookState(exists = false)
+  object Handler extends EventSourcedCommandHandler[AddBook, Boolean, LibraryEvent, Error]:
 
-  override def evolve(command: AddBook, state: AddBookState, event: LibraryEvent): AddBookState =
-    event match
-      case _: BookAdded => state.copy(exists = true)
-      case _            => state
+    override protected val behavior = handler(initial = false):
+      scope(LibraryScopes.Book)(_.bookId)
 
-  def validate(state: AddBookState, command: AddBook): Either[Throwable, Unit] =
-    if (state.exists) Left(new Exception("Book already exists")) else Right(())
+      on[BookAdded].evolve(_ => true)
 
-  def decide(state: AddBookState, command: AddBook): List[(Set[Tag], LibraryEvent)] =
-    List(
-      (
-        Set(Tag("book", command.bookId)),
-        BookAdded(command.bookId, command.title, command.author, command.totalCopies),
-      ),
-    )
+      reject:
+        case (true, command) => Error.AlreadyExists(command.bookId)
+
+      emit: command =>
+        BookAdded(command.bookId, command.title, command.author, command.totalCopies)

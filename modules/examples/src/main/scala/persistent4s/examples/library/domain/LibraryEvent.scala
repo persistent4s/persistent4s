@@ -16,46 +16,20 @@
 
 package persistent4s.examples.library.domain
 
-import io.circe.{Decoder, Encoder}
+import persistent4s.circe.CirceEventCodec
+import persistent4s.examples.library.domain.book.BookEvent
+import persistent4s.examples.library.domain.borrowing.BorrowingEvent
+import persistent4s.examples.library.domain.member.MemberEvent
+import persistent4s.{Event, EventCodec}
 
-import java.time.OffsetDateTime
-import java.util.UUID
+trait LibraryEvent extends Event
 
-import persistent4s.Event
+object LibraryEvent:
 
-sealed trait LibraryEvent extends Event
-
-sealed trait BookEvent extends LibraryEvent
-
-sealed trait MemberEvent extends LibraryEvent
-
-sealed trait BorrowingEvent extends LibraryEvent
-
-// Book Events
-final case class BookAdded(
-  bookId: UUID,
-  title: String,
-  author: String,
-  totalCopies: Int,
-) extends BookEvent derives Encoder, Decoder
-
-// Member Events
-final case class MemberRegistered(
-  memberId: UUID,
-  name: String,
-  email: String,
-) extends MemberEvent derives Encoder, Decoder
-
-// Borrowing Events
-final case class BookBorrowed(
-  bookId: UUID,
-  memberId: UUID,
-  borrowedAt: OffsetDateTime,
-  dueDate: OffsetDateTime,
-) extends BorrowingEvent derives Encoder, Decoder
-
-final case class BookReturned(
-  bookId: UUID,
-  memberId: UUID,
-  returnedAt: OffsetDateTime,
-) extends BorrowingEvent derives Encoder, Decoder
+  val eventCodec: EventCodec[LibraryEvent] =
+    CirceEventCodec
+      .builder[LibraryEvent]
+      .add[BookEvent]
+      .add[MemberEvent]
+      .add[BorrowingEvent]
+      .build

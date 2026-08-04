@@ -16,9 +16,10 @@
 
 package persistent4s.examples.library.domain.member
 
-import persistent4s.{CommandHandler, Tag}
-import persistent4s.examples.library.domain.{LibraryEvent, MemberRegistered}
 import java.util.UUID
+
+import persistent4s.EventSourcedCommandHandler
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
 final case class RegisterMember(
   memberId: UUID,
@@ -26,28 +27,21 @@ final case class RegisterMember(
   email: String,
 )
 
-final case class RegisterMemberState(exists: Boolean)
+object RegisterMember:
 
-object RegisterMemberHandler extends CommandHandler[RegisterMember, RegisterMemberState, LibraryEvent]:
+  enum Error:
 
-  def tags(command: RegisterMember): Set[Tag] =
-    Set(Tag("member", command.memberId))
+    case AlreadyRegistered(memberId: UUID)
 
-  def initial: RegisterMemberState =
-    RegisterMemberState(exists = false)
+  object Handler extends EventSourcedCommandHandler[RegisterMember, Boolean, LibraryEvent, Error]:
 
-  def evolve(command: RegisterMember, state: RegisterMemberState, event: LibraryEvent): RegisterMemberState =
-    event match
-      case _: MemberRegistered => state.copy(exists = true)
-      case _                   => state
+    override protected val behavior = handler(initial = false):
+      scope(LibraryScopes.Member)(_.memberId)
 
-  def validate(state: RegisterMemberState, command: RegisterMember): Either[Throwable, Unit] =
-    if (state.exists) Left(new Exception("Member already registered")) else Right(())
+      on[MemberRegistered].evolve(_ => true)
 
-  def decide(state: RegisterMemberState, command: RegisterMember): List[(Set[Tag], LibraryEvent)] =
-    List(
-      (
-        Set(Tag("member", command.memberId)),
-        MemberRegistered(command.memberId, command.name, command.email),
-      ),
-    )
+      reject:
+        case (true, command) => Error.AlreadyRegistered(command.memberId)
+
+      emit: command =>
+        MemberRegistered(command.memberId, command.name, command.email)
