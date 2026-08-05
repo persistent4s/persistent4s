@@ -68,23 +68,6 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
         val added = state.copy(available = state.available + amount)
         if orderId == command.orderId then added.copy(alreadyReserved = None) else added
 
-  /** A request already honoured is valid, not a duplicate to be rejected — the sender is owed the same answer as the
-    * first time, and history is honoured before any policy below it. [[decide]] is what makes it write nothing.
-    *
-    * Then [[RequestHeaders.ExpiresAt]]: past its expiry the request is declined without looking at stock at all,
-    * because the caller has said it will no longer be listening. This is what keeps a late delivery — the partner was
-    * down, or the record sat on the topic — from reserving for an order that has since been cancelled.
-    *
-    * It narrows that window rather than closing it, and it barely narrows one case at all: a request this handler
-    * '''declined'''. The saga compensates as soon as it reads a rejection, so its instance is terminal within
-    * milliseconds while the request stays honourable for the rest of its window — and a rejection writes no event, so a
-    * redelivery inside that window is judged afresh and says yes if stock arrived meanwhile. That reserves stock for an
-    * order cancelled precisely for lack of it. Reproduced deliberately; see the README.
-    *
-    * Closing it needs the refusal to leave a trace here, so a later request for the same order collides with it. Note
-    * where that lands: a refusal cannot be recorded from [[validate]], because a rejection is *defined* as writing no
-    * events, so it would have to become a command that succeeds and [[decide]]s a refusal event instead.
-    */
   def validate(state: StockState, command: ReserveStock): Either[Throwable, Unit] =
     if state.alreadyReserved.isDefined then Right(())
     else if expired then
@@ -134,18 +117,11 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
       rejection => PartnerReply.reject(rejection.getMessage),
       _ => PartnerReply.accept,
     )
-    // `messages` is pure, so an encoding failure has nowhere to go — `Saga` sidesteps this by keeping requests typed and
-    // letting the runner encode them. Circe on two fields cannot fail, so this asserts the invariant rather than
-    // pretending to handle it: quietly returning no message would drop the reply and leave the saga to time out.
+
     val payload = replyCodec
       .encode(reply)
       .fold(error => throw new IllegalStateException("StockReservationReply must be encodable", error), identity)
-    // Keyed by the order, not by the item the request was keyed on: one saga instance's traffic belongs on one
-    // partition. `SagaHeaders.reply` defaults to echoing the request's key, which is only the right default when the
-    // request was keyed by the saga key — here it is keyed by item, so requests for one item stay ordered.
-    //
-    // Empty when the request carries no reply address, i.e. it did not come from a saga. Nothing to answer, so the
-    // reservation just happens; the consumer logs it rather than letting it pass unremarked.
+
     SagaHeaders.reply(origin, payload, key = Some(command.orderId.toString)).toList
 
 object ReserveStockHandler:
