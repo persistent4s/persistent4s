@@ -27,18 +27,19 @@ import persistent4s.examples.saga.orders.domain.{
   OrderCancelled,
   OrderConfirmed,
   OrderPlaced,
-  OrdersEvent,
+  OrderEvent,
 }
 
 /** The read model an order-status API is served from — and the reason a saga forces you to have one.
   *
   * Three of the four events this folds are about the same order, but only the first is written by a request the client
-  * made. `OrderConfirmed` and `OrderCancelled` arrive from the saga, seconds later and out of band, which is why `status`
-  * exists at all: there is no row shape in which "the order was accepted" and "the stock is ours" are the same fact.
+  * made. `OrderConfirmed` and `OrderCancelled` arrive from the saga, seconds later and out of band, which is why
+  * `status` exists at all: there is no row shape in which "the order was accepted" and "the stock is ours" are the same
+  * fact.
   */
 final class OrderProjection[F[_]: Async] private (
   protected val repository: Repository[F, UUID, OrderView],
-) extends Projection[F, OrdersEvent, UUID, OrderView]:
+) extends Projection[F, OrderEvent, UUID, OrderView]:
 
   override val name: String = "order-projection"
 
@@ -48,17 +49,17 @@ final class OrderProjection[F[_]: Async] private (
     EventTypeName.of[OrderCancelled],
   )
 
-  override def resolveKeys(event: EventEnvelope[OrdersEvent]): List[UUID] = event.payload match
-    case OrderPlaced(orderId, _, _, _) => List(orderId)
-    case OrderConfirmed(orderId)       => List(orderId)
-    case OrderCancelled(orderId, _)    => List(orderId)
+  override def resolveKeys(event: EventEnvelope[OrderEvent]): List[UUID] = event.payload match
+    case OrderPlaced(orderId, _, _, _, _) => List(orderId)
+    case OrderConfirmed(orderId)          => List(orderId)
+    case OrderCancelled(orderId, _)       => List(orderId)
     // Unreachable through `filter`, and deliberately no key rather than an error: customers are not orders, and an
     // empty list is how a projection says "not mine" without blocking the checkpoint.
     case _: CustomerRegistered => Nil
 
-  override def handle(state: Option[OrderView], event: EventEnvelope[OrdersEvent]): F[Option[OrderView]] =
+  override def handle(state: Option[OrderView], event: EventEnvelope[OrderEvent]): F[Option[OrderView]] =
     (state, event.payload) match
-      case (None, OrderPlaced(orderId, customerId, itemId, amount)) =>
+      case (None, OrderPlaced(orderId, customerId, itemId, amount, price)) =>
         OrderView(orderId, customerId, itemId, amount, OrderStatus.Placed, reason = None).some.pure[F]
 
       // Already recorded. `handle` has to tolerate seeing an event twice, and rebuilding this row from the event would

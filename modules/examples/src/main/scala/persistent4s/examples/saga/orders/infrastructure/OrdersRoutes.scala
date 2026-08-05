@@ -28,20 +28,21 @@ import org.http4s.dsl.io.*
 
 import persistent4s.{EventStore, SagaId, SagaRecord}
 import persistent4s.examples.saga.docs.SwaggerRoutes
-import persistent4s.examples.saga.orders.domain.OrdersEvent
+import persistent4s.examples.saga.orders.domain.OrderEvent
 import persistent4s.examples.saga.orders.domain.customer.{RegisterCustomer, RegisterCustomerHandler}
 import persistent4s.examples.saga.orders.domain.order.{PlaceOrder, PlaceOrderHandler}
 import persistent4s.examples.saga.orders.saga.ReserveStockSaga
 
 final case class RegisterCustomerRequest(customerId: UUID, name: String) derives Decoder
 
-final case class PlaceOrderRequest(orderId: UUID, customerId: UUID, itemId: UUID, amount: Int) derives Decoder
+final case class PlaceOrderRequest(orderId: UUID, customerId: UUID, itemId: UUID, amount: Int, price: Int)
+    derives Decoder
 
 /** What `POST /orders` can honestly promise: the order was accepted, and its outcome is somewhere else.
   *
-  * Not read from the projection — a read immediately after the append can lose the race with the projector and would then
-  * have to answer 404 for an order that certainly exists. This is the outcome of the request itself; the outcome of the
-  * ''order'' has to be polled, which is the whole point.
+  * Not read from the projection — a read immediately after the append can lose the race with the projector and would
+  * then have to answer 404 for an order that certainly exists. This is the outcome of the request itself; the outcome
+  * of the ''order'' has to be polled, which is the whole point.
   */
 final case class OrderAccepted(orderId: UUID, status: String, outcomeAt: String) derives Encoder.AsObject
 
@@ -53,7 +54,7 @@ object OrdersRoutes:
     api(module) <+> SwaggerRoutes.routes("saga/orders-openapi.yaml", "Orders service")
 
   private def api(module: OrdersModule): HttpRoutes[IO] =
-    given EventStore[IO, OrdersEvent] = module.store
+    given EventStore[IO, OrderEvent] = module.store
 
     HttpRoutes.of[IO] {
       case request @ POST -> Root / "customers" =>
@@ -70,7 +71,7 @@ object OrdersRoutes:
       case request @ POST -> Root / "orders" =>
         for
           body     <- request.as[PlaceOrderRequest]
-          command   = PlaceOrder(body.orderId, body.customerId, body.itemId, body.amount)
+          command   = PlaceOrder(body.orderId, body.customerId, body.itemId, body.amount, body.price)
           result   <- PlaceOrderHandler.run[IO](command).attempt
           response <- result match
                         case Left(error) => BadRequest(ErrorResponse(error.getMessage))

@@ -29,12 +29,13 @@ final case class ItemRestocked(itemId: UUID, amount: Int) extends InventoryEvent
 
 /** Stock committed to an order.
   *
-  * `orderId` belongs to the orders service and means nothing here beyond identifying which request this satisfied. It is
-  * what makes honouring a request idempotent: delivery is at-least-once, so the handler folds its own log and recognises
-  * an `orderId` it has already reserved for instead of reserving twice.
+  * `orderId` belongs to the orders service and means nothing here beyond identifying which request this satisfied. It
+  * is what makes honouring a request idempotent: delivery is at-least-once, so the handler folds its own log and
+  * recognises an `orderId` it has already reserved for instead of reserving twice.
   */
-final case class StockReserved(itemId: UUID, orderId: UUID, amount: Int) extends InventoryEvent
-    derives Encoder, Decoder
+final case class StockReserved(itemId: UUID, orderId: UUID, amount: Int) extends InventoryEvent derives Encoder, Decoder
+
+final case class StockReleased(itemId: UUID, orderId: UUID, amount: Int) extends InventoryEvent derives Encoder, Decoder
 
 object InventoryTags:
 

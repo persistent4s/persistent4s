@@ -24,8 +24,11 @@ import io.circe.{Decoder, Encoder}
 
 import persistent4s.*
 import persistent4s.circe.CirceMessageCodec
-import persistent4s.examples.saga.contract.{RequestHeaders, ReserveStock, StockReservationReply, Topics}
-import persistent4s.examples.saga.orders.domain.{OrderCancelled, OrderConfirmed, OrderPlaced, OrdersEvent, OrdersTags}
+import persistent4s.examples.saga.contract.{RequestHeaders, ReserveStock, ReleaseStock, Topics}
+import persistent4s.examples.saga.orders.domain.{OrderCancelled, OrderConfirmed, OrderPlaced, OrdersTags}
+import persistent4s.examples.saga.contract.PartnerReply
+import persistent4s.examples.saga.contract.{AuthorizePayment, CancelPayment}
+import persistent4s.examples.saga.orders.domain.OrderEvent
 
 /** What an instance carries while it waits.
   *
@@ -34,94 +37,125 @@ import persistent4s.examples.saga.orders.domain.{OrderCancelled, OrderConfirmed,
   * compensating `ReleaseStock` would need, and because `saga_instances.data` is the first place anyone looks when an
   * instance is stuck.
   */
-final case class ReserveStockState(orderId: UUID, itemId: UUID, amount: Int) derives Encoder.AsObject, Decoder
+final case class OrderState(
+  orderId: UUID,
+  customerId: UUID,
+  itemId: UUID,
+  amount: Int,
+  price: Int,
+  stockSuccess: Option[Boolean],
+  paymentSuccess: Option[Boolean],
+) derives Encoder.AsObject,
+      Decoder
 
-/** Turns "an order was placed" into "the stock is ours, or the order is off".
-  *
-  * The three decision functions are pure and total: given a trigger, a reply, or a deadline, each returns the events to
-  * append and where the instance goes next. Nothing here touches Kafka, the outbox, the instance table or a transaction —
-  * [[SagaRunner]] owns all of that, which is why this file can be read as domain logic rather than plumbing.
-  *
-  * Note what the saga writes: [[OrderConfirmed]] and [[OrderCancelled]], events of ''this'' service's log. Inventory's
-  * reply never becomes an event. The two services share the [[StockReservationReply]] DTO and nothing else, so inventory
-  * can rename or restructure its own events freely and this file does not care.
-  */
-object ReserveStockSaga extends Saga[OrdersEvent, ReserveStockState, ReserveStock, StockReservationReply]:
+object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, PartnerReply]:
 
-  val name: String = "reserve-stock"
+  val name: String = "place-order"
 
   val triggers: Set[EventTypeName] = Set(EventTypeName.of[OrderPlaced])
 
-  /** Long enough that a busy inventory service is not written off, short enough that a client is not left guessing. This
-    * is the only bound on how long an order can sit at `Placed`.
-    */
+  private val StockOrdinal = 0
+
+  private val PaymentOrdinal = 1
+
+  val NoAttribution = "reply did not say which request it answered"
+
   private val ReplyTimeout: FiniteDuration = 30.seconds
 
-  def start(event: EventEnvelope[OrdersEvent]): Option[SagaStart[ReserveStockState, ReserveStock]] =
+  override def start(event: EventEnvelope[OrderEvent]): Option[SagaStart[OrderState, OrderRequest]] =
     event.payload match
-      case OrderPlaced(orderId, _, itemId, amount) =>
+      case OrderPlaced(orderId, customerId, itemId, amount, price) =>
         Some(
           SagaStart(
-            // The instance id is derived from this key, so replaying the trigger lands on the same row and starts
-            // nothing twice.
             key = orderId.toString,
-            data = ReserveStockState(orderId, itemId, amount),
+            data = OrderState(orderId, customerId, itemId, amount, price, None, None),
             request = List(
               SagaRequest(
                 topic = Topics.InventoryCommands,
-                // Keyed by item, not by order: requests for one item then share a partition and reach inventory in
-                // order, which is what makes contention for the last unit a contest inventory can actually see. The
-                // reply is keyed by order instead — the partner chooses that, since only it knows both ids.
                 key = Some(itemId.toString),
                 payload = ReserveStock(orderId, itemId, amount),
-                // Tell the partner when to stop caring, so a request delivered late is declined instead of honoured for
-                // an order this saga has already cancelled.
-                //
-                // Computed from the trigger event's own timestamp, because these functions are pure and cannot read a
-                // clock. That makes the stated expiry very slightly *earlier* than the instance's real deadline, which
-                // the runner stamps as `now + timeout` when the instance is created — and earlier is the safe side: the
-                // partner gives up a hair before this saga does, never after.
                 headers = Map(
                   RequestHeaders.ExpiresAt -> event.metadata.timestamp.plusMillis(ReplyTimeout.toMillis).toString,
+                  RequestHeaders.Kind      -> ReserveStock.Kind,
+                ),
+              ),
+              SagaRequest(
+                topic = Topics.PaymentCommands,
+                key = Some(customerId.toString),
+                payload = AuthorizePayment(orderId, customerId, price),
+                headers = Map(
+                  RequestHeaders.ExpiresAt -> event.metadata.timestamp.plusMillis(ReplyTimeout.toMillis).toString,
+                  RequestHeaders.Kind      -> AuthorizePayment.Kind,
                 ),
               ),
             ),
             timeout = Some(ReplyTimeout),
           ),
         )
-      // Unreachable — the trigger loop only reads `triggers` — but `start` is offered an envelope of the whole log's
-      // event type, so the match has to be total.
       case _ => None
 
-  def onReply(
+  override def onReply(
     ctx: SagaContext,
-    state: ReserveStockState,
-    reply: StockReservationReply,
-  ): SagaDecision[OrdersEvent, ReserveStockState, ReserveStock] =
-    if reply.accepted then
-      SagaDecision.completed(events = List(orderTag(state.orderId) -> OrderConfirmed(state.orderId)))
-    else
-      SagaDecision.compensated(events =
-        List(
-          orderTag(state.orderId) ->
-            OrderCancelled(state.orderId, reply.reason.getOrElse("inventory declined the reservation")),
-        ),
-      )
+    state: OrderState,
+    reply: SagaReply[PartnerReply],
+  ): SagaDecision[OrderEvent, OrderState, OrderRequest] =
+    reply.answering.map(_.ordinal) match
+      case Some(StockOrdinal)   => settle(state.copy(stockSuccess = Some(reply.payload.accepted)))
+      case Some(PaymentOrdinal) => settle(state.copy(paymentSuccess = Some(reply.payload.accepted)))
+      case Some(other)          =>
+        SagaDecision.failed(s"reply named request ordinal $other, which this saga never sent")
+      case None =>
+        SagaDecision.failed(NoAttribution)
 
-  def onTimeout(ctx: SagaContext, state: ReserveStockState): SagaDecision[OrdersEvent, ReserveStockState, ReserveStock] =
-    SagaDecision.compensated(events =
-      List(orderTag(state.orderId) -> OrderCancelled(state.orderId, "inventory did not answer in time")),
+  private def settle(state: OrderState): SagaDecision[OrderEvent, OrderState, OrderRequest] =
+    (state.stockSuccess, state.paymentSuccess) match
+      case (Some(true), Some(true)) =>
+        SagaDecision.completed(events = List(orderTag(state.orderId) -> OrderConfirmed(state.orderId)))
+      case (Some(_), Some(_)) =>
+        SagaDecision.compensated(
+          events = List(orderTag(state.orderId) -> OrderCancelled(state.orderId, "a partner declined")),
+          messages = undoRequests(state),
+        )
+      case _ => SagaDecision.continue(state, timeout = Some(ReplyTimeout))
+
+  override def onTimeout(
+    ctx: SagaContext,
+    state: OrderState,
+  ): SagaDecision[OrderEvent, OrderState, OrderRequest] =
+    SagaDecision.compensated(
+      events =
+        List(orderTag(state.orderId) -> OrderCancelled(state.orderId, "At least one partner did not answer on time")),
+      messages = undoRequests(state),
     )
 
-  /** A decision's events are tagged like any other event about this order, so the projection picks them up and a later
-    * read of the order's scope sees them. The tag does no concurrency work here: the runner appends a decision's events
-    * unchecked, and what stops a second confirmation is the instance's step guard plus the deterministic event ids.
-    */
+  private def undoRequests(state: OrderState): List[SagaRequest[OrderRequest]] =
+    List(
+      Option.unless(state.stockSuccess.contains(false))(
+        SagaRequest(
+          Topics.InventoryCommands,
+          Some(state.itemId.toString),
+          ReleaseStock(state.orderId, state.itemId),
+          Map(
+            RequestHeaders.Kind -> ReleaseStock.Kind,
+          ),
+        ),
+      ),
+      Option.unless(state.paymentSuccess.contains(false))(
+        SagaRequest(
+          Topics.PaymentCommands,
+          Some(state.customerId.toString),
+          CancelPayment(state.orderId, state.customerId),
+          Map(
+            RequestHeaders.Kind -> CancelPayment.Kind,
+          ),
+        ),
+      ),
+    ).flatten
+
   private def orderTag(orderId: UUID): Set[Tag] = Set(OrdersTags.order(orderId))
 
-  val stateCodec: MessageCodec[ReserveStockState] = CirceMessageCodec.derived[ReserveStockState]
+  val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 
-  /** Both come from the contract's own givens — the only codec this saga has to derive is the one for its private state. */
-  val requestCodec: MessageCodec[ReserveStock] = summon[MessageCodec[ReserveStock]]
+  val requestEncoder: MessageEncoder[OrderRequest] = OrderRequest.encoder
 
-  val replyCodec: MessageCodec[StockReservationReply] = summon[MessageCodec[StockReservationReply]]
+  val replyDecoder: MessageDecoder[PartnerReply] = summon[MessageCodec[PartnerReply]]

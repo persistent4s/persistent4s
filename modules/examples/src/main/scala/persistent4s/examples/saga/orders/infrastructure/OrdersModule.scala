@@ -34,44 +34,44 @@ given Logger[IO] = Slf4jLogger.getLogger[IO]
 import persistent4s.*
 import persistent4s.circe.CirceEventCodec
 import persistent4s.examples.saga.contract.Topics
-import persistent4s.examples.saga.orders.domain.OrdersEvent
+import persistent4s.examples.saga.orders.domain.OrderEvent
 import persistent4s.examples.saga.orders.domain.order.{OrderProjection, OrderRepository}
 import persistent4s.examples.saga.orders.saga.ReserveStockSaga
 import persistent4s.kafka.{KafkaConsumerConfig, KafkaMessageProducerConfig, KafkaModule}
 import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule, PostgresSagaRepository}
 
 final class OrdersModule private (
-  val store: PostgresEventStore[IO, OrdersEvent],
+  val store: PostgresEventStore[IO, OrderEvent],
   val orderRepository: OrderRepository[IO],
   val sagaRepository: PostgresSagaRepository[IO],
 )
 
 /** Wiring for the service that hosts the saga.
   *
-  * `enableSaga = true` is doing two things: it creates `saga_instances`, and it brings the message outbox with it, because
-  * a saga that cannot enqueue a request atomically with the events that caused it is not a saga. The event outbox stays
-  * off — the orders log never leaves this service either.
+  * `enableSaga = true` is doing two things: it creates `saga_instances`, and it brings the message outbox with it,
+  * because a saga that cannot enqueue a request atomically with the events that caused it is not a saga. The event
+  * outbox stays off — the orders log never leaves this service either.
   *
   * Three background loops end up running: the projector (read model), the message relay (requests out), and the saga
   * runner, which is itself three loops — trigger, reply and timer.
   */
 object OrdersModule:
 
-  val eventCodec: EventCodec[OrdersEvent] = CirceEventCodec.derived[OrdersEvent]
+  val eventCodec: EventCodec[OrderEvent] = CirceEventCodec.derived[OrderEvent]
 
   private val pgConfigPath = "persistent4s.orders.postgres"
 
   private val kafkaConfigPath = "persistent4s.saga.kafka"
 
-  /** This service's identity as a Kafka consumer. [[SagaRunner.replyGroupId]] derives a distinct group per saga from it,
-    * which matters as soon as there is more than one: sagas sharing a group would have the reply topic's partitions split
-    * between them and each would silently skip the other's replies.
+  /** This service's identity as a Kafka consumer. [[SagaRunner.replyGroupId]] derives a distinct group per saga from
+    * it, which matters as soon as there is more than one: sagas sharing a group would have the reply topic's partitions
+    * split between them and each would silently skip the other's replies.
     */
   val serviceGroupId = "orders-service"
 
   def make: Resource[IO, OrdersModule] =
     for
-      components <- PostgresModule.make[IO, OrdersEvent](eventCodec, pgConfigPath, enableSaga = true)
+      components <- PostgresModule.make[IO, OrderEvent](eventCodec, pgConfigPath, enableSaga = true)
       store       = components.eventStore
       checkpoint  = components.checkpoint
       sagaRepo   <- Resource.eval(
@@ -93,24 +93,21 @@ object OrdersModule:
                     .withUserAndPassword(pgConfig.user, pgConfig.password)
                     .withDatabase(pgConfig.database)
                     .pooled(pgConfig.maxConnections)
-      orderRepo   = OrderRepository.make[IO](viewPool)
-      orderProj  <- Resource.eval(OrderProjection.make[IO](orderRepo))
-      projector   = DefaultProjector[IO, OrdersEvent](store, checkpoint)
-      _          <- projector.run(orderProj).compile.drain.background
+      orderRepo  = OrderRepository.make[IO](viewPool)
+      orderProj <- Resource.eval(OrderProjection.make[IO](orderRepo))
+      projector  = DefaultProjector[IO, OrderEvent](store, checkpoint)
+      _         <- projector.run(orderProj).compile.drain.background
       // Drains the requests the saga enqueued. Nothing reaches inventory without it.
-      relay <- KafkaModule.messageRelay[IO](messageOutbox, KafkaMessageProducerConfig(bootstrapServers = bootstrap))
-      _     <- relay.run().background
+      relay   <- KafkaModule.messageRelay[IO](messageOutbox, KafkaMessageProducerConfig(bootstrapServers = bootstrap))
+      _       <- relay.run().background
       replies <- KafkaModule.messageSubscriber[IO](
                    KafkaConsumerConfig(
                      bootstrapServers = bootstrap,
                      groupId = SagaRunner.replyGroupId(serviceGroupId, ReserveStockSaga.name),
                    ),
                  )
-      runner = SagaRunner[IO, OrdersEvent](
-                 store = store,
-                 checkpoint = checkpoint,
-                 repository = sagaRepo,
-                 replies = replies,
+      runner = SagaRunner[IO, OrderEvent](
+                 store = store, checkpoint = checkpoint, repository = sagaRepo, replies = replies,
                  replyTopic = Topics.OrdersReplies,
                )
       // `run` ends only on an unrecoverable error, and one loop failing takes the other two with it. Restarting is the

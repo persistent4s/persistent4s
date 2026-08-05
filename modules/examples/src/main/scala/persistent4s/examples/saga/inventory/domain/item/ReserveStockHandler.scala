@@ -20,14 +20,10 @@ import java.time.Instant
 
 import scala.util.Try
 
-import persistent4s.{CommandHandler, EventTypeName, IncomingMessage, MessageCodec, OutgoingMessage, SagaHeaders, Tag}
-import persistent4s.examples.saga.contract.{RequestHeaders, ReserveStock, StockReservationReply}
-import persistent4s.examples.saga.inventory.domain.{
-  InventoryEvent,
-  InventoryTags,
-  ItemRestocked,
-  StockReserved,
-}
+import persistent4s.{CommandHandler, IncomingMessage, MessageCodec, OutgoingMessage, SagaHeaders, Tag}
+import persistent4s.examples.saga.contract.{RequestHeaders, ReserveStock, PartnerReply}
+import persistent4s.examples.saga.inventory.domain.{InventoryEvent, InventoryTags, ItemRestocked, StockReserved}
+import persistent4s.examples.saga.inventory.domain.StockReleased
 
 /** What one item's log says about a single incoming request.
   *
@@ -58,12 +54,6 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
 
   import ReserveStockHandler.replyCodec
 
-  /** Both event types move stock, so both belong in the scope the concurrency check guards. A restock landing between
-    * this handler's read and its append is a conflict worth retrying for — the retry re-reads and may now say yes.
-    */
-  override def eventTypes: Option[Set[EventTypeName]] =
-    Some(Set(EventTypeName.of[ItemRestocked], EventTypeName.of[StockReserved]))
-
   def tags(command: ReserveStock): Set[Tag] = Set(InventoryTags.item(command.itemId))
 
   def initial: StockState = StockState(available = 0, alreadyReserved = None)
@@ -74,13 +64,16 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
       case StockReserved(_, orderId, amount) =>
         val taken = state.copy(available = state.available - amount)
         if orderId == command.orderId then taken.copy(alreadyReserved = Some(amount)) else taken
+      case StockReleased(_, orderId, amount) =>
+        val added = state.copy(available = state.available + amount)
+        if orderId == command.orderId then added.copy(alreadyReserved = None) else added
 
   /** A request already honoured is valid, not a duplicate to be rejected — the sender is owed the same answer as the
     * first time, and history is honoured before any policy below it. [[decide]] is what makes it write nothing.
     *
-    * Then [[RequestHeaders.ExpiresAt]]: past its expiry the request is declined without looking at stock at all, because
-    * the caller has said it will no longer be listening. This is what keeps a late delivery — the partner was down, or
-    * the record sat on the topic — from reserving for an order that has since been cancelled.
+    * Then [[RequestHeaders.ExpiresAt]]: past its expiry the request is declined without looking at stock at all,
+    * because the caller has said it will no longer be listening. This is what keeps a late delivery — the partner was
+    * down, or the record sat on the topic — from reserving for an order that has since been cancelled.
     *
     * It narrows that window rather than closing it, and it barely narrows one case at all: a request this handler
     * '''declined'''. The saga compensates as soon as it reads a rejection, so its instance is terminal within
@@ -114,9 +107,10 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
     * No header means no expiry — a caller that never set one gets the old behaviour, which is right for a plain
     * fire-and-forget command that nobody is waiting on.
     *
-    * An *unreadable* header, on the other hand, counts as expired. The header exists to bound how stale a request may be;
-    * if it cannot be parsed then staleness is unknown, and honouring it anyway would quietly restore the very leak it was
-    * added to narrow. Declining is also the loud option: the reason travels back and lands in the order's `reason` field.
+    * An *unreadable* header, on the other hand, counts as expired. The header exists to bound how stale a request may
+    * be; if it cannot be parsed then staleness is unknown, and honouring it anyway would quietly restore the very leak
+    * it was added to narrow. Declining is also the loud option: the reason travels back and lands in the order's
+    * `reason` field.
     */
   private def expired: Boolean =
     origin.headers.get(RequestHeaders.ExpiresAt) match
@@ -131,20 +125,14 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
           StockReserved(command.itemId, command.orderId, command.amount),
       )
 
-  /** The reply, enqueued in the same transaction as the reservation it reports.
-    *
-    * Emitted on '''both''' paths, and that is the point of `runWithMessages`: a rejection writes no event but still owes
-    * an answer. Without it the saga would learn nothing until its deadline expired, and every out-of-stock order would
-    * cost 30 seconds before being cancelled for the wrong stated reason.
-    */
   override def messages(
     state: StockState,
     command: ReserveStock,
     outcome: Either[Throwable, List[InventoryEvent]],
   ): List[OutgoingMessage] =
     val reply = outcome.fold(
-      rejection => StockReservationReply.reject(rejection.getMessage),
-      _ => StockReservationReply.accept,
+      rejection => PartnerReply.reject(rejection.getMessage),
+      _ => PartnerReply.accept,
     )
     // `messages` is pure, so an encoding failure has nowhere to go — `Saga` sidesteps this by keeping requests typed and
     // letting the runner encode them. Circe on two fields cannot fail, so this asserts the invariant rather than
@@ -162,4 +150,4 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
 
 object ReserveStockHandler:
 
-  private val replyCodec: MessageCodec[StockReservationReply] = summon[MessageCodec[StockReservationReply]]
+  private val replyCodec: MessageCodec[PartnerReply] = summon[MessageCodec[PartnerReply]]

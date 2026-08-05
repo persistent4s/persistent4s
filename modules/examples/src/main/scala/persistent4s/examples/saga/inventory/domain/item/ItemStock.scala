@@ -21,6 +21,7 @@ import java.util.UUID
 import io.circe.Encoder
 
 import persistent4s.examples.saga.inventory.domain.{InventoryEvent, ItemRestocked, StockReserved}
+import persistent4s.examples.saga.inventory.domain.StockReleased
 
 final case class Reservation(orderId: UUID, amount: Int) derives Encoder.AsObject
 
@@ -42,5 +43,10 @@ object ItemStock:
           stock.copy(
             available = stock.available - amount,
             reservations = stock.reservations :+ Reservation(orderId, amount),
+          )
+        case StockReleased(_, orderId, amount) =>
+          stock.copy(
+            available = stock.available + amount,
+            reservations = stock.reservations.filterNot(_.orderId == orderId),
           )
     }

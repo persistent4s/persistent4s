@@ -25,6 +25,9 @@ import persistent4s.{EventStore, IncomingMessage, MessageSubscriber, SagaHeaders
 import persistent4s.examples.saga.contract.ReserveStock
 import persistent4s.examples.saga.inventory.domain.InventoryEvent
 import persistent4s.examples.saga.inventory.domain.item.ReserveStockHandler
+import persistent4s.examples.saga.contract.RequestHeaders
+import persistent4s.examples.saga.contract.ReleaseStock
+import persistent4s.examples.saga.inventory.domain.item.ReleaseStockHandler
 
 /** The whole partner side of the saga: read a command, run the handler, acknowledge.
   *
@@ -48,17 +51,29 @@ object InventoryCommandConsumer:
 
   /** Mirrors the ack policy [[persistent4s.SagaRunner]] applies to replies, for the same reasons.
     *
-    * A decode failure is permanent — a redelivery would fail identically — so it is logged and acked rather than left to
-    * block the partition forever. Everything else propagates, `ack` never runs, and the broker redelivers: the handler is
-    * idempotent, so a second attempt is safe, and if it keeps failing the requester's deadline compensates.
+    * A decode failure is permanent — a redelivery would fail identically — so it is logged and acked rather than left
+    * to block the partition forever. Everything else propagates, `ack` never runs, and the broker redelivers: the
+    * handler is idempotent, so a second attempt is safe, and if it keeps failing the requester's deadline compensates.
     */
   private def handle[F[_]: Async: Logger](store: MessagingStore[F], message: IncomingMessage): F[Unit] =
-    message.as[ReserveStock] match
-      case Left(error)    =>
-        Logger[F].error(error)(
-          s"inventory could not decode a command from '${message.topic}', dropping it: ${message.payload}",
+    message.headers.get(RequestHeaders.Kind) match
+      case Some(ReserveStock.Kind) =>
+        message.as[ReserveStock] match
+          case Left(error)    => decodeFailed(message, error)
+          case Right(command) => reserve(store, message, command)
+      case Some(ReleaseStock.Kind) =>
+        message.as[ReleaseStock] match
+          case Left(error)    => decodeFailed(message, error)
+          case Right(command) => release(store, command)
+      case other =>
+        Logger[F].error(
+          s"inventory does not recognise command kind '$other' from '${message.topic}', dropping it: ${message.payload}'",
         )
-      case Right(command) => reserve(store, message, command)
+
+  private def decodeFailed[F[_]: Logger](message: IncomingMessage, error: Throwable): F[Unit] =
+    Logger[F].error(error)(
+      s"inventory could not decode a command from '${message.topic}', dropping it: ${message.payload}",
+    )
 
   private def reserve[F[_]: Async: Logger](
     store: MessagingStore[F],
@@ -85,7 +100,7 @@ object InventoryCommandConsumer:
       // decisions in a `CommandHandler` are pure.
       receivedAt <- Clock[F].realTimeInstant
       result     <- ReserveStockHandler(message, receivedAt).runWithMessages[F](command)
-      _      <- result match
+      _          <- result match
              // Accepted, but nothing written: this request had already been honoured, so it got the same answer again.
              case Right(Nil) =>
                Logger[F].info(s"order ${command.orderId} was already reserved; re-answered without reserving again")
@@ -101,3 +116,10 @@ object InventoryCommandConsumer:
   /** Whether [[SagaHeaders.reply]] will be able to build an answer to this message. */
   private def addressed(message: IncomingMessage): Boolean =
     List(SagaHeaders.ReplyTo, SagaHeaders.Name, SagaHeaders.Id).forall(message.headers.contains)
+
+  private def release[F[_]: Async: Logger](store: MessagingStore[F], command: ReleaseStock): F[Unit] =
+    given MessagingStore[F] = store
+    ReleaseStockHandler.run[F](command).flatMap { events =>
+      if events.isEmpty then Logger[F].info(s"order ${command.orderId} had nothing reserved to release; no-op")
+      else Logger[F].info(s"released stock for order ${command.orderId}")
+    }

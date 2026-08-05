@@ -54,6 +54,9 @@ sbt "examples/runMain persistent4s.examples.saga.orders.infrastructure.OrdersSer
 
 # Terminal B
 sbt "examples/runMain persistent4s.examples.saga.inventory.infrastructure.InventoryServer"
+
+# Terminal C
+sbt "examples/runMain persistent4s.examples.saga.payment.infrastructure.PaymentServer"
 ```
 
 Swagger UI is at <http://localhost:8183/docs> and <http://localhost:8184/docs> — the whole walkthrough below can be
