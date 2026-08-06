@@ -795,3 +795,83 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       expect(derived.telemetry.isEmpty) and
       expect(derived.snapshots.isEmpty)
   }
+
+  test("declared headers are attached to every event the command emits") {
+    val declared = Map("correlationId" -> "abc-123", "causationId" -> "def-456")
+    val multiEmitHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        tags(command => Set(Tag("entity", command.id)))
+        headers(command => declared + ("command.id" -> command.id))
+        on[LegacyObserved].ignore
+        emitMany(command => List(LegacyObserved(command.id), LegacyObserved(s"${command.id}-2")))
+
+    val store = new RecordingStore(Nil)
+    val expected = declared + ("command.id" -> "a")
+
+    multiEmitHandler
+      .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
+      .map { result =>
+        expect(result.map(_.map(_.payload)) == Right(List(LegacyObserved("a"), LegacyObserved("a-2")))) and
+          expect(store.appended.exists(_._3.sizeIs == 2)) and
+          expect(store.appended.exists(_._3.forall(_.headers == expected))) and
+          expect(multiEmitHandler.headers(TestCommand("a")) == expected)
+      }
+  }
+
+  test("a throwing headers resolver fails the command instead of the fibre") {
+    val expected = new RuntimeException("headers failure")
+    val failingHeaders = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        tags(_ => Set(Tag("entity", "a")))
+        headers(_ => throw expected)
+        on[LegacyObserved].ignore
+        emit(_ => LegacyObserved("a"))
+
+    val store = new RecordingStore(Nil)
+
+    failingHeaders
+      .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
+      .attempt
+      .map(result => expect(result == Left(expected)) and expect(store.appended.isEmpty))
+  }
+
+  pureTest("headers declared more than once are rejected") {
+    val result = Try {
+      new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        protected val behavior = handler(()):
+          tags(_ => Set(Tag("entity", "a")))
+          headers(_ => Map("a" -> "1"))
+          headers(_ => Map("b" -> "2"))
+          on[LegacyObserved].ignore
+          emit(_ => LegacyObserved("a"))
+    }
+
+    result.failed.toOption match
+      case Some(error: IllegalArgumentException) => expect(error.getMessage.contains("headers at most once"))
+      case other                                 => failure(s"Expected duplicate headers error, got $other")
+  }
+
+  test("the headers resolver runs once per attempt: not once per event, and again after a conflict") {
+    var calls = 0
+    val countingHandler = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+      protected val behavior = handler(()):
+        tags(_ => Set(Tag("entity", "a")))
+        headers { _ =>
+          calls += 1
+          Map("attempt" -> calls.toString)
+        }
+        on[LegacyObserved].ignore
+        emitMany(_ => List(LegacyObserved("a"), LegacyObserved("b"), LegacyObserved("c")))
+
+    val store = new RecordingStore(Nil, appendConflicts = 1)
+
+    countingHandler
+      .run[IO](TestCommand("a"))(using summon[Concurrent[IO]], CommandRuntime.eventStoreOnly(store))
+      .map { result =>
+        expect(result.map(_.map(_.payload).size) == Right(3)) and
+          // Two attempts over three events each: once per attempt, not once per event.
+          expect(calls == 2) and
+          // The committed attempt is the second, and all three of its events share that one map.
+          expect(store.appended.exists(_._3.forall(_.headers == Map("attempt" -> "2"))))
+      }
+  }

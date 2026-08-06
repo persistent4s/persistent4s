@@ -122,6 +122,7 @@ final private case class CommandSnapshotDefinition[C, S](
 final class CommandBehavior[C, S, A <: Event, R] private[persistent4s] (
   private[persistent4s] val initial: S,
   private val resolveLegacyTags: Option[C => Set[Tag]],
+  private val resolveHeaders: Option[C => Map[String, String]],
   private val scopes: List[CommandScopeResolver[C]],
   private val handlers: List[CommandEventHandler[C, S, A]],
   private val rejection: PartialFunction[(S, C), R],
@@ -145,6 +146,9 @@ final class CommandBehavior[C, S, A <: Event, R] private[persistent4s] (
       require(resolved.nonEmpty, "Command behavior resolved no scope keys")
       ResolvedCommandSelection(resolved, resolved.iterator.map(_.toTag).toSet, scopeBased = true)
     else ResolvedCommandSelection(Nil, resolveLegacyTags.fold(Set.empty[Tag])(_(command)), scopeBased = false)
+
+  private[persistent4s] def headers(command: C): Map[String, String] =
+    resolveHeaders.fold(Map.empty[String, String])(_(command))
 
   private[persistent4s] def evolve(command: C, state: S, event: A): S =
     handlers.find(_.accepts(event)).fold(state)(_.evolve(command, state, event))
@@ -191,6 +195,8 @@ final class CommandBehaviorCollector[C, S, A <: Event, R] private[persistent4s] 
 
   private var resolveTags: Option[C => Set[Tag]] = None
 
+  private var resolveHeaders: Option[C => Map[String, String]] = None
+
   private var rejection: PartialFunction[(S, C), R] = PartialFunction.empty
 
   private var emitEvents: Option[(S, C) => List[CommandEmission[A]]] = None
@@ -204,6 +210,10 @@ final class CommandBehaviorCollector[C, S, A <: Event, R] private[persistent4s] 
     require(resolveTags.isEmpty, "Command behavior must declare legacy tags exactly once")
     require(commandScopes.isEmpty, "Use either typed scopes or legacy tags, not both")
     resolveTags = Some(resolve)
+
+  private[persistent4s] def setHeaders(resolve: C => Map[String, String]): Unit =
+    require(resolveHeaders.isEmpty, "Command behavior must declare headers at most once")
+    resolveHeaders = Some(resolve)
 
   private[persistent4s] def addScope[K](scope: Scope[K], key: C => K): Unit =
     addScopes(scope, command => key(command) :: Nil)
@@ -263,7 +273,7 @@ final class CommandBehaviorCollector[C, S, A <: Event, R] private[persistent4s] 
     require(duplicateEventTypes.isEmpty, s"Duplicate command event handlers: ${duplicateEventTypes.mkString(", ")}")
 
     new CommandBehavior(
-      initial, resolveTags, commandScopes.toList, allHandlers, rejection,
+      initial, resolveTags, resolveHeaders, commandScopes.toList, allHandlers, rejection,
       emitEvents.getOrElse(throw new IllegalArgumentException("Command behavior must declare an emitter")),
       snapshotDefinition,
     )
@@ -417,6 +427,15 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   final protected def tags(resolve: C => Set[Tag])(using collector: CommandBehaviorCollector[C, S, A, R]): Unit =
     collector.setTags(resolve)
 
+  /** Metadata attached to every event this command emits — a correlation id, a causation id, the request that caused
+    * it. Evaluated once per attempt: every event in one attempt shares the same map, and a retry re-evaluates it, so an
+    * impure resolver (a fresh id, a clock reading) yields fresh values for the attempt that actually commits.
+    */
+  final protected def headers(resolve: C => Map[String, String])(using
+    collector: CommandBehaviorCollector[C, S, A, R],
+  ): Unit =
+    collector.setHeaders(resolve)
+
   /** Start a typed state transition declaration. High-level handlers require an explicit stable [[EventSchema]]. A
     * single typed scope shared by the command and event is matched automatically. No shared scope requires an explicit
     * `.allEvents`, while multiple shared scopes require `.within(scope)` or `.withinAll`.
@@ -532,6 +551,8 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
 
   final def tags(command: C): Set[Tag] = behavior.selection(command).tags
 
+  final def headers(command: C): Map[String, String] = behavior.headers(command)
+
   final def evolve(command: C, state: S, event: A): S = behavior.evolve(command, state, event)
 
   final def validate(state: S, command: C): Either[R, Unit] = behavior.validate(state, command)
@@ -610,7 +631,8 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
                   case Right(_)        =>
                     for
                       decided <- suspend(behavior.decide(state, command, selection))
-                      events  <- suspend(
+                      events  <- suspend {
+                                  val eventHeaders = behavior.headers(command)
                                   decided.map { (tags, event) =>
                                     val description = behavior.describe(event)
                                     val declared = EventStorageSchema(description.eventType, description.version)
@@ -619,9 +641,10 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
                                         throw EventSchemaMismatch(declared, storage, event.getClass.getName)
                                     }
                                     PendingEvent(payload = event, tags = tags, eventType = description.eventType,
-                                      isExternal = false, id = None, headers = Map.empty)
-                                  },
-                                )
+                                      isExternal = false, id = None, headers = eventHeaders)
+                                  }
+                                }
+
                       appended <- runtime.eventStore
                                     .append(filter, index, events)
                                     .adaptError { case conflict: IndexConflictException =>
