@@ -19,6 +19,7 @@ package persistent4s
 import cats.Functor
 import cats.syntax.all.*
 import org.typelevel.otel4s.metrics.{Counter, Meter}
+import org.typelevel.otel4s.trace.Tracer
 
 /** Metrics used by [[CommandHandler.run]]. Build once per application (e.g. alongside the event store) and provide as a
   * given. The retries counter must not be recreated on every command.
@@ -34,3 +35,19 @@ object CommandHandlerMetrics:
       .withUnit("{retries}")
       .create
       .map(CommandHandlerMetrics(_))
+
+/** Tracing and metrics for the [[EventSourcedCommandHandler]] path.
+  *
+  * Carried as a value on [[CommandRuntime]] rather than as a context bound on `run`, so that adding observability does
+  * not ripple through `CommandRuntime.execute`, `SyncCommandHandler.fromEventSourced` and every call site — and so
+  * `CommandRuntime.eventStoreOnly` and the `fromEventStore` given stay as lightweight as they are.
+  */
+final case class CommandTelemetry[F[_]](
+  tracer: Tracer[F],
+  metrics: CommandHandlerMetrics[F],
+)
+
+object CommandTelemetry:
+
+  def make[F[_]: Meter: Functor: Tracer]: F[CommandTelemetry[F]] =
+    CommandHandlerMetrics.make[F].map(CommandTelemetry(Tracer[F], _))

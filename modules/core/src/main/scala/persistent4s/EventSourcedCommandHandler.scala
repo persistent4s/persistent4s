@@ -23,6 +23,7 @@ import scala.util.control.NonFatal
 
 import cats.effect.Concurrent
 import cats.syntax.all.*
+import org.typelevel.otel4s.Attribute
 
 /** Raised when an emitted event declares a durable scope that the command did not acquire. */
 final case class CommandScopeViolation(
@@ -542,7 +543,21 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   final def run[F[_]: Concurrent](command: C)(using
     runtime: CommandRuntime[F, A],
   ): F[Either[R, List[EventEnvelope[A]]]] =
-    suspend(behavior.selection(command)).flatMap(selection => runWithRetry(command, selection, maxRetries))
+    val cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
+    val execute =
+      suspend(behavior.selection(command)).flatMap(runWithRetry(command, _, maxRetries, cmdAttr))
+    runtime.telemetry.fold(execute) { telemetry =>
+      telemetry.tracer
+        .spanBuilder("persistent4s.commandhandler.handle")
+        .addAttribute(cmdAttr)
+        .build
+        .surround(execute)
+    }
+
+  private def countRetry[F[_]: Concurrent](cmdAttr: Attribute[String])(using
+    runtime: CommandRuntime[F, A],
+  ): F[Unit] =
+    runtime.telemetry.traverse_(_.metrics.retries.add(1L, cmdAttr))
 
   /** Execute a command and translate only its typed domain rejection into an application error. Existing failed effects
     * (storage, decoding and concurrency failures) pass through unchanged.
@@ -562,10 +577,11 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     command: C,
     selection: ResolvedCommandSelection,
     retriesLeft: Int,
+    cmdAttr: Attribute[String],
   )(using runtime: CommandRuntime[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
     attempt(command, selection).handleErrorWith {
       case RetryableCommandAppendConflict(_) if retriesLeft > 0 =>
-        runWithRetry(command, selection, retriesLeft - 1)
+        countRetry(cmdAttr) *> runWithRetry(command, selection, retriesLeft - 1, cmdAttr)
       case RetryableCommandAppendConflict(conflict) =>
         Concurrent[F].raiseError(conflict)
       case error => Concurrent[F].raiseError(error)

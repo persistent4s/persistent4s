@@ -75,6 +75,7 @@ trait CommandSnapshotStore[F[_]]:
 final case class CommandRuntime[F[_], A <: Event](
   eventStore: EventStore[F, A],
   snapshots: Option[CommandSnapshotStore[F]] = None,
+  telemetry: Option[CommandTelemetry[F]] = None,
 ):
 
   /** Execute `command` with `handler`. The runtime fixes both `F` and the event root, so neither needs to be supplied

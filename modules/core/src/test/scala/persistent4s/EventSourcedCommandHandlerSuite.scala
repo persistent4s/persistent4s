@@ -25,6 +25,9 @@ import cats.effect.{Concurrent, IO}
 
 import fs2.Stream
 
+import org.typelevel.otel4s.metrics.Counter
+import org.typelevel.otel4s.trace.Tracer
+
 import weaver.SimpleIOSuite
 
 object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
@@ -109,6 +112,13 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
 
   private val snapshotId = SnapshotId("test-command")
 
+  /** otel4s seals [[Counter]] and ships no public recording implementation, so what a span or a counter *emitted*
+    * cannot be asserted here — only that carrying them changes no outcome. The instruments are real values on the same
+    * code path a production runtime takes; asserting emission needs the otel4s testkit.
+    */
+  private val telemetry: CommandTelemetry[IO] =
+    CommandTelemetry(Tracer.Implicits.noop, CommandHandlerMetrics(Counter.noop[IO, Long]))
+
   private val subject = new EventSourcedCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
 
     protected val behavior = handler(TestState(exists = false, value = 0)):
@@ -162,10 +172,15 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       payload,
     )
 
+  /** @param appendConflicts
+    *   how many appends lose an optimistic-concurrency conflict before one is allowed through, so the retry loop is
+    *   observable from outside via [[readCount]] and [[appendAttempts]]
+    */
   final private class RecordingStore(
     history: List[EventEnvelope[TestEvent]],
     readFailure: Option[Throwable] = None,
     schema: TestEvent => Option[EventStorageSchema] = _ => None,
+    appendConflicts: Int = 0,
   ) extends EventStore[IO, TestEvent]:
 
     var readFromPosition: Option[Long] = None
@@ -174,7 +189,11 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
 
     var readCount: Int = 0
 
+    var appendAttempts: Int = 0
+
     var appended: Option[(EventFilter, Long, List[PendingEvent[TestEvent]])] = None
+
+    private var conflictsLeft: Int = appendConflicts
 
     private def matches(event: EventEnvelope[TestEvent], filter: EventFilter): Boolean =
       val eventTypeMatches = filter.eventTypes.isEmpty || filter.eventTypes.contains(event.metadata.eventType)
@@ -202,9 +221,14 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       expectedIndex: Long,
       events: List[PendingEvent[TestEvent]]*,
     ): IO[List[EventEnvelope[TestEvent]]] =
-      val flattened = events.toList.flatten
-      appended = Some((eventFilter, expectedIndex, flattened))
-      IO.pure(flattened.map(envelopeFor))
+      appendAttempts += 1
+      if conflictsLeft > 0 then
+        conflictsLeft -= 1
+        IO.raiseError(IndexConflictException(expectedIndex, expectedIndex + 1))
+      else
+        val flattened = events.toList.flatten
+        appended = Some((eventFilter, expectedIndex, flattened))
+        IO.pure(flattened.map(envelopeFor))
 
     def appendUnchecked(
       events: List[PendingEvent[TestEvent]]*,
@@ -688,4 +712,86 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
             expect(store.appended.isEmpty)
         case other => failure(s"Expected CommandScopeViolation, got $other")
       }
+  }
+
+  /** The span wraps the whole command, so it now sits between the caller and the outcome. A `surround` that turned a
+    * typed rejection into a failure — or swallowed a storage failure into a `Left` — would break the one contract that
+    * separates this handler from [[CommandHandler]], and would do it silently.
+    */
+  test("a traced command keeps rejections in Left and infrastructure failures in the effect") {
+    val infrastructureFailure = new RuntimeException("store unavailable")
+    val tags = Set(EntityScope("a").toTag)
+
+    for
+      accepted <- subject.run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime(new RecordingStore(List(envelope(1L, Created("a", 2), tags))), None, Some(telemetry)),
+                  )
+      rejected <- subject.run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime(new RecordingStore(Nil), None, Some(telemetry)),
+                  )
+      failed <- subject
+                  .run[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    CommandRuntime(
+                      new RecordingStore(Nil, readFailure = Some(infrastructureFailure)),
+                      None,
+                      Some(telemetry),
+                    ),
+                  )
+                  .attempt
+    yield expect(accepted.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
+      expect(rejected == Left(TestRejection.Missing)) and
+      expect(failed == Left(infrastructureFailure))
+  }
+
+  test("retry on an append conflict is unaffected by whether telemetry is carried") {
+    val tags = Set(EntityScope("a").toTag)
+
+    def storeWith(conflicts: Int) =
+      new RecordingStore(List(envelope(1L, Created("a", 2), tags)), appendConflicts = conflicts)
+
+    val tracedStore = storeWith(1)
+    val plainStore = storeWith(1)
+    val exhaustingStore = storeWith(4)
+
+    for
+      traced <- subject.run[IO](TestCommand("a"))(using
+                  summon[Concurrent[IO]],
+                  CommandRuntime(tracedStore, None, Some(telemetry)),
+                )
+      plain <- subject.run[IO](TestCommand("a"))(using
+                 summon[Concurrent[IO]],
+                 CommandRuntime.eventStoreOnly(plainStore),
+               )
+      // maxRetries is 3, so a fourth conflict exhausts them and the original conflict must surface unwrapped rather
+      // than as the internal RetryableCommandAppendConflict.
+      exhausted <- subject
+                     .run[IO](TestCommand("a"))(using
+                       summon[Concurrent[IO]],
+                       CommandRuntime(exhaustingStore, None, Some(telemetry)),
+                     )
+                     .attempt
+    yield expect(traced.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
+      // Envelopes carry a fresh id and timestamp, so the decided payloads are what has to agree.
+      expect(plain.map(_.map(_.payload)) == traced.map(_.map(_.payload))) and
+      // Each retry re-reads and re-appends, and the counts agree across both runtimes.
+      expect(tracedStore.appendAttempts == 2) and
+      expect(tracedStore.readCount == 2) and
+      expect(plainStore.appendAttempts == tracedStore.appendAttempts) and
+      expect(plainStore.readCount == tracedStore.readCount) and
+      expect(exhaustingStore.appendAttempts == 4) and
+      expect(exhausted.left.map(_.getClass) == Left(classOf[IndexConflictException]))
+  }
+
+  pureTest("the lightweight runtime constructors leave telemetry and snapshots unset") {
+    val store = new RecordingStore(Nil)
+    given EventStore[IO, TestEvent] = store
+    val derived = summon[CommandRuntime[IO, TestEvent]]
+
+    expect(CommandRuntime.eventStoreOnly(store).telemetry.isEmpty) and
+      expect(CommandRuntime.eventStoreOnly(store).snapshots.isEmpty) and
+      expect(derived.telemetry.isEmpty) and
+      expect(derived.snapshots.isEmpty)
   }

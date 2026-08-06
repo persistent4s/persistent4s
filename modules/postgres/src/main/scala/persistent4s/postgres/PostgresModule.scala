@@ -32,6 +32,7 @@ import skunk.implicits.*
 
 import persistent4s.{
   CommandRuntime,
+  CommandTelemetry,
   DefaultProjector,
   Event,
   EventCodec,
@@ -107,12 +108,16 @@ object PostgresModule:
     * @param messageOutbox
     *   present only when the module was built with `enableMessageOutbox = true`; otherwise `None` and no message outbox
     *   table is created
+    * @param commandTelemetry
+    *   the tracer and retry counter handed to [[commandRuntime]], so commands executed through this module are traced
+    *   and counted without the application wiring anything
     */
   final case class Components[F[_], A <: Event](
     eventStore: EventStore[F, A] & EventNotification[F],
     transactionalStore: PostgresEventStore[F, A],
     checkpoint: ProjectionCheckpoint[F],
     snapshotStore: PostgresCommandSnapshotStore[F],
+    commandTelemetry: Option[CommandTelemetry[F]],
     outbox: Option[PostgresOutbox[F, A]],
     messageOutbox: Option[PostgresMessageOutbox[F]],
     leaderElection: PostgresLeaderElection[F],
@@ -122,7 +127,7 @@ object PostgresModule:
   ):
 
     val commandRuntime: CommandRuntime[F, A] =
-      CommandRuntime(eventStore, Some(snapshotStore))
+      CommandRuntime(eventStore, Some(snapshotStore), commandTelemetry)
 
     def projectionRuntime(using Async[F], Logger[F], Tracer[F], Meter[F]): ProjectionRuntime[F, A] =
       ProjectionRuntime(DefaultProjector(eventStore, checkpoint))
@@ -227,11 +232,13 @@ object PostgresModule:
       checkpoint            <- Resource.eval(
                       InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)),
                     )
+      commandTelemetry <- Resource.eval(CommandTelemetry.make[F])
     yield Components(
       store,
       raw,
       checkpoint,
       PostgresCommandSnapshotStore.make[F](pool),
+      Some(commandTelemetry),
       if enableOutbox then Some(PostgresOutbox[F, A](pool, codec)) else None,
       if enableMessageOutbox || enableSaga then Some(PostgresMessageOutbox[F](pool)) else None,
       PostgresLeaderElection.make[F](pool),
