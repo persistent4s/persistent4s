@@ -30,8 +30,8 @@ trait SagaCommandHandler[C, S, E <: Event] extends CommandHandler[C, S, E]:
   /** The request being answered: the address to reply to, and the clock reading that decides whether it is stale.
     *
     * Its presence is why an implementation is a '''case class''' rather than an object — one instance per request,
-    * which is free, and the alternative would be threading the message through every decision function that might
-    * need it.
+    * which is free, and the alternative would be threading the message through every decision function that might need
+    * it.
     */
   def request: RequestContext
 

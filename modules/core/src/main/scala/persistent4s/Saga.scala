@@ -62,7 +62,9 @@ final case class SagaContext(id: UUID, sagaName: String, key: String, step: Int)
   * final case class ReserveStock(orderId: UUID, itemId: UUID, amount: Int)
   *
   * object ReserveStock:
+  *
   *   given RequestType[ReserveStock] = RequestType("reserve")
+  *
   *   given MessageCodec[ReserveStock] = CirceMessageCodec.derived
   * ```
   *
@@ -120,7 +122,7 @@ sealed abstract class SagaRequest[+Req]:
 
 object SagaRequest:
 
-  private final case class Deferred[+Req](
+  final private case class Deferred[+Req](
     label: String,
     topic: String,
     key: Option[String],
@@ -273,7 +275,7 @@ sealed abstract class PendingReply:
 
 object PendingReply:
 
-  private final case class Deferred(
+  final private case class Deferred(
     headers: Map[String, String],
     encode: () => Either[Throwable, String],
   ) extends PendingReply:
@@ -316,8 +318,8 @@ object SagaHeaders:
     */
   val ExpiresAt = "persistent4s.expiresAt"
 
-  /** Which of the partner's commands this is, from the payload's [[RequestType]]. It is what
-    * [[SagaParticipant.on]] routes on, and the reason neither side has to write the name down twice.
+  /** Which of the partner's commands this is, from the payload's [[RequestType]]. It is what [[SagaParticipant.on]]
+    * routes on, and the reason neither side has to write the name down twice.
     */
   val RequestType = "persistent4s.requestType"
 

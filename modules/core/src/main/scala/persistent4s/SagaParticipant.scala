@@ -1,3 +1,19 @@
+/*
+ * Copyright 2026 Antonio Jimenez and Bastien Jolidon
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package persistent4s
 
 import java.time.Instant
@@ -68,9 +84,9 @@ final class SagaParticipant[F[_]: Async: Logger] private (
 
   /** Register a handler that answers, for a partner with no log of its own.
     *
-    * The reply goes out as soon as the handler returns, which is only safe when there is nothing to make it atomic
-    * with — a stateless authorization, a lookup against something outside this service. A partner that appends events
-    * has to enqueue its reply in the transaction that appends them, and that is [[SagaCommandHandler]]'s job.
+    * The reply goes out as soon as the handler returns, which is only safe when there is nothing to make it atomic with
+    * — a stateless authorization, a lookup against something outside this service. A partner that appends events has to
+    * enqueue its reply in the transaction that appends them, and that is [[SagaCommandHandler]]'s job.
     *
     * An unencodable reply is logged and dropped rather than raised, unlike in [[SagaCommandHandler]]. The difference is
     * the atomicity: there, failing to reply has to undo the append too, so raising is the only safe answer; here
@@ -85,7 +101,7 @@ final class SagaParticipant[F[_]: Async: Logger] private (
     on[C] { (ctx, command) =>
       handle(ctx, command).flatMap { answer =>
         encoder.encode(answer) match
-          case Left(error)    =>
+          case Left(error) =>
             Logger[F].error(error)(s"could not encode the reply to a '${requestType.name}' request, dropping it")
           case Right(payload) =>
             // `None` means the request nominated nowhere to answer, which `dispatch` has already warned about.

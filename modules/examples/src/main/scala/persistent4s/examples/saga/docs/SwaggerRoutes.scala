@@ -23,9 +23,9 @@ import org.http4s.headers.`Content-Type`
 
 /** Swagger UI for the hand-written routes, so the walkthrough can be clicked instead of curled.
   *
-  * The other examples get this from `smithy4s-http4s-swagger`, which can only document a generated service. These routes
-  * take the same swagger-ui-dist webjar — already on the classpath as a transitive dependency of that module — and point
-  * it at a specification written by hand.
+  * The other examples get this from `smithy4s-http4s-swagger`, which can only document a generated service. These
+  * routes take the same swagger-ui-dist webjar — already on the classpath as a transitive dependency of that module —
+  * and point it at a specification written by hand.
   */
 object SwaggerRoutes:
 

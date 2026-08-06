@@ -134,7 +134,6 @@ object SagaRunnerSuite extends IOSuite:
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 
-
     val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
   /** Writes what the runner told it about the reply into the event it appends, so a test can see whether a saga can
@@ -171,7 +170,6 @@ object SagaRunnerSuite extends IOSuite:
       SagaDecision.compensated()
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
-
 
     val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
@@ -384,7 +382,6 @@ object SagaRunnerSuite extends IOSuite:
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 
-
     val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
   /** Continues on every reply, applying whichever [[SagaDeadline]] the reply asks for, so one saga covers all three
@@ -436,7 +433,6 @@ object SagaRunnerSuite extends IOSuite:
       SagaDecision.compensated()
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
-
 
     val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 

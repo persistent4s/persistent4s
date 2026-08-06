@@ -29,16 +29,17 @@ import skunk.implicits.*
 
 import persistent4s.Repository
 
-/** Where an order stands. `Placed` is not a step towards being recorded — it is a recorded state an order can sit in for
-  * as long as the saga takes, and the state a client will usually see if it reads immediately after posting.
+/** Where an order stands. `Placed` is not a step towards being recorded — it is a recorded state an order can sit in
+  * for as long as the saga takes, and the state a client will usually see if it reads immediately after posting.
   */
 enum OrderStatus:
+
   case Placed, Confirmed, Cancelled
 
 object OrderStatus:
 
-  /** A plain string over the wire — circe's sum derivation would wrap it in an object, and `"status":"Placed"` is what a
-    * reader of this API expects.
+  /** A plain string over the wire — circe's sum derivation would wrap it in an object, and `"status":"Placed"` is what
+    * a reader of this API expects.
     */
   given Encoder[OrderStatus] = Encoder.encodeString.contramap(_.toString)
 

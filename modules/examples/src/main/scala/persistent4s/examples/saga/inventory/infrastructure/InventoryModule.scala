@@ -44,8 +44,9 @@ final class InventoryModule private (
 /** Wiring for the service that answers the saga.
   *
   * Notice what is '''absent''': no `SagaRepository`, no `SagaRunner`, no checkpoint, no leader election. Taking part in
-  * someone else's saga needs a message outbox and a subscription, nothing more. Notice also that the event outbox is off
-  * — inventory publishes no events at all. Its log stays private, and the only thing that leaves this service is a reply.
+  * someone else's saga needs a message outbox and a subscription, nothing more. Notice also that the event outbox is
+  * off — inventory publishes no events at all. Its log stays private, and the only thing that leaves this service is a
+  * reply.
   */
 object InventoryModule:
 
@@ -72,8 +73,8 @@ object InventoryModule:
       bootstrap <- Resource.eval(loadKafkaBootstrap)
       // Carries replies out of the transaction that wrote them. Without it a reservation would commit and its answer
       // would never leave, and the asking saga would sit until its deadline.
-      relay <- KafkaModule.messageRelay[IO](outbox, KafkaMessageProducerConfig(bootstrapServers = bootstrap))
-      _     <- relay.run().background
+      relay      <- KafkaModule.messageRelay[IO](outbox, KafkaMessageProducerConfig(bootstrapServers = bootstrap))
+      _          <- relay.run().background
       subscriber <- KafkaModule.messageSubscriber[IO](
                       KafkaConsumerConfig(bootstrapServers = bootstrap, groupId = commandGroupId),
                     )

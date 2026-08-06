@@ -125,7 +125,12 @@ object PostgresSagaRepositorySuite extends IOSuite:
     messages: List[OutgoingMessage] = Nil,
   ): IO[Boolean] =
     fixture.repository.start(
-      sagaId(sagaName, key), sagaName, key, data, expiresIn.map(d => Instant.now().plusMillis(d.toMillis)), messages,
+      sagaId(sagaName, key),
+      sagaName,
+      key,
+      data,
+      expiresIn.map(d => Instant.now().plusMillis(d.toMillis)),
+      messages,
     )
 
   /** Start an instance whose deadline has already passed. No sleep: the deadline is a value now, so it can simply be
@@ -184,12 +189,12 @@ object PostgresSagaRepositorySuite extends IOSuite:
     val moved = Instant.now().plusSeconds(7200).truncatedTo(ChronoUnit.MICROS)
     val id = sagaId("reserve", "k1")
     for
-      _         <- truncate(fixture.pool)
-      _         <- start(fixture, "reserve", "k1", Some(1.hour))
-      _         <- fixture.repository.advance(id, 0, SagaStatus.Pending, 1, "state-1", Some(moved))
-      pushed    <- fixture.repository.find(id)
-      _         <- fixture.repository.advance(id, 1, SagaStatus.Pending, 2, "state-2", None)
-      unset     <- fixture.repository.find(id)
+      _      <- truncate(fixture.pool)
+      _      <- start(fixture, "reserve", "k1", Some(1.hour))
+      _      <- fixture.repository.advance(id, 0, SagaStatus.Pending, 1, "state-1", Some(moved))
+      pushed <- fixture.repository.find(id)
+      _      <- fixture.repository.advance(id, 1, SagaStatus.Pending, 2, "state-2", None)
+      unset  <- fixture.repository.find(id)
     yield expect.all(
       pushed.flatMap(_.deadline) == Some(moved),
       // `None` means no deadline, not "leave it as it was" — the runner resolves SagaDeadline.Keep to the record's own

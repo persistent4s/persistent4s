@@ -135,7 +135,7 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
       case SagaOutcome.Continue(_, SagaDeadline.Keep)  => record.deadline
       case SagaOutcome.Continue(_, SagaDeadline.Never) => None
       case SagaOutcome.Continue(_, SagaDeadline.In(d)) => Some(now.plusMillis(d.toMillis))
-      case _                                       => None
+      case _                                           => None
 
   /** Encode each command and stamp the saga's own headers over any the caller supplied. */
   private def encodeRequests[S, Req, Rep](

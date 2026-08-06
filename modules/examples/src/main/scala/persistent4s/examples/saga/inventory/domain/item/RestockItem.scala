@@ -23,11 +23,12 @@ import persistent4s.examples.saga.inventory.domain.{InventoryEvent, InventoryTag
 
 final case class RestockItem(itemId: UUID, amount: Int)
 
-/** The ordinary case, kept next to [[ReserveStockHandler]] for the contrast: a command whose invariant is entirely local
-  * needs no state, no messages and no saga — just `run`.
+/** The ordinary case, kept next to [[ReserveStockHandler]] for the contrast: a command whose invariant is entirely
+  * local needs no state, no messages and no saga — just `run`.
   *
-  * The state is `Unit` because nothing in the log can make a restock invalid. That does mean the handler still pays for a
-  * read it has no use for: `CommandHandler` always folds the command's scope, and there is no way to say "read nothing".
+  * The state is `Unit` because nothing in the log can make a restock invalid. That does mean the handler still pays for
+  * a read it has no use for: `CommandHandler` always folds the command's scope, and there is no way to say "read
+  * nothing".
   *
   * Narrowing `eventTypes` to `ItemRestocked` is not an optimisation, though — it is what keeps this command out of the
   * reservation's concurrency boundary. The filter defines the scope the optimistic-concurrency check guards, so:
