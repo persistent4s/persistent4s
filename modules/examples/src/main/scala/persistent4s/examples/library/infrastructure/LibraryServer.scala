@@ -16,11 +16,12 @@
 
 package persistent4s.examples.library.infrastructure
 
+import scala.concurrent.duration.*
+
 import cats.effect.{ExitCode, IO, IOApp}
+
 import com.comcast.ip4s.*
 import org.http4s.ember.server.EmberServerBuilder
-
-import scala.concurrent.duration.*
 
 object LibraryServer extends IOApp:
 
@@ -54,6 +55,8 @@ object LibraryServer extends IOApp:
             .withHttpApp(routes.orNotFound)
             .build
             .useForever
+            .race(module.projections.await)
+            .void
         }
       }
       .as(ExitCode.Success)

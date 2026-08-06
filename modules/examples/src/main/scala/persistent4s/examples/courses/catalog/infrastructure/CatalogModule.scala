@@ -38,11 +38,12 @@ import persistent4s.examples.courses.catalog.domain.*
 import persistent4s.examples.courses.catalog.domain.course.{CourseProjection, CourseRepository}
 import persistent4s.kafka.{KafkaModule, KafkaProducerConfig}
 import persistent4s.monitoring.MonitoringServer
-import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule}
+import persistent4s.postgres.{PostgresConfig, PostgresModule}
 
 final class CatalogModule private (
-  val store: PostgresEventStore[IO, CatalogEvent],
+  val store: EventStore[IO, CatalogEvent] & EventNotification[IO],
   val courseRepository: CourseRepository[IO],
+  val commandMetrics: CommandHandlerMetrics[IO],
 )
 
 object CatalogModule:
@@ -65,7 +66,8 @@ object CatalogModule:
                     new IllegalStateException("Outbox missing despite enableOutbox = true"),
                   ),
                 )
-      _         <- MonitoringServer.make[IO](checkpoint, store.notify, port = port"9091")
+      _         <- MonitoringServer.make[IO](checkpoint, components.sendNotification, port = port"9091")
+      metrics   <- Resource.eval(CommandHandlerMetrics.make[IO])
       pgConfig  <- Resource.eval(loadPgConfig)
       bootstrap <- Resource.eval(loadKafkaBootstrap)
       viewPool  <- Session
@@ -85,7 +87,7 @@ object CatalogModule:
                     )
       relay <- KafkaModule.relay[IO, CatalogEvent](outbox, producerCfg, eventCodec, topic = catalogTopic)
       _     <- relay.run().background
-    yield new CatalogModule(store, courseRepo)
+    yield new CatalogModule(store, courseRepo, metrics)
 
   private def loadPgConfig: IO[PostgresConfig] =
     IO.delay(ConfigSource.default.at(pgConfigPath).load[PostgresConfig]).flatMap {

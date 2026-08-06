@@ -26,7 +26,7 @@ import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.io.*
 
-import persistent4s.{EventStore, SagaId, SagaRecord}
+import persistent4s.{CommandHandlerMetrics, EventStore, SagaId, SagaRecord}
 import persistent4s.examples.saga.docs.SwaggerRoutes
 import persistent4s.examples.saga.orders.domain.OrderEvent
 import persistent4s.examples.saga.orders.domain.customer.{RegisterCustomer, RegisterCustomerHandler}
@@ -55,6 +55,8 @@ object OrdersRoutes:
 
   private def api(module: OrdersModule): HttpRoutes[IO] =
     given EventStore[IO, OrderEvent] = module.store
+
+    given CommandHandlerMetrics[IO] = module.commandMetrics
 
     HttpRoutes.of[IO] {
       case request @ POST -> Root / "customers" =>

@@ -19,6 +19,8 @@ package persistent4s
 import cats.effect.{Async, Deferred, IO, Ref}
 import cats.syntax.all.*
 import fs2.Stream
+import org.typelevel.otel4s.metrics.Counter
+import org.typelevel.otel4s.trace.Tracer
 import weaver.SimpleIOSuite
 
 import java.time.Instant
@@ -28,6 +30,10 @@ import persistent4s.CommandHandlerRunSuite.TestEvent.StudentDeleted
 import persistent4s.CommandHandlerRunSuite.CounterEvent.Incremented
 
 object CommandHandlerRunSuite extends SimpleIOSuite:
+
+  given Tracer[IO] = Tracer.Implicits.noop
+
+  given CommandHandlerMetrics[IO] = CommandHandlerMetrics(Counter.noop[IO, Long])
 
   // ---------------------------------------------------------------------------
   // Minimal in-memory EventStore for testing — no testkit dependency needed
@@ -47,7 +53,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       filter: EventFilter,
       expectedIndex: Long,
       events: List[PendingEvent[A]]*,
-    ): F[List[A]] =
+    ): F[List[EventEnvelope[A]]] =
       store.modify { currentEvents =>
         val incomingTags = events.flatten.flatMap(_.tags).toSet
         val relevantEvents = currentEvents.filter(env => env.metadata.tags.exists(incomingTags.contains))
@@ -70,13 +76,13 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
               pending.payload,
             )
           }
-          (currentEvents ++ newEvents, Right(events.flatten.map(_.payload).toList))
+          (currentEvents ++ newEvents, Right(newEvents.toList))
       }.flatMap {
         case Left(error)   => Async[F].raiseError(error)
         case Right(result) => Async[F].pure(result)
       }
 
-    override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[A]] =
+    override def appendUnchecked(events: List[PendingEvent[A]]*): F[List[EventEnvelope[A]]] =
       Async[F].pure(List.empty) // not needed for these tests
 
     /** Not atomic with the append — two `Ref`s cannot be — but it does preserve the one rule the real store's
@@ -87,7 +93,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       expectedIndex: Long,
       messages: List[OutgoingMessage],
       events: List[PendingEvent[A]]*,
-    ): F[List[A]] =
+    ): F[List[EventEnvelope[A]]] =
       if events.flatten.isEmpty then
         // Per TransactionalMessages: nothing is being written, so `expectedIndex` is ignored rather than checked and
         // the messages are enqueued on their own. Checking it would also be meaningless here — this fake derives the
@@ -98,9 +104,13 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     override def appendUncheckedWithMessages(
       messages: List[OutgoingMessage],
       events: List[PendingEvent[A]]*,
-    ): F[List[A]] =
+    ): F[List[EventEnvelope[A]]] =
       // `appendUnchecked` above is a stub, so this only carries the messages; nothing here calls it.
       outbox.update(_ ++ messages) *> appendUnchecked(events*)
+
+    def currentRevision(eventFilter: EventFilter): F[Long] =
+      readFrom(0L, eventFilter, None).compile.toList
+        .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
     override def readFrom(
       fromPosition: Long,
@@ -189,19 +199,30 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     gate: Deferred[IO, Unit],
   ): MessagingStore[A] =
     new EventStore[IO, A] with TransactionalMessages[IO, A]:
-      def append(filter: EventFilter, expectedIndex: Long, events: List[PendingEvent[A]]*): IO[List[A]] =
+      def append(
+        filter: EventFilter,
+        expectedIndex: Long,
+        events: List[PendingEvent[A]]*,
+      ): IO[List[EventEnvelope[A]]] =
         underlying.append(filter, expectedIndex, events*)
-      def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[A]] =
+      def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[EventEnvelope[A]]] =
         underlying.appendUnchecked(events*)
       def appendWithMessages(
         eventFilter: EventFilter,
         expectedIndex: Long,
         messages: List[OutgoingMessage],
         events: List[PendingEvent[A]]*,
-      ): IO[List[A]] =
+      ): IO[List[EventEnvelope[A]]] =
         underlying.appendWithMessages(eventFilter, expectedIndex, messages, events*)
-      def appendUncheckedWithMessages(messages: List[OutgoingMessage], events: List[PendingEvent[A]]*): IO[List[A]] =
+      def appendUncheckedWithMessages(
+        messages: List[OutgoingMessage],
+        events: List[PendingEvent[A]]*,
+      ): IO[List[EventEnvelope[A]]] =
         underlying.appendUncheckedWithMessages(messages, events*)
+      def currentRevision(eventFilter: EventFilter): IO[Long] =
+        readFrom(0L, eventFilter, None).compile.toList
+          .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
       def readFrom(
         fromPosition: Long,
         eventFilter: EventFilter,
@@ -621,7 +642,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       events   <- store.getEvents
       messages <- store.getMessages
     yield expect.all(
-      result == Right(List(TestEvent.StudentCreated("1"))),
+      // `runWithMessages` hands back envelopes, like `run` — the payloads are what this test is about.
+      result.map(_.map(_.payload)) == Right(List(TestEvent.StudentCreated("1"))),
       events.length == 1,
       events.head.payload == TestEvent.StudentCreated("1"),
       messages.length == 1,
@@ -667,7 +689,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       events   <- store.getEvents
       messages <- store.getMessages
     yield expect.all(
-      accepted == Right(List(TestEvent.StudentCreated("1"))),
+      // `runWithMessages` hands back envelopes, like `run` — the payloads are what this test is about.
+      accepted.map(_.map(_.payload)) == Right(List(TestEvent.StudentCreated("1"))),
       rejected.isLeft,
       events.length == 1,
       messages.isEmpty,
@@ -685,7 +708,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       events   <- store.getEvents
       messages <- store.getMessages
     yield expect.all(
-      result == Right(List(TestEvent.StudentCreated("1"))),
+      // `runWithMessages` hands back envelopes, like `run` — the payloads are what this test is about.
+      result.map(_.map(_.payload)) == Right(List(TestEvent.StudentCreated("1"))),
       events.length == 1,
       messages.length == 1,
       // Everything below came from the request rather than from the handler, which named a payload and nothing else.
@@ -763,6 +787,46 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       outcome.left.exists(_.getMessage == "boom"),
       events.isEmpty,
       messages.isEmpty,
+    )
+  }
+
+  /** Throws where a handler is least expected to: computing the scope to read, before any effect has been built. */
+  final case class ThrowingTagsHandler(request: RequestContext)
+      extends SagaCommandHandler[CreateStudent, StudentState, TestEvent]:
+
+    def tags(command: CreateStudent): Set[Tag] = throw new RuntimeException("tags exploded")
+
+    def initial: StudentState = StudentState(exists = false)
+
+    def evolve(command: CreateStudent, state: StudentState, event: TestEvent): StudentState = state
+
+    def validate(state: StudentState, command: CreateStudent): Either[Throwable, Unit] = Right(())
+
+    def decide(state: StudentState, command: CreateStudent): List[(Set[Tag], TestEvent)] = Nil
+
+    override def reply(
+      state: StudentState,
+      command: CreateStudent,
+      outcome: Either[Throwable, List[TestEvent]],
+    ): Option[PendingReply] = None
+
+  test("a handler that throws instead of returning fails the command rather than the caller") {
+    // `runWithMessages` reads the command's scope before it has built anything, so a `tags` that throws would escape
+    // synchronously and take down whatever was driving it — under `SagaParticipant`, the whole subscription — instead
+    // of failing this one message and letting the broker redeliver it. Everything a handler contributes is therefore
+    // evaluated inside the effect.
+    val handler = ThrowingTagsHandler(sagaRequest())
+    for
+      store   <- InMemoryEventStore.make[IO, TestEvent]
+      outcome <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1")).attempt
+      }
+      events <- store.getEvents
+    yield expect.all(
+      outcome.isLeft,
+      outcome.left.exists(_.getMessage == "tags exploded"),
+      events.isEmpty,
     )
   }
 

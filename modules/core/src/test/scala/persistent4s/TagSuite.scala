@@ -16,8 +16,9 @@
 
 package persistent4s
 
-import weaver.SimpleIOSuite
 import java.util.UUID
+
+import weaver.SimpleIOSuite
 
 object TagSuite extends SimpleIOSuite:
 

@@ -21,12 +21,22 @@ import fs2.Stream
 /** Appends and reads events in an event-sourced system. Appending is done with optimistic concurrency control. */
 trait EventStore[F[_], A <: Event]:
 
+  /** Describe the schema this store will persist for `event`, when the backend owns a schema-aware codec. High-level
+    * handlers use this to fail fast if a shadowed/local EventSchema disagrees with the storage registry.
+    */
+  def storageSchema(event: A): Option[EventStorageSchema] = None
+
+  /** Return the global position of the latest event matching `eventFilter`, or `0` when none exists. This is the
+    * authoritative revision used by optimistic concurrency and to validate disposable command snapshots.
+    */
+  def currentRevision(eventFilter: EventFilter): F[Long]
+
   /** Append events to the event store using optimistic concurrency control.
     *
-    * The `expectedIndex` must equal the global position of the most recent event that matches `eventFilter`. If another
-    * event matching the filter has been appended concurrently, the actual index will be higher and an
-    * [[IndexConflictException]] is raised with no events written. Pass `expectedIndex = 0` when no prior matching
-    * events are expected (i.e. this is the first append for that filter scope).
+    * The `expectedIndex` must equal the global position of the most recent event that matches `eventFilter`. Any
+    * mismatch (behind or ahead of the authoritative revision) raises [[IndexConflictException]] with no events written.
+    * Pass `expectedIndex = 0` when no prior matching events are expected (i.e. this is the first append for that filter
+    * scope).
     *
     * The `events` parameter is variadic so that callers who build events in separate groups can pass multiple lists
     * without flattening them first. All lists are treated as a single ordered sequence — there is no semantic
@@ -42,14 +52,14 @@ trait EventStore[F[_], A <: Event]:
     *   each events represented as a [[PendingEvent]] carrying its payload, tags, type name, external flag, optional id,
     *   and headers
     * @return
-    *   a F[List[A]] that completes when the events have been written, or fails with [[IndexConflictException]] on
-    *   conflict
+    *   a F[List[EventEnvelope[A]]] that completes when the events have been written, or fails with
+    *   [[IndexConflictException]] on conflict
     */
   def append(
     eventFilter: EventFilter,
     expectedIndex: Long,
     events: List[PendingEvent[A]]*,
-  ): F[List[A]]
+  ): F[List[EventEnvelope[A]]]
 
   /** Append events to the event store WITHOUT optimistic concurrency control.
     *
@@ -68,18 +78,18 @@ trait EventStore[F[_], A <: Event]:
     *
     * At-least-once delivery from a broker means the same event may arrive twice. To make this method idempotent in the
     * face of redelivery, pass the source event's UUID via [[PendingEvent.id]]. The unique constraint on `event_id` then
-    * rejects duplicates at the storage layer, and the caller can catch that error and treat it as "already imported"
-    * (typically: commit the broker offset and continue). Passing `None` skips this safeguard and is appropriate only if
-    * duplicates are impossible by construction.
+    * makes a duplicate append a silent no-op: the original row is left untouched and its existing metadata (position,
+    * timestamp) is returned rather than a new one being written. Passing `None` skips this safeguard and is appropriate
+    * only if duplicates are impossible by construction.
     *
     * @param events
     *   each events represented as a [[PendingEvent]] carrying its payload, tags, type name, external flag, optional id,
     *   and headers
     * @return
-    *   a `F[List[A]]` that completes when the events have been written. May fail at the storage layer if a duplicate
-    *   `event_id` is detected — see the idempotency note above.
+    *   a F[List[EventEnvelope[A]]] that completes when the events have been written. On a duplicate `event_id` the
+    *   existing event's envelope is returned rather than a new row being written — see the idempotency note above.
     */
-  def appendUnchecked(events: List[PendingEvent[A]]*): F[List[A]]
+  def appendUnchecked(events: List[PendingEvent[A]]*): F[List[EventEnvelope[A]]]
 
   /** Read a snapshot of events from the store starting at `fromPosition` (exclusive). The stream completes once all
     * currently matching events have been emitted — it is a one-shot read, not a live subscription.

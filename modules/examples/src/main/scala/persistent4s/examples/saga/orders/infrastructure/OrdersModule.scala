@@ -38,12 +38,13 @@ import persistent4s.examples.saga.orders.domain.OrderEvent
 import persistent4s.examples.saga.orders.domain.order.{OrderProjection, OrderRepository}
 import persistent4s.examples.saga.orders.saga.ReserveStockSaga
 import persistent4s.kafka.{KafkaConsumerConfig, KafkaMessageProducerConfig, KafkaModule}
-import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule, PostgresSagaRepository}
+import persistent4s.postgres.{PostgresConfig, PostgresModule, PostgresSagaRepository}
 
 final class OrdersModule private (
-  val store: PostgresEventStore[IO, OrderEvent],
+  val store: EventStore[IO, OrderEvent] & EventNotification[IO],
   val orderRepository: OrderRepository[IO],
   val sagaRepository: PostgresSagaRepository[IO],
+  val commandMetrics: CommandHandlerMetrics[IO],
 )
 
 /** Wiring for the service that hosts the saga.
@@ -106,9 +107,13 @@ object OrdersModule:
                      groupId = SagaRunner.replyGroupId(serviceGroupId, ReserveStockSaga.name),
                    ),
                  )
+      metrics <- Resource.eval(CommandHandlerMetrics.make[IO])
+      // The *transactional* store: the runner enqueues a saga's requests in the same transaction that appends the
+      // events causing them, which only the raw PostgreSQL store can do. Everything else here — the projector, the
+      // command handlers behind the routes — goes through the instrumented `eventStore` above.
       runner = SagaRunner[IO, OrderEvent](
-                 store = store, checkpoint = checkpoint, repository = sagaRepo, replies = replies,
-                 replyTopic = Topics.OrdersReplies,
+                 store = components.transactionalStore, checkpoint = checkpoint, repository = sagaRepo,
+                 replies = replies, replyTopic = Topics.OrdersReplies,
                )
       // `run` ends only on an unrecoverable error, and one loop failing takes the other two with it. Restarting is the
       // caller's job — a real service would supervise this; an example settles for making the death loud instead of
@@ -119,7 +124,7 @@ object OrdersModule:
              .drain
              .handleErrorWith(error => Logger[IO].error(error)("saga runner stopped; sagas will no longer advance"))
              .background
-    yield new OrdersModule(store, orderRepo, sagaRepo)
+    yield new OrdersModule(store, orderRepo, sagaRepo, metrics)
 
   private def loadPgConfig: IO[PostgresConfig] =
     IO.delay(ConfigSource.default.at(pgConfigPath).load[PostgresConfig]).flatMap {

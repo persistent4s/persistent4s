@@ -16,12 +16,13 @@
 
 package persistent4s.examples.library.domain.book
 
-import cats.effect.*
-import cats.syntax.all.*
+import java.util.UUID
+
+import cats.effect.IO
 
 import persistent4s.*
-import persistent4s.examples.library.domain.{BookAdded, BookBorrowed, BookReturned, LibraryEvent}
-import java.util.UUID
+import persistent4s.examples.library.domain.borrowing.{BookBorrowed, BookReturned}
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
 final case class BookState(
   bookId: UUID,
@@ -31,35 +32,18 @@ final case class BookState(
   availableCopies: Int,
 )
 
-final class BookProjection[F[_]: Async] private (
-  protected val repository: Repository[F, UUID, BookState],
-) extends Projection[F, LibraryEvent, UUID, BookState]:
+final class BookProjection(
+  protected val repository: BookRepository,
+) extends ExactlyOnceEventSourcedProjection[IO, LibraryEvent, UUID, BookState]:
 
   override val name: String = "book-projection"
 
-  override val filter: Set[EventTypeName] = Set(
-    EventTypeName.of[BookAdded],
-    EventTypeName.of[BookBorrowed],
-    EventTypeName.of[BookReturned],
-  )
+  override protected val eventHandlers = handlersBy(LibraryScopes.Book):
+    on[BookAdded].create: event =>
+      BookState(event.bookId, event.title, event.author, event.totalCopies, event.totalCopies)
 
-  override def resolveKeys(event: EventEnvelope[LibraryEvent]): List[UUID] = event.payload match
-    case BookAdded(bookId, _, _, _)    => List(bookId)
-    case BookBorrowed(bookId, _, _, _) => List(bookId)
-    case BookReturned(bookId, _, _)    => List(bookId)
-    case _                             => Nil
+    on[BookBorrowed].update: state =>
+      state.copy(availableCopies = state.availableCopies - 1)
 
-  override def handle(state: Option[BookState], event: EventEnvelope[LibraryEvent]): F[Option[BookState]] =
-    (state, event.payload) match
-      case (None, BookAdded(bookId, title, author, totalCopies)) =>
-        BookState(bookId, title, author, totalCopies, totalCopies).some.pure[F]
-      case (Some(s), BookBorrowed(bookId, _, _, _)) =>
-        Some(s.copy(availableCopies = s.availableCopies - 1)).pure[F]
-      case (Some(s), BookReturned(bookId, _, _)) =>
-        Some(s.copy(availableCopies = s.availableCopies + 1)).pure[F]
-      case _ => Async[F].raiseError(new RuntimeException(s"Unexpected event: ${event.payload} for state: $state"))
-
-object BookProjection:
-
-  def make[F[_]: Async](repository: Repository[F, UUID, BookState]): F[BookProjection[F]] =
-    Async[F].pure(new BookProjection(repository))
+    on[BookReturned].update: state =>
+      state.copy(availableCopies = state.availableCopies + 1)

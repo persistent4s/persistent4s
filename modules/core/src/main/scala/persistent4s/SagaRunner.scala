@@ -25,6 +25,8 @@ import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.log4cats.Logger
+import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.otel4s.trace.Tracer
 import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.duration.DurationInt
 
@@ -44,7 +46,7 @@ import scala.concurrent.duration.DurationInt
   * @param replyTopic
   *   where partners are told to send replies, stamped onto every request as [[SagaHeaders.ReplyTo]]
   */
-final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
+final case class SagaRunner[F[_]: Async: Logger: Tracer: Meter, A <: Event] private (
   store: EventStore[F, A] & EventNotification[F] & TransactionalMessages[F, A],
   checkpoint: ProjectionCheckpoint[F],
   repository: SagaRepository[F],
@@ -321,7 +323,7 @@ object SagaRunner:
     */
   def replyGroupId(serviceGroupId: String, sagaName: String): String = s"$serviceGroupId.saga.$sagaName"
 
-  def apply[F[_]: Async: Logger, A <: Event](
+  def apply[F[_]: Async: Logger: Tracer: Meter, A <: Event](
     store: EventStore[F, A] & EventNotification[F] & TransactionalMessages[F, A],
     checkpoint: ProjectionCheckpoint[F],
     repository: SagaRepository[F],

@@ -31,9 +31,11 @@ import skunk.implicits.*
 import weaver.IOSuite
 
 import persistent4s.circe.CirceEventCodec
-import persistent4s.{Event, EventTypeName, PendingEvent, Tag}
+import persistent4s.{Event, EventFilter, EventTypeName, PendingEvent, Tag}
 
 object PostgresOutboxSuite extends IOSuite:
+
+  given org.typelevel.log4cats.Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 
   override def maxParallelism: Int = 1
 
@@ -86,7 +88,7 @@ object PostgresOutboxSuite extends IOSuite:
                   .withUserAndPassword(config.user, config.password)
                   .withDatabase(config.database)
                   .pooled(4)
-      yield Fixture(components.eventStore, outbox, pool)
+      yield Fixture(components.transactionalStore, outbox, pool)
     }
 
   // ----- helpers -----
@@ -96,6 +98,9 @@ object PostgresOutboxSuite extends IOSuite:
 
   private def outboxPositions(pool: Resource[IO, Session[IO]]): IO[List[Long]] =
     pool.use(_.execute(sql"SELECT global_position FROM event_outbox ORDER BY global_position".query(int8)))
+
+  private val deleteOutboxRow: Command[Long] =
+    sql"DELETE FROM event_outbox WHERE global_position = $int8".command
 
   private def appendLocal(
     store: PostgresEventStore[IO, TestEvent],
@@ -152,6 +157,56 @@ object PostgresOutboxSuite extends IOSuite:
       _         <- appendLocal(store, Tag("course", "c1"), "local")
       positions <- outboxPositions(pool)
     yield expect(positions == List(2L))
+  }
+
+  test("a single batched append enqueues only its new local events") { case Fixture(store, _, pool) =>
+    // All events in one append go out as one multi-row upsert, and the outbox rows are selected from that
+    // statement's RETURNING set. A mis-paired row would enqueue the wrong positions, so this mixes a fresh
+    // local event, an already-seen id, and an external event in a single call.
+    val seen = UUID.randomUUID()
+    for
+      _   <- truncate(pool)
+      _   <- appendLocal(store, Tag("course", "c1"), "already-there", Some(seen))
+      pre <- outboxPositions(pool)
+      _   <- outboxPositions(pool).flatMap(_.traverse_(p => pool.use(_.execute(deleteOutboxRow)(p)).void))
+      _   <- store
+             .appendUnchecked(
+               List(
+                 // fresh local -> enqueued
+                 PendingEvent(
+                   TestEvent("fresh"),
+                   Set(Tag("course", "c2")),
+                   EventTypeName.of[TestEvent],
+                   isExternal = false,
+                 ),
+                 // already-seen id -> resolves to the existing row, must not be enqueued again
+                 PendingEvent(
+                   TestEvent("duplicate"),
+                   Set(Tag("course", "c1")),
+                   EventTypeName.of[TestEvent],
+                   isExternal = false,
+                   id = Some(seen),
+                 ),
+                 // external -> never enqueued
+                 PendingEvent(
+                   TestEvent("imported"),
+                   Set(Tag("course", "c3")),
+                   EventTypeName.of[TestEvent],
+                   isExternal = true,
+                   id = Some(UUID.randomUUID()),
+                 ),
+               ),
+             )
+             .void
+      positions <- outboxPositions(pool)
+      stored    <- store.readFrom(0L, EventFilter()).compile.toList
+    yield expect.all(
+      pre == List(1L),
+      // only the fresh local event's position, which is the one written after the pre-existing row
+      positions == List(2L),
+      // the duplicate did not create a fourth row: 3 distinct events are stored, not 4
+      stored.map(_.payload.value) == List("already-there", "fresh", "imported"),
+    )
   }
 
   test("duplicate id while the outbox row is still pending: no crash, no second row") { case Fixture(store, _, pool) =>

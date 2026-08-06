@@ -3,6 +3,7 @@ $version: "2"
 namespace persistent4s.examples.library.api
 
 use alloy#simpleRestJson
+use smithy4s.meta#packedInputs
 
 @simpleRestJson
 service BookService {
@@ -29,15 +30,33 @@ operation AddBook {
 
     output := {
         @required
-        bookId: String
+        book: BookItem
     }
 
-    errors: [ValidationError]
+    errors: [
+        ValidationError
+        ProjectionTimeoutError
+    ]
 }
 
 @http(method: "GET", uri: "/books")
 @readonly
+@packedInputs
 operation GetBooks {
+    input := {
+        @httpQuery("title")
+        title: StringList
+
+        @httpQuery("author")
+        author: StringList
+
+        @httpQuery("totalCopies")
+        totalCopies: Integer
+
+        @httpQuery("availableCopies")
+        availableCopies: Integer
+    }
+
     output := {
         @required
         books: BookList
@@ -58,11 +77,17 @@ operation GetBook {
         book: BookItem
     }
 
-    errors: [NotFoundError]
+    errors: [
+        NotFoundError
+    ]
 }
 
 list BookList {
     member: BookItem
+}
+
+list StringList {
+    member: String
 }
 
 structure BookItem {

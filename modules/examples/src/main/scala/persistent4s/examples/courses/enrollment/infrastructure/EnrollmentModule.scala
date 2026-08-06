@@ -36,7 +36,7 @@ import persistent4s.*
 import persistent4s.circe.CirceEventCodec
 import persistent4s.kafka.{KafkaConsumerConfig, KafkaModule, KafkaProducerConfig}
 import persistent4s.monitoring.MonitoringServer
-import persistent4s.postgres.{PostgresConfig, PostgresEventStore, PostgresModule}
+import persistent4s.postgres.{PostgresConfig, PostgresModule}
 
 import persistent4s.examples.courses.enrollment.domain.*
 import persistent4s.examples.courses.enrollment.domain.student.*
@@ -44,10 +44,11 @@ import persistent4s.examples.courses.enrollment.domain.course.*
 import persistent4s.examples.courses.enrollment.domain.enrollment.*
 
 final class EnrollmentModule private (
-  val store: PostgresEventStore[IO, SchoolEvent],
+  val store: EventStore[IO, SchoolEvent] & EventNotification[IO],
   val studentRepository: StudentRepository[IO],
   val enrollmentRepository: EnrollmentRepository[IO],
   val courseRepository: CourseRepository[IO],
+  val commandMetrics: CommandHandlerMetrics[IO],
 )
 
 object EnrollmentModule:
@@ -74,7 +75,8 @@ object EnrollmentModule:
                     new IllegalStateException("Outbox missing despite enableOutbox = true"),
                   ),
                 )
-      _         <- MonitoringServer.make[IO](checkpoint, store.notify, port = port"9092")
+      _         <- MonitoringServer.make[IO](checkpoint, components.sendNotification, port = port"9092")
+      metrics   <- Resource.eval(CommandHandlerMetrics.make[IO])
       pgConfig  <- Resource.eval(loadPgConfig)
       bootstrap <- Resource.eval(loadKafkaBootstrap)
       viewPool  <- Session
@@ -106,7 +108,7 @@ object EnrollmentModule:
                     )
       relay <- KafkaModule.relay[IO, SchoolEvent](outbox, producerCfg, eventCodec, topic = enrollmentTopic)
       _     <- relay.run().background
-    yield new EnrollmentModule(store, studentRepo, enrollmentRepo, courseRepo)
+    yield new EnrollmentModule(store, studentRepo, enrollmentRepo, courseRepo, metrics)
 
   private def loadPgConfig: IO[PostgresConfig] =
     IO.delay(ConfigSource.default.at(pgConfigPath).load[PostgresConfig]).flatMap {

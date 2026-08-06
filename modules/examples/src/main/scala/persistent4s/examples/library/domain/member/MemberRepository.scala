@@ -16,87 +16,22 @@
 
 package persistent4s.examples.library.domain.member
 
-import cats.effect.*
-import cats.syntax.all.*
-import skunk.*
-import skunk.implicits.*
-import skunk.codec.all.*
-
-import persistent4s.Repository
-import persistent4s.examples.library.domain.member.MemberState
 import java.util.UUID
 
-final class MemberRepository[F[_]: Async] private (
-  pool: Resource[F, Session[F]],
-) extends Repository[F, UUID, MemberState]:
+import cats.effect.{IO, Resource}
 
-  import MemberRepository.*
+import persistent4s.postgres.{DerivedPostgresRepository, PostgresTable}
 
-  override def findMany(keys: List[UUID]): F[Map[UUID, Option[MemberState]]] =
-    if keys.isEmpty then Map.empty.pure[F]
-    else
-      pool.use(_.execute(findManyQuery(keys.size))(keys)).map { states =>
-        val found = states.map(s => s.memberId -> s).toMap
-        keys.map(k => k -> found.get(k)).toMap
-      }
+import skunk.Session
 
-  override def upsertMany(states: Map[UUID, MemberState]): F[Unit] =
-    if states.isEmpty then Async[F].unit
-    else
-      states.toList
-        .grouped(MaxUpsertChunkSize)
-        .toList
-        .traverse_(chunk => pool.use(_.execute(upsertManyCommand(chunk.size))(chunk.map(_._2))).void)
-
-  override def deleteMany(keys: List[UUID]): F[Unit] =
-    if keys.isEmpty then Async[F].unit
-    else pool.use(_.execute(deleteManyCommand(keys.size))(keys)).void
-
-  def find(key: UUID): F[Option[MemberState]] =
-    pool.use(_.option(findQuery)(key))
-
-  def getMembers: F[List[MemberState]] =
-    pool.use(_.execute(getMembersQuery))
+final class MemberRepository private (
+  pool: Resource[IO, Session[IO]],
+) extends DerivedPostgresRepository[IO, UUID, MemberState](pool, MemberRepository.table)
 
 object MemberRepository:
 
-  private val MaxUpsertChunkSize = 500
+  private val table: PostgresTable[UUID, MemberState] =
+    PostgresTable.derived[MemberState]("members").key(_.memberId)
 
-  private val memberStateCodec: Codec[MemberState] =
-    (uuid *: text *: text *: int4).to[MemberState]
-
-  private def findManyQuery(n: Int): Query[List[UUID], MemberState] =
-    sql"""
-      SELECT member_id, name, email, borrowed_books
-      FROM members
-      WHERE member_id = ANY(ARRAY[${uuid.list(n)}])
-    """.query(memberStateCodec)
-
-  private val findQuery: Query[UUID, MemberState] =
-    sql"""
-      SELECT member_id, name, email, borrowed_books
-      FROM members
-      WHERE member_id = $uuid
-    """.query(memberStateCodec)
-
-  private def upsertManyCommand(n: Int): Command[List[MemberState]] =
-    sql"""
-      INSERT INTO members (member_id, name, email, borrowed_books)
-      VALUES ${memberStateCodec.values.list(n)}
-      ON CONFLICT (member_id) DO UPDATE SET
-        name           = EXCLUDED.name,
-        email          = EXCLUDED.email,
-        borrowed_books = EXCLUDED.borrowed_books
-    """.command
-
-  private def deleteManyCommand(n: Int): Command[List[UUID]] =
-    sql"DELETE FROM members WHERE member_id = ANY(ARRAY[${uuid.list(n)}])".command
-
-  private val getMembersQuery: Query[Void, MemberState] =
-    sql"""
-      SELECT member_id, name, email, borrowed_books
-      FROM members
-    """.query(memberStateCodec)
-
-  def make[F[_]: Async](pool: Resource[F, Session[F]]): MemberRepository[F] =
+  def make(pool: Resource[IO, Session[IO]]): MemberRepository =
     new MemberRepository(pool)

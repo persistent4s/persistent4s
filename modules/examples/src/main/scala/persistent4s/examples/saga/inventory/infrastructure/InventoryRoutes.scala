@@ -25,7 +25,7 @@ import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.io.*
 
-import persistent4s.{EventFilter, EventStore}
+import persistent4s.{CommandHandlerMetrics, EventFilter, EventStore}
 import persistent4s.examples.saga.docs.SwaggerRoutes
 import persistent4s.examples.saga.inventory.domain.{InventoryEvent, InventoryTags}
 import persistent4s.examples.saga.inventory.domain.item.{ItemStock, RestockItem, RestockItemHandler}
@@ -44,6 +44,8 @@ object InventoryRoutes:
 
   private def api(module: InventoryModule): HttpRoutes[IO] =
     given EventStore[IO, InventoryEvent] = module.store
+
+    given CommandHandlerMetrics[IO] = module.commandMetrics
 
     HttpRoutes.of[IO] {
       case request @ POST -> Root / "items" / UUIDVar(itemId) / "restock" =>

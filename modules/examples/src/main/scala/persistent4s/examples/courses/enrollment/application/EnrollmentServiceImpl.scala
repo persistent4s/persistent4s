@@ -20,7 +20,9 @@ import java.util.UUID
 
 import cats.effect.IO
 
-import persistent4s.EventStore
+import org.typelevel.otel4s.trace.Tracer
+
+import persistent4s.{CommandHandlerMetrics, EventStore}
 import persistent4s.examples.courses.enrollment.api.*
 import persistent4s.examples.courses.enrollment.domain.SchoolEvent
 import persistent4s.examples.courses.enrollment.domain.enrollment.*
@@ -28,7 +30,7 @@ import smithy4s.time.Timestamp
 
 class EnrollmentServiceImpl(
   repository: EnrollmentRepository[IO],
-)(using EventStore[IO, SchoolEvent])
+)(using EventStore[IO, SchoolEvent], CommandHandlerMetrics[IO], Tracer[IO])
     extends EnrollmentService[IO]:
 
   def enrollStudent(studentId: String, courseId: String): IO[Unit] =

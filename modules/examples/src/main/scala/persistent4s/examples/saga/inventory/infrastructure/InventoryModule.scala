@@ -35,10 +35,11 @@ import persistent4s.circe.CirceEventCodec
 import persistent4s.examples.saga.contract.Topics
 import persistent4s.examples.saga.inventory.domain.InventoryEvent
 import persistent4s.kafka.{KafkaConsumerConfig, KafkaMessageProducerConfig, KafkaModule}
-import persistent4s.postgres.{PostgresEventStore, PostgresModule}
+import persistent4s.postgres.PostgresModule
 
 final class InventoryModule private (
-  val store: PostgresEventStore[IO, InventoryEvent],
+  val store: EventStore[IO, InventoryEvent] & EventNotification[IO],
+  val commandMetrics: CommandHandlerMetrics[IO],
 )
 
 /** Wiring for the service that answers the saga.
@@ -78,12 +79,16 @@ object InventoryModule:
       subscriber <- KafkaModule.messageSubscriber[IO](
                       KafkaConsumerConfig(bootstrapServers = bootstrap, groupId = commandGroupId),
                     )
+      metrics <- Resource.eval(CommandHandlerMetrics.make[IO])
+      // The *transactional* store, not the instrumented one: replying inside the appending transaction is what
+      // `TransactionalMessages` adds, and only the raw PostgreSQL store implements it. Appends on this path therefore
+      // bypass the otel4s instrumentation, which is the trade `Components.transactionalStore` documents.
       _ <- InventoryCommandConsumer
-             .stream[IO](subscriber, store, Topics.InventoryCommands)
+             .stream[IO](subscriber, components.transactionalStore, Topics.InventoryCommands, metrics)
              .compile
              .drain
              .background
-    yield new InventoryModule(store)
+    yield new InventoryModule(store, metrics)
 
   private def loadKafkaBootstrap: IO[String] =
     IO.delay(ConfigSource.default.at(s"$kafkaConfigPath.bootstrap-servers").load[String]).flatMap {

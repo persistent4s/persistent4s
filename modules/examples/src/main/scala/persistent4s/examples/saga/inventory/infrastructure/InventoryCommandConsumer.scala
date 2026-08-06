@@ -20,8 +20,9 @@ import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.log4cats.Logger
+import org.typelevel.otel4s.trace.Tracer
 
-import persistent4s.{EventStore, MessageSubscriber, TransactionalMessages}
+import persistent4s.{CommandHandlerMetrics, EventStore, MessageSubscriber, TransactionalMessages}
 import persistent4s.examples.saga.contract.ReserveStock
 import persistent4s.examples.saga.inventory.domain.InventoryEvent
 import persistent4s.examples.saga.inventory.domain.item.ReserveStockHandler
@@ -34,19 +35,25 @@ object InventoryCommandConsumer:
 
   private type MessagingStore[F[_]] = EventStore[F, InventoryEvent] & TransactionalMessages[F, InventoryEvent]
 
-  def stream[F[_]: Async: Logger](
+  /** `metrics` is an ordinary parameter rather than a `using` one on purpose: context bounds desugar into the same
+    * trailing clause, so a partial `(using metrics)` at the call site would silently offer it as the `Async` instance.
+    */
+  def stream[F[_]: Async: Logger: Tracer](
     subscriber: MessageSubscriber[F],
     store: MessagingStore[F],
     topic: String,
+    metrics: CommandHandlerMetrics[F],
   ): Stream[F, Unit] =
     given MessagingStore[F] = store
+    given CommandHandlerMetrics[F] = metrics
     SagaParticipant[F]
       .on[ReserveStock]((ctx, command) => reserve(ctx, command))
       .on[ReleaseStock]((_, command) => release(command))
       .subscribe(subscriber, topic)
 
-  private def reserve[F[_]: Async: Logger](ctx: RequestContext, command: ReserveStock)(using
+  private def reserve[F[_]: Async: Logger: Tracer](ctx: RequestContext, command: ReserveStock)(using
     MessagingStore[F],
+    CommandHandlerMetrics[F],
   ): F[Unit] =
     ReserveStockHandler(ctx).runWithMessages[F](command).flatMap {
       case Right(Nil) =>
@@ -56,7 +63,10 @@ object InventoryCommandConsumer:
       case Left(rejection) => Logger[F].info(s"declined order ${command.orderId}: ${rejection.getMessage}")
     }
 
-  private def release[F[_]: Async: Logger](command: ReleaseStock)(using MessagingStore[F]): F[Unit] =
+  private def release[F[_]: Async: Logger: Tracer](command: ReleaseStock)(using
+    MessagingStore[F],
+    CommandHandlerMetrics[F],
+  ): F[Unit] =
     ReleaseStockHandler.run[F](command).flatMap { events =>
       if events.isEmpty then Logger[F].info(s"order ${command.orderId} had nothing reserved to release; no-op")
       else Logger[F].info(s"released stock for order ${command.orderId}")

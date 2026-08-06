@@ -66,13 +66,14 @@ final class PostgresOutbox[F[_]: Async, A <: Event] private (
             .eval(session.prepare(selectUnpublishedQuery))
             .flatMap(_.stream(Void, batchSize))
             .evalMapChunk {
-              case globalPosition *: eventId *: eventType *: tags *: payload *: isExternal *: headers *: recordedAt *:
-                  EmptyTuple =>
+              case globalPosition *: eventId *: eventType *: eventVersion *: tags *: payload *: isExternal *: headers *:
+                  recordedAt *: EmptyTuple =>
                 val eventTypeName = EventTypeName.fromString(eventType)
-                parsePayload(eventTypeName, payload).map { event =>
+                parsePayload(eventTypeName, eventVersion, payload).map { event =>
                   EventEnvelope(
                     EventMetadata(
                       globalPosition, eventId, tags, eventTypeName, isExternal, recordedAt.toInstant, headers,
+                      eventVersion,
                     ),
                     event,
                   )
@@ -105,8 +106,8 @@ final class PostgresOutbox[F[_]: Async, A <: Event] private (
         }
     }
 
-  private def parsePayload(eventType: EventTypeName, payload: Json): F[A] =
-    codec.decode(eventType, payload.noSpaces) match
+  private def parsePayload(eventType: EventTypeName, eventVersion: Int, payload: Json): F[A] =
+    codec.decode(eventType, eventVersion, payload.noSpaces) match
       case Right(event) => Async[F].pure(event)
       case Left(error)  => Async[F].raiseError(error)
 
@@ -143,7 +144,8 @@ object PostgresOutbox:
 
   private val selectUnpublishedQuery: Query[Void, PostgresEventStore.EventRow] =
     sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.tags, e.payload, e.is_external, e.headers, e.recorded_at
+      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+             e.headers, e.recorded_at
       FROM event_outbox o
       JOIN events e ON e.sequence_number = o.global_position
       ORDER BY o.global_position ASC

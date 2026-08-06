@@ -29,6 +29,8 @@ import org.testcontainers.containers.PostgreSQLContainer
 import skunk.*
 import skunk.codec.all.*
 import skunk.implicits.*
+import org.typelevel.log4cats.Logger
+import org.typelevel.log4cats.noop.NoOpLogger
 import weaver.IOSuite
 
 import persistent4s.circe.CirceEventCodec
@@ -47,6 +49,8 @@ import persistent4s.{Event, OutgoingMessage, SagaId, SagaRecord, SagaStatus}
 object PostgresSagaRepositorySuite extends IOSuite:
 
   override def maxParallelism: Int = 1
+
+  given Logger[IO] = NoOpLogger[IO]
 
   final case class Fixture(
     repository: PostgresSagaRepository[IO],
@@ -97,6 +101,31 @@ object PostgresSagaRepositorySuite extends IOSuite:
                   .pooled(4)
       yield Fixture(PostgresSagaRepository[IO](pool, claimTtl = ClaimTtl), pool)
     }
+
+  // ----- schema -----
+
+  test("enabling the saga still creates every other table the module owns") { fixture =>
+    // This fixture is built with `enableSaga = true`, and the DDL for all of these runs as one chain. Each table is
+    // otherwise only ever exercised by the suite that owns it, so a statement dropped from the middle of that chain —
+    // the sort of thing a merge does — would be caught by nobody: the saga tests would still pass, and the suites that
+    // would notice build their own modules without the saga.
+    val expected = List(
+      "events", "event_tags", "projection_checkpoints", "leader_leases", "command_snapshots", "message_outbox",
+      "saga_instances",
+    )
+    fixture.pool.use { session =>
+      expected.traverse(name => session.unique(tableExistsQuery)(name).map(name -> _))
+    }
+      .map(found => expect(found.filterNot(_._2).map(_._1) == Nil))
+  }
+
+  private val tableExistsQuery: Query[String, Boolean] =
+    sql"""
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables
+        WHERE table_schema = 'public' AND table_name = $text
+      )
+    """.query(bool)
 
   // ----- helpers -----
 

@@ -41,19 +41,24 @@ final class EnrollmentRepository[F[_]: Async] private (
         keys.map(k => k -> found.get(k)).toMap
       }
 
-  override def upsertMany(states: Map[(UUID, UUID), EnrollmentRecord]): F[Unit] =
-    if states.isEmpty then Async[F].unit
+  override def persist(upserts: Map[(UUID, UUID), EnrollmentRecord], deletes: List[(UUID, UUID)]): F[Unit] =
+    if upserts.isEmpty && deletes.isEmpty then Async[F].unit
     else
-      states.toList
-        .grouped(MaxUpsertChunkSize)
-        .toList
-        .traverse_(chunk => pool.use(_.execute(upsertManyCommand(chunk.size))(chunk.map(_._2))).void)
+      pool.use { session =>
+        val upsertAll =
+          upserts.toList
+            .grouped(MaxUpsertChunkSize)
+            .toList
+            .traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk.map(_._2)).void)
 
-  override def deleteMany(keys: List[(UUID, UUID)]): F[Unit] =
-    if keys.isEmpty then Async[F].unit
-    else
-      val (studentIds, courseIds) = keys.unzip
-      pool.use(_.execute(deleteManyCommand(keys.size))((studentIds, courseIds))).void
+        val deleteAll =
+          if deletes.isEmpty then Async[F].unit
+          else
+            val (studentIds, courseIds) = deletes.unzip
+            session.execute(deleteManyCommand(deletes.size))((studentIds, courseIds)).void
+
+        session.transaction.use(_ => upsertAll *> deleteAll)
+      }
 
   def getEnrollments: F[List[EnrollmentRecord]] =
     pool.use(_.execute(getAllQuery))

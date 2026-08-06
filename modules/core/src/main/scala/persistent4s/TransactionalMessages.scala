@@ -33,10 +33,10 @@ trait TransactionalMessages[F[_], A <: Event]:
     expectedIndex: Long,
     messages: List[OutgoingMessage],
     events: List[PendingEvent[A]]*,
-  ): F[List[A]]
+  ): F[List[EventEnvelope[A]]]
 
   /** [[EventStore.appendUnchecked]] plus an atomic message enqueue. Passing no events enqueues the messages alone. */
   def appendUncheckedWithMessages(
     messages: List[OutgoingMessage],
     events: List[PendingEvent[A]]*,
-  ): F[List[A]]
+  ): F[List[EventEnvelope[A]]]

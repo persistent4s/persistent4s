@@ -22,7 +22,7 @@ import org.http4s.HttpRoutes
 import smithy4s.http4s.SimpleRestJsonBuilder
 import smithy4s.http4s.swagger.docs
 
-import persistent4s.EventStore
+import persistent4s.{CommandHandlerMetrics, EventStore}
 import persistent4s.examples.courses.catalog.api.*
 import persistent4s.examples.courses.catalog.application.*
 import persistent4s.examples.courses.catalog.domain.CatalogEvent
@@ -31,6 +31,8 @@ object CatalogRoutes:
 
   def make(module: CatalogModule): Resource[IO, HttpRoutes[IO]] =
     given EventStore[IO, CatalogEvent] = module.store
+
+    given CommandHandlerMetrics[IO] = module.commandMetrics
 
     for
       courseRoutes <- SimpleRestJsonBuilder.routes(CourseServiceImpl(module.courseRepository)).resource

@@ -16,85 +16,79 @@
 
 package persistent4s.examples.library.domain.borrowing
 
-import java.time.temporal.ChronoUnit
-
-import persistent4s.{CommandHandler, EventTypeName, Tag}
-import persistent4s.examples.library.domain.*
 import java.time.OffsetDateTime
 import java.util.UUID
+
+import io.circe.{Decoder, Encoder}
+
+import persistent4s.EventSourcedCommandHandler
+import persistent4s.circe.given
+import persistent4s.examples.library.domain.book.BookAdded
+import persistent4s.examples.library.domain.member.MemberRegistered
+import persistent4s.examples.library.domain.{LibraryEvent, LibraryScopes}
 
 final case class BorrowBook(
   bookId: UUID,
   memberId: UUID,
+  borrowedAt: OffsetDateTime = OffsetDateTime.now(),
 )
 
-final case class BorrowBookState(
-  bookExists: Boolean,
-  memberExists: Boolean,
-  totalCopies: Int,
-  borrowedCopies: Int,
-  memberHasBook: Boolean,
-)
+object BorrowBook:
 
-object BorrowBookHandler extends CommandHandler[BorrowBook, BorrowBookState, LibraryEvent]:
+  final case class State(
+    bookExists: Boolean = false,
+    memberExists: Boolean = false,
+    totalCopies: Int = 0,
+    borrowedCopies: Int = 0,
+    memberHasBook: Boolean = false,
+  ) derives Encoder,
+        Decoder
 
-  override def eventTypes: Option[Set[EventTypeName]] =
-    Some(
-      Set(
-        EventTypeName.of[BookAdded],
-        EventTypeName.of[MemberRegistered],
-        EventTypeName.of[BookBorrowed],
-        EventTypeName.of[BookReturned],
-      ),
-    )
+  enum Error:
 
-  def tags(command: BorrowBook): Set[Tag] =
-    Set(Tag("book", command.bookId), Tag("member", command.memberId))
+    case BookNotFound(bookId: UUID)
 
-  def initial: BorrowBookState =
-    BorrowBookState(
-      bookExists = false, memberExists = false, totalCopies = 0, borrowedCopies = 0, memberHasBook = false,
-    )
+    case MemberNotFound(memberId: UUID)
 
-  def evolve(command: BorrowBook, state: BorrowBookState, event: LibraryEvent): BorrowBookState =
-    event match
-      case BookAdded(command.bookId, _, _, totalCopies) =>
-        state.copy(bookExists = true, totalCopies = totalCopies)
+    case NoCopiesAvailable(bookId: UUID)
 
-      case MemberRegistered(command.memberId, _, _) =>
-        state.copy(memberExists = true)
+    case MemberAlreadyHasBook(bookId: UUID, memberId: UUID)
 
-      case BookBorrowed(command.bookId, command.memberId, _, _) =>
-        state.copy(
-          borrowedCopies = state.borrowedCopies + 1,
-          memberHasBook = true,
-        )
-      case BookBorrowed(command.bookId, otherMemberId, _, _) if otherMemberId != command.memberId =>
-        state.copy(borrowedCopies = state.borrowedCopies + 1)
+  object Handler extends EventSourcedCommandHandler[BorrowBook, State, LibraryEvent, Error]:
 
-      case BookReturned(command.bookId, command.memberId, _) =>
-        state.copy(
-          borrowedCopies = state.borrowedCopies - 1,
-          memberHasBook = false,
-        )
-      case BookReturned(command.bookId, otherMemberId, _) if otherMemberId != command.memberId =>
-        state.copy(borrowedCopies = state.borrowedCopies - 1)
+    override protected val behavior = handler(State()):
+      scope(LibraryScopes.Book)(_.bookId)
+      scope(LibraryScopes.Member)(_.memberId)
 
-      case _ => state
+      snapshot("library.borrow-book")
 
-  def validate(state: BorrowBookState, command: BorrowBook): Either[Throwable, Unit] =
-    if (!state.bookExists) Left(new Exception("Book not found"))
-    else if (!state.memberExists) Left(new Exception("Member not found"))
-    else if (state.borrowedCopies >= state.totalCopies) Left(new Exception("No copies available"))
-    else if (state.memberHasBook) Left(new Exception("Member already has this book"))
-    else Right(())
+      on[BookAdded].evolve((state, event) => state.copy(bookExists = true, totalCopies = event.totalCopies))
 
-  def decide(state: BorrowBookState, command: BorrowBook): List[(Set[Tag], LibraryEvent)] =
-    val now = OffsetDateTime.now()
-    val dueDate = now.plus(14, ChronoUnit.DAYS)
-    List(
-      (
-        Set(Tag("book", command.bookId), Tag("member", command.memberId)),
-        BookBorrowed(command.bookId, command.memberId, now, dueDate),
-      ),
-    )
+      on[MemberRegistered].evolve(state => state.copy(memberExists = true))
+
+      on[BookBorrowed]
+        .within(LibraryScopes.Book)
+        .evolve: (state, command, event) =>
+          state.copy(
+            borrowedCopies = state.borrowedCopies + 1,
+            memberHasBook = state.memberHasBook || event.memberId == command.memberId,
+          )
+
+      on[BookReturned]
+        .within(LibraryScopes.Book)
+        .evolve: (state, command, event) =>
+          state.copy(
+            borrowedCopies = state.borrowedCopies - 1,
+            memberHasBook = state.memberHasBook && event.memberId != command.memberId,
+          )
+
+      reject:
+        case (state, command) if !state.bookExists                         => Error.BookNotFound(command.bookId)
+        case (state, command) if !state.memberExists                       => Error.MemberNotFound(command.memberId)
+        case (state, command) if state.borrowedCopies >= state.totalCopies =>
+          Error.NoCopiesAvailable(command.bookId)
+        case (state, command) if state.memberHasBook =>
+          Error.MemberAlreadyHasBook(command.bookId, command.memberId)
+
+      emit: command =>
+        BookBorrowed(command.bookId, command.memberId, command.borrowedAt, command.borrowedAt.plusDays(14))

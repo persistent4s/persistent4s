@@ -26,7 +26,7 @@ import fs2.Stream
 import io.circe.{Decoder, Encoder}
 import org.testcontainers.containers.PostgreSQLContainer
 import org.typelevel.log4cats.Logger
-import org.typelevel.log4cats.slf4j.Slf4jLogger
+import org.typelevel.log4cats.noop.NoOpLogger
 import skunk.*
 import skunk.codec.all.*
 import skunk.implicits.*
@@ -46,11 +46,11 @@ object SagaRunnerSuite extends IOSuite:
 
   override def maxParallelism: Int = 1
 
-  given Logger[IO] = Slf4jLogger.getLogger[IO]
+  given Logger[IO] = NoOpLogger[IO]
 
   final case class Fixture(
     store: PostgresEventStore[IO, TestEvent],
-    checkpoint: PostgresProjectionCheckpoint[IO],
+    checkpoint: ProjectionCheckpoint[IO],
     repository: PostgresSagaRepository[IO],
     pool: Resource[IO, Session[IO]],
   )
@@ -553,7 +553,7 @@ object SagaRunnerSuite extends IOSuite:
                     .withUserAndPassword(config.user, config.password)
                     .withDatabase(config.database)
                     .pooled(4)
-        yield Fixture(components.eventStore, components.checkpoint, repository, pool)
+        yield Fixture(components.transactionalStore, components.checkpoint, repository, pool)
       }
 
   // ----- helpers -----

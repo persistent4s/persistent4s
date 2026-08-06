@@ -32,6 +32,8 @@ import io.circe.Decoder
 
 object PostgresMessageOutboxSuite extends IOSuite:
 
+  given org.typelevel.log4cats.Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
+
   override def maxParallelism: Int = 1
 
   final case class Fixture(
@@ -89,7 +91,7 @@ object PostgresMessageOutboxSuite extends IOSuite:
                   .withUserAndPassword(config.user, config.password)
                   .withDatabase(config.database)
                   .pooled(4)
-      yield Fixture(components.eventStore, outbox, pool)
+      yield Fixture(components.transactionalStore, outbox, pool)
     }
 
   // ----- helpers -----
