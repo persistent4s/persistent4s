@@ -16,14 +16,11 @@
 
 package persistent4s.examples.saga.inventory.domain.item
 
-import java.time.Instant
-
-import scala.util.Try
-
-import persistent4s.{CommandHandler, IncomingMessage, MessageCodec, OutgoingMessage, SagaHeaders, Tag}
-import persistent4s.examples.saga.contract.{RequestHeaders, ReserveStock, PartnerReply}
+import persistent4s.{PendingReply, SagaCommandHandler, SagaHeaders, Tag}
+import persistent4s.examples.saga.contract.{ReserveStock, PartnerReply}
 import persistent4s.examples.saga.inventory.domain.{InventoryEvent, InventoryTags, ItemRestocked, StockReserved}
 import persistent4s.examples.saga.inventory.domain.StockReleased
+import persistent4s.RequestContext
 
 /** What one item's log says about a single incoming request.
   *
@@ -41,18 +38,11 @@ final case class StockState(available: Int, alreadyReserved: Option[Int])
   * here, in this log, under this item's optimistic-concurrency scope. No amount of checking on the orders side could
   * replace it, because two orders can pass the same check at the same time and only one append can win.
   *
-  * A '''case class''' rather than an object because the address to answer arrives with the request. `messages` is pure
-  * and gets only the state and the command, so the origin message has to be closed over instead of passed in — which
-  * also means one instance per request, which is free.
-  *
-  * @param receivedAt
-  *   when this request was picked up. Passed in rather than read here so [[validate]] stays pure while still being able
-  *   to judge whether the request is stale: the clock is read once, in the consumer, and travels as data.
+  * A '''case class''' rather than an object because the address to answer arrives with the request, which is what
+  * [[SagaCommandHandler.request]] carries — one instance per request, which is free.
   */
-final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instant)
-    extends CommandHandler[ReserveStock, StockState, InventoryEvent]:
-
-  import ReserveStockHandler.replyCodec
+final case class ReserveStockHandler(request: RequestContext)
+    extends SagaCommandHandler[ReserveStock, StockState, InventoryEvent]:
 
   def tags(command: ReserveStock): Set[Tag] = Set(InventoryTags.item(command.itemId))
 
@@ -70,10 +60,13 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
 
   def validate(state: StockState, command: ReserveStock): Either[Throwable, Unit] =
     if state.alreadyReserved.isDefined then Right(())
-    else if expired then
+    else if request.hasExpired then
       Left(
+        // Both instants, because this text is the whole of what the caller learns: it travels back in the reply and
+        // lands in the order's `reason` field, where "expired" alone leaves nobody able to say by how much.
         new IllegalStateException(
-          s"request expired at ${origin.headers.getOrElse(RequestHeaders.ExpiresAt, "?")}, now $receivedAt",
+          s"request expired at ${request.message.headers.getOrElse(SagaHeaders.ExpiresAt, "?")}, " +
+            s"now ${request.receivedAt}",
         ),
       )
     else if command.amount <= 0 then Left(new IllegalArgumentException("Reservation amount must be positive"))
@@ -85,21 +78,6 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
       )
     else Right(())
 
-  /** Whether the request's stated expiry has passed.
-    *
-    * No header means no expiry — a caller that never set one gets the old behaviour, which is right for a plain
-    * fire-and-forget command that nobody is waiting on.
-    *
-    * An *unreadable* header, on the other hand, counts as expired. The header exists to bound how stale a request may
-    * be; if it cannot be parsed then staleness is unknown, and honouring it anyway would quietly restore the very leak
-    * it was added to narrow. Declining is also the loud option: the reason travels back and lands in the order's
-    * `reason` field.
-    */
-  private def expired: Boolean =
-    origin.headers.get(RequestHeaders.ExpiresAt) match
-      case None        => false
-      case Some(value) => Try(Instant.parse(value)).toOption.forall(receivedAt.isAfter)
-
   def decide(state: StockState, command: ReserveStock): List[(Set[Tag], InventoryEvent)] =
     if state.alreadyReserved.isDefined then Nil
     else
@@ -108,22 +86,16 @@ final case class ReserveStockHandler(origin: IncomingMessage, receivedAt: Instan
           StockReserved(command.itemId, command.orderId, command.amount),
       )
 
-  override def messages(
+  /** Always answers, and the rejection carries its reason: a caller that hears nothing has to wait out its whole
+    * deadline to learn what a single message could have told it immediately.
+    */
+  override def reply(
     state: StockState,
     command: ReserveStock,
     outcome: Either[Throwable, List[InventoryEvent]],
-  ): List[OutgoingMessage] =
-    val reply = outcome.fold(
-      rejection => PartnerReply.reject(rejection.getMessage),
-      _ => PartnerReply.accept,
+  ): Option[PendingReply] =
+    Some(
+      PendingReply(
+        outcome.fold(rejection => PartnerReply.reject(rejection.getMessage), _ => PartnerReply.accept),
+      ),
     )
-
-    val payload = replyCodec
-      .encode(reply)
-      .fold(error => throw new IllegalStateException("StockReservationReply must be encodable", error), identity)
-
-    SagaHeaders.reply(origin, payload, key = Some(command.orderId.toString)).toList
-
-object ReserveStockHandler:
-
-  private val replyCodec: MessageCodec[PartnerReply] = summon[MessageCodec[PartnerReply]]

@@ -21,6 +21,7 @@ import cats.syntax.all.*
 import fs2.Stream
 import weaver.SimpleIOSuite
 
+import java.time.Instant
 import java.util.UUID
 import persistent4s.CommandHandlerRunSuite.TestEvent.StudentCreated
 import persistent4s.CommandHandlerRunSuite.TestEvent.StudentDeleted
@@ -289,14 +290,73 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       state: StudentState,
       command: CreateStudent,
       outcome: Either[Throwable, List[TestEvent]],
-    ): List[OutgoingMessage] =
-      List(
-        OutgoingMessage(
-          topic = ReplyTopic,
-          key = Some(replyKey),
-          payload = outcome.fold(error => s"rejected:${error.getMessage}", events => s"accepted:${events.size}"),
-          headers = Map("studentId" -> command.studentId),
+    ): Either[Throwable, List[OutgoingMessage]] =
+      Right(
+        List(
+          OutgoingMessage(
+            topic = ReplyTopic,
+            key = Some(replyKey),
+            payload = outcome.fold(error => s"rejected:${error.getMessage}", events => s"accepted:${events.size}"),
+            headers = Map("studentId" -> command.studentId),
+          ),
         ),
+      )
+
+  // ----- the same job, as a SagaCommandHandler -----
+
+  private val SagaInstance = "3f2a1c00-0000-0000-0000-000000000001"
+
+  /** A request as [[SagaRunner]] would have stamped it, addressed unless `addressed` says otherwise. */
+  private def sagaRequest(addressed: Boolean = true): RequestContext =
+    val correlation =
+      if addressed then
+        Map(
+          SagaHeaders.Name           -> "enrol",
+          SagaHeaders.Id             -> SagaInstance,
+          SagaHeaders.ReplyTo        -> ReplyTopic,
+          SagaHeaders.IdempotencyKey -> s"$SagaInstance:0:0:create",
+        )
+      else Map.empty
+    RequestContext(IncomingMessage("students.commands", Some("s-1"), "1", correlation), Instant.EPOCH)
+
+  private given MessageEncoder[String] with
+
+    def encode(message: String): Either[Throwable, String] = Right(message)
+
+  /** The encoder that cannot, for the one path where a reply's serialization fails. */
+  private val unencodable: MessageEncoder[String] =
+    new MessageEncoder[String]:
+      def encode(message: String): Either[Throwable, String] = Left(new RuntimeException("boom"))
+
+  /** [[AnsweringCreateStudentHandler]]'s job expressed the other way: it *names* the reply and lets the library encode
+    * and address it, instead of assembling an [[OutgoingMessage]] and a payload by hand.
+    *
+    * Answers nothing for the student called "quiet", which is the only way to reach the `None` branch — a partner that
+    * is genuinely fire-and-forget for some commands and answers others.
+    */
+  final case class SagaAnsweringHandler(request: RequestContext)(using MessageEncoder[String])
+      extends SagaCommandHandler[CreateStudent, StudentState, TestEvent]:
+
+    def tags(command: CreateStudent): Set[Tag] = Set(studentTag(command.studentId))
+
+    def initial: StudentState = StudentState(exists = false)
+
+    def evolve(command: CreateStudent, state: StudentState, event: TestEvent): StudentState =
+      CommandHandlerRunSuite.evolve(state, event)
+
+    def validate(state: StudentState, command: CreateStudent): Either[Throwable, Unit] =
+      if state.exists then Left(new RuntimeException("Student already exists")) else Right(())
+
+    def decide(state: StudentState, command: CreateStudent): List[(Set[Tag], TestEvent)] =
+      List((Set(studentTag(command.studentId)), TestEvent.StudentCreated(command.studentId)))
+
+    override def reply(
+      state: StudentState,
+      command: CreateStudent,
+      outcome: Either[Throwable, List[TestEvent]],
+    ): Option[PendingReply] =
+      Option.unless(command.studentId == "quiet")(
+        PendingReply(outcome.fold(error => s"rejected:${error.getMessage}", events => s"accepted:${events.size}")),
       )
 
   private def seedStudentCreated(store: InMemoryEventStore[IO, TestEvent], studentId: String): IO[Unit] =
@@ -610,6 +670,98 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       accepted == Right(List(TestEvent.StudentCreated("1"))),
       rejected.isLeft,
       events.length == 1,
+      messages.isEmpty,
+    )
+  }
+
+  test("a saga handler's reply is encoded, addressed and committed alongside its events") {
+    val handler = SagaAnsweringHandler(sagaRequest())
+    for
+      store  <- InMemoryEventStore.make[IO, TestEvent]
+      result <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      events   <- store.getEvents
+      messages <- store.getMessages
+    yield expect.all(
+      result == Right(List(TestEvent.StudentCreated("1"))),
+      events.length == 1,
+      messages.length == 1,
+      // Everything below came from the request rather than from the handler, which named a payload and nothing else.
+      messages.head.topic == ReplyTopic,
+      messages.head.payload == "accepted:1",
+      messages.head.key == Some(SagaInstance),
+      messages.head.headers.get(SagaHeaders.Id) == Some(SagaInstance),
+      messages.head.headers.get(SagaHeaders.InReplyTo) == Some(s"$SagaInstance:0:0:create"),
+    )
+  }
+
+  test("a saga handler answers a rejection too, in the transaction that writes no event") {
+    // The path a partner exists for: "no, and here is why" has to reach the caller as reliably as "yes", or the asking
+    // saga cannot tell a refusal from a partner that has died and must wait out its whole deadline to find out.
+    val handler = SagaAnsweringHandler(sagaRequest())
+    for
+      store  <- InMemoryEventStore.make[IO, TestEvent]
+      _      <- seedStudentCreated(store, "1")
+      result <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      events   <- store.getEvents
+      messages <- store.getMessages
+    yield expect.all(
+      result.isLeft,
+      events.length == 1, // the seeded event only
+      messages.map(_.payload) == List("rejected:Student already exists"),
+    )
+  }
+
+  test("a saga handler that answers nothing enqueues nothing, and still commits its events") {
+    val handler = SagaAnsweringHandler(sagaRequest())
+    for
+      store  <- InMemoryEventStore.make[IO, TestEvent]
+      result <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("quiet"))
+      }
+      events   <- store.getEvents
+      messages <- store.getMessages
+    yield expect.all(result.isRight, events.length == 1, messages.isEmpty)
+  }
+
+  test("a saga handler asked to answer a request that nominates nowhere sends nothing, and still commits") {
+    // A command from something that is not a saga. There is nobody to answer, which is not an error — the events are
+    // the point, and the reply was only ever a courtesy to whoever asked.
+    val handler = SagaAnsweringHandler(sagaRequest(addressed = false))
+    for
+      store  <- InMemoryEventStore.make[IO, TestEvent]
+      result <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      events   <- store.getEvents
+      messages <- store.getMessages
+    yield expect.all(result.isRight, events.length == 1, messages.isEmpty)
+  }
+
+  test("a reply that cannot be encoded aborts the command: no events, no messages") {
+    // The whole reason `messages` returns an Either. Committing the reservation and then failing to say so would
+    // strand the asking saga until its deadline while the resource stayed held; raising leaves the request unacked, so
+    // it comes back — loudly, and repeatedly, which is the correct amount of noise for a programming error.
+    val handler = SagaAnsweringHandler(sagaRequest())(using unencodable)
+    for
+      store   <- InMemoryEventStore.make[IO, TestEvent]
+      outcome <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1")).attempt
+      }
+      events   <- store.getEvents
+      messages <- store.getMessages
+    yield expect.all(
+      outcome.isLeft,
+      outcome.left.exists(_.getMessage == "boom"),
+      events.isEmpty,
       messages.isEmpty,
     )
   }

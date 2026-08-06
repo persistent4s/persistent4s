@@ -62,12 +62,15 @@ trait CommandHandler[C, S, E <: Event]:
     *
     * `outcome` is `Left` when [[validate]] rejected the command. A handler answering another service has to be able to
     * reply precisely when it writes nothing.
+    *
+    * Returning `Left` aborts everything: no events are appended and no messages are enqueued. It is there because these
+    * messages have to be serialized, and a pure function with no error channel could only throw.
     */
   def messages(
     @unused state: S,
     @unused command: C,
     @unused outcome: Either[Throwable, List[E]],
-  ): List[OutgoingMessage] = Nil
+  ): Either[Throwable, List[OutgoingMessage]] = Right(Nil)
 
   /** Maximum number of retry attempts on optimistic concurrency conflicts. Override to customize. Default is 3. */
   def maxRetries: Int = 3
@@ -150,17 +153,15 @@ trait CommandHandler[C, S, E <: Event]:
         case Left(rejection) =>
           // No events, so there is no local invariant to protect and `appendWithMessages` skips the conflict check —
           // the rejection's message is enqueued on its own.
-          eventStore
-            .appendWithMessages(filter, index, messages(state, command, Left(rejection)))
-            .as(Left(rejection))
+          messages(state, command, Left(rejection)) match
+            case Left(error)     => Concurrent[F].raiseError(error)
+            case Right(outgoing) => eventStore.appendWithMessages(filter, index, outgoing).as(Left(rejection))
         case Right(_) =>
           val decided = decide(state, command)
-          eventStore
-            .appendWithMessages(
-              filter,
-              index,
-              messages(state, command, Right(decided.map(_._2))),
-              pendingEvents(command, decided),
-            )
-            .map(Right(_))
+          messages(state, command, Right(decided.map(_._2))) match
+            case Left(error)     => Concurrent[F].raiseError(error)
+            case Right(outgoing) =>
+              eventStore
+                .appendWithMessages(filter, index, outgoing, pendingEvents(command, decided))
+                .map(Right(_))
     }

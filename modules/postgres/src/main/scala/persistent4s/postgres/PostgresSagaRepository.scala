@@ -29,6 +29,8 @@ import skunk.data.Identifier
 import skunk.implicits.*
 
 import persistent4s.*
+import java.time.ZoneOffset
+import java.time.Instant
 
 /** PostgreSQL-backed [[SagaRepository]]. A single `saga_instances` table holds the instances of every saga, keyed by
   * the deterministic id derived from `(sagaName, key)` — so that primary key alone makes a replayed trigger a no-op and
@@ -53,12 +55,12 @@ final case class PostgresSagaRepository[F[_]: Async] private (
     sagaName: String,
     key: String,
     data: String,
-    timeout: Option[FiniteDuration],
+    deadline: Option[Instant],
     messages: List[OutgoingMessage],
   ): F[Boolean] =
     pool.use { session =>
       session.transaction.use { _ =>
-        session.option(insertInstanceQuery)(id, sagaName, key, data, timeout.map(_.toMillis)).flatMap {
+        session.option(insertInstanceQuery)(id, sagaName, key, data, deadline.map(_.atOffset(ZoneOffset.UTC))).flatMap {
           case None    => Async[F].pure(false)
           case Some(_) => enqueueMessages(session, messages).as(true)
         }
@@ -74,10 +76,10 @@ final case class PostgresSagaRepository[F[_]: Async] private (
     status: SagaStatus,
     step: Int,
     data: String,
-    timeout: Option[FiniteDuration],
+    deadline: Option[Instant],
   ): F[Boolean] =
     pool
-      .use(_.option(advanceQuery)(status, step, data, timeout.map(_.toMillis), id, expectedStep))
+      .use(_.option(advanceQuery)(status, step, data, deadline.map(_.atOffset(ZoneOffset.UTC)), id, expectedStep))
       .map(_.isDefined)
 
   override def claimExpired(sagaName: String, limit: Int)(handle: List[SagaRecord] => F[Unit]): F[Int] =
@@ -144,12 +146,12 @@ object PostgresSagaRepository:
         WHERE status = 'Pending' AND deadline IS NOT NULL
     """.command
 
-  private val insertInstanceQuery: Query[(UUID, String, String, String, Option[Long]), UUID] =
+  private val insertInstanceQuery: Query[(UUID, String, String, String, Option[OffsetDateTime]), UUID] =
     sql"""
       INSERT INTO saga_instances (id, saga_name, saga_key, status, step, data, deadline)
       VALUES (
         $uuid, $text, $text, 'Pending', 0, $text,
-        clock_timestamp() + (${int8.opt} * interval '1 millisecond')
+        ${timestamptz.opt}
       )
       ON CONFLICT (id) DO NOTHING
       RETURNING id
@@ -162,13 +164,13 @@ object PostgresSagaRepository:
       WHERE id = $uuid
     """.query(sagaRowCodec)
 
-  private val advanceQuery: Query[(SagaStatus, Int, String, Option[Long], UUID, Int), UUID] =
+  private val advanceQuery: Query[(SagaStatus, Int, String, Option[OffsetDateTime], UUID, Int), UUID] =
     sql"""
       UPDATE saga_instances
       SET status = $statusCodec,
           step = $int4,
           data = $text,
-          deadline = clock_timestamp() + (${int8.opt} * interval '1 millisecond'),
+          deadline = ${timestamptz.opt},
           updated_at = clock_timestamp()
       WHERE id = $uuid
         AND step = $int4

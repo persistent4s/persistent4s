@@ -19,8 +19,6 @@ package persistent4s
 import java.time.Instant
 import java.util.UUID
 
-import scala.concurrent.duration.FiniteDuration
-
 /** Lifecycle state of a saga instance. Only `Pending` instances accept replies or fire deadlines */
 enum SagaStatus:
 
@@ -63,7 +61,7 @@ trait SagaRepository[F[_]]:
     sagaName: String,
     key: String,
     data: String,
-    timeout: Option[FiniteDuration],
+    deadline: Option[Instant],
     messages: List[OutgoingMessage],
   ): F[Boolean]
 
@@ -83,7 +81,7 @@ trait SagaRepository[F[_]]:
     status: SagaStatus,
     step: Int,
     data: String,
-    timeout: Option[FiniteDuration],
+    deadline: Option[Instant],
   ): F[Boolean]
 
   /** Claim up to `limit` pending instances of `sagaName` whose deadline has passed and hand them to `handle`.

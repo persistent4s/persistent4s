@@ -16,17 +16,13 @@
 
 package persistent4s.examples.saga.orders.saga
 
-import persistent4s.{MessageCodec, MessageEncoder}
 import persistent4s.examples.saga.contract.{AuthorizePayment, CancelPayment, ReleaseStock, ReserveStock}
 
+/** Everything this saga can ask for, so its signatures say so and nothing else can be sent by accident.
+  *
+  * A bare type alias now. It used to need a companion carrying a hand-written `MessageEncoder` that matched on all four
+  * leaves — each case pairing a type with the codec and the kind string that went with it, three agreements kept by
+  * eye. `SagaRequest` captures the encoder and the name from the payload's own declaration at construction, so the
+  * match had nothing left to decide.
+  */
 type OrderRequest = ReserveStock | ReleaseStock | AuthorizePayment | CancelPayment
-
-object OrderRequest:
-
-  val encoder: MessageEncoder[OrderRequest] = new MessageEncoder[OrderRequest]:
-
-    def encode(request: OrderRequest): Either[Throwable, String] = request match
-      case r: ReserveStock     => summon[MessageCodec[ReserveStock]].encode(r)
-      case r: ReleaseStock     => summon[MessageCodec[ReleaseStock]].encode(r)
-      case a: AuthorizePayment => summon[MessageCodec[AuthorizePayment]].encode(a)
-      case c: CancelPayment    => summon[MessageCodec[CancelPayment]].encode(c)

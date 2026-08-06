@@ -28,7 +28,7 @@ object SagaHeadersSuite extends SimpleIOSuite:
       SagaHeaders.Name           -> "reserve-stock",
       SagaHeaders.Id             -> "3f2a1c00-0000-0000-0000-000000000001",
       SagaHeaders.ReplyTo        -> "orders.replies",
-      SagaHeaders.IdempotencyKey -> "3f2a1c00-0000-0000-0000-000000000001:0:0",
+      SagaHeaders.IdempotencyKey -> "3f2a1c00-0000-0000-0000-000000000001:0:0:reserve",
     ),
   )
 
@@ -42,7 +42,7 @@ object SagaHeadersSuite extends SimpleIOSuite:
         Map(
           SagaHeaders.Name      -> "reserve-stock",
           SagaHeaders.Id        -> "3f2a1c00-0000-0000-0000-000000000001",
-          SagaHeaders.InReplyTo -> "3f2a1c00-0000-0000-0000-000000000001:0:0",
+          SagaHeaders.InReplyTo -> "3f2a1c00-0000-0000-0000-000000000001:0:0:reserve",
         ),
       ),
     )
@@ -55,9 +55,11 @@ object SagaHeadersSuite extends SimpleIOSuite:
   }
 
   pureTest("reply names the request it answers, so a fan-out saga can tell its replies apart") {
+    // Verbatim, label included: the label is the saga's own name for that request and the partner does not know it is
+    // carrying one, so anything less than a copy would lose the very thing the saga attributes on.
     expect(
       SagaHeaders.reply(request, "ok").flatMap(_.headers.get(SagaHeaders.InReplyTo)) ==
-        Some("3f2a1c00-0000-0000-0000-000000000001:0:0"),
+        Some("3f2a1c00-0000-0000-0000-000000000001:0:0:reserve"),
     )
   }
 
@@ -133,13 +135,27 @@ object SagaHeadersSuite extends SimpleIOSuite:
   private val instance = java.util.UUID.fromString("3f2a1c00-0000-0000-0000-000000000001")
 
   pureTest("a stamped idempotency key parses back to the request it named") {
-    val key = SagaRequestRef.idempotencyKey(instance, round = 2, ordinal = 1)
-    expect(SagaRequestRef.parse(key, instance) == Some(SagaRequestRef(2, 1)))
+    val key = SagaRequestRef.idempotencyKey(instance, round = 2, ordinal = 1, label = "payment")
+    expect(SagaRequestRef.parse(key, instance) == Some(SagaRequestRef(2, 1, "payment")))
   }
 
   pureTest("a key belonging to another instance is not read as one of ours") {
     val other = java.util.UUID.fromString("3f2a1c00-0000-0000-0000-000000000002")
-    expect(SagaRequestRef.parse(SagaRequestRef.idempotencyKey(other, 0, 0), instance).isEmpty)
+    expect(SagaRequestRef.parse(SagaRequestRef.idempotencyKey(other, 0, 0, "stock"), instance).isEmpty)
+  }
+
+  pureTest("a label is free to contain the separator itself") {
+    // The label is the remainder of the key, not a fourth field, so a saga is not quietly constrained in what it may
+    // call its own requests — and a label that did get truncated would attribute a reply to nothing.
+    val key = SagaRequestRef.idempotencyKey(instance, 0, 0, "payment:authorize")
+    expect(SagaRequestRef.parse(key, instance).map(_.label) == Some("payment:authorize"))
+  }
+
+  pureTest("an empty label survives the round trip") {
+    // Nothing forbids one, and it has to read back as the empty label rather than as an unparseable key: a saga that
+    // labels nothing still needs its single reply attributed.
+    val key = SagaRequestRef.idempotencyKey(instance, 3, 0, "")
+    expect(SagaRequestRef.parse(key, instance) == Some(SagaRequestRef(3, 0, "")))
   }
 
   pureTest("a malformed key yields nothing rather than a plausible-looking ref") {
@@ -147,6 +163,53 @@ object SagaHeadersSuite extends SimpleIOSuite:
       SagaRequestRef.parse("nonsense", instance).isEmpty,
       SagaRequestRef.parse(s"$instance:0", instance).isEmpty,
       SagaRequestRef.parse(s"$instance:zero:0", instance).isEmpty,
-      SagaRequestRef.parse(s"$instance:0:0:0", instance).isEmpty,
+      // The pre-label format. It is no longer a key this runner could have stamped, and reading it as a label-less ref
+      // would hand a fan-out an answer it has no way to attribute anyway.
+      SagaRequestRef.parse(s"$instance:0:0", instance).isEmpty,
+      SagaRequestRef.parse(s"$instance:0:zero:label", instance).isEmpty,
     )
+  }
+
+  // ---------------------------------------------------------------------------
+  // RequestContext — what a partner can tell about a request it has just picked up
+  // ---------------------------------------------------------------------------
+
+  private val now = java.time.Instant.parse("2026-08-06T12:00:00Z")
+
+  private def received(headers: Map[String, String]): RequestContext =
+    RequestContext(request.copy(headers = request.headers ++ headers), now)
+
+  pureTest("a request with no expiry never expires") {
+    // The plain fire-and-forget case: a caller that set no deadline is not waiting, so there is nothing to be late for.
+    expect(!received(Map.empty).hasExpired)
+  }
+
+  pureTest("a request whose expiry is still ahead has not expired") {
+    expect(!received(Map(SagaHeaders.ExpiresAt -> now.plusSeconds(30).toString)).hasExpired)
+  }
+
+  pureTest("a request whose expiry has gone by has expired") {
+    expect(received(Map(SagaHeaders.ExpiresAt -> now.minusSeconds(1).toString)).hasExpired)
+  }
+
+  pureTest("a request expiring exactly now has not expired yet") {
+    // The boundary belongs to the caller: `receivedAt` has to be strictly after the deadline, so a request that lands
+    // on its own expiry instant is still in time.
+    expect(!received(Map(SagaHeaders.ExpiresAt -> now.toString)).hasExpired)
+  }
+
+  pureTest("a request whose expiry cannot be read counts as expired") {
+    // The one case worth stating twice. The header exists to bound staleness; if it cannot be parsed then staleness is
+    // unknown, and honouring the request anyway would restore exactly the leak the header was added to narrow.
+    expect(received(Map(SagaHeaders.ExpiresAt -> "not an instant")).hasExpired)
+  }
+
+  pureTest("a request carrying the saga correlation headers is addressed") {
+    expect(received(Map.empty).isAddressed)
+  }
+
+  pureTest("a request missing any correlation header is not addressed") {
+    val bare = RequestContext(request.copy(headers = Map.empty), now)
+    val partial = RequestContext(request.copy(headers = request.headers - SagaHeaders.ReplyTo), now)
+    expect.all(!bare.isAddressed, !partial.isAddressed)
   }

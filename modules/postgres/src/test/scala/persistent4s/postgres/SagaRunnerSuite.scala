@@ -16,6 +16,8 @@
 
 package persistent4s.postgres
 
+import java.time.Instant
+
 import scala.concurrent.duration.*
 
 import cats.effect.{IO, Ref, Resource}
@@ -69,6 +71,12 @@ object SagaRunnerSuite extends IOSuite:
 
   final case class ReserveStock(orderId: String) derives Encoder.AsObject, Decoder
 
+  object ReserveStock:
+
+    given RequestType[ReserveStock] = RequestType("reserve")
+
+    given MessageCodec[ReserveStock] = CirceMessageCodec.derived[ReserveStock]
+
   final case class StockReserved(ok: Boolean, reason: Option[String]) derives Encoder.AsObject, Decoder
 
   final case class OrderState(orderId: String) derives Encoder.AsObject, Decoder
@@ -76,6 +84,11 @@ object SagaRunnerSuite extends IOSuite:
   private val RequestTopic = "stock.commands"
 
   private val ReplyTopic = "orders.replies"
+
+  /** The label the single-request sagas below give their one request. At suite level with the topics because it is the
+    * same kind of thing: something the saga stamps on the wire and the tests have to name to build a reply against it.
+    */
+  private val SoleRequest = "reserve"
 
   private def orderTag(orderId: String): Tag = Tag("order", orderId)
 
@@ -93,7 +106,7 @@ object SagaRunnerSuite extends IOSuite:
             SagaStart(
               key = orderId,
               data = OrderState(orderId),
-              request = List(SagaRequest(RequestTopic, Some(orderId), ReserveStock(orderId))),
+              request = List(SagaRequest(SoleRequest, RequestTopic, Some(orderId), ReserveStock(orderId))),
               timeout = Some(1.hour),
             ),
           )
@@ -121,7 +134,6 @@ object SagaRunnerSuite extends IOSuite:
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 
-    val requestEncoder: MessageEncoder[ReserveStock] = CirceMessageCodec.derived[ReserveStock]
 
     val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
@@ -141,7 +153,7 @@ object SagaRunnerSuite extends IOSuite:
             SagaStart(
               key = orderId,
               data = OrderState(orderId),
-              request = List(SagaRequest(RequestTopic, Some(orderId), ReserveStock(orderId))),
+              request = List(SagaRequest(SoleRequest, RequestTopic, Some(orderId), ReserveStock(orderId))),
               timeout = Some(1.hour),
             ),
           )
@@ -152,7 +164,7 @@ object SagaRunnerSuite extends IOSuite:
       state: OrderState,
       reply: SagaReply[StockReserved],
     ): SagaDecision[TestEvent, OrderState, ReserveStock] =
-      val answered = reply.answering.fold("none")(ref => s"${ref.round}:${ref.ordinal}")
+      val answered = reply.answering.fold("none")(ref => s"${ref.round}:${ref.ordinal}:${ref.label}")
       SagaDecision.completed(events = List(Set(orderTag(state.orderId)) -> Unrelated(answered)))
 
     def onTimeout(ctx: SagaContext, state: OrderState): SagaDecision[TestEvent, OrderState, ReserveStock] =
@@ -160,23 +172,67 @@ object SagaRunnerSuite extends IOSuite:
 
     val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 
-    val requestEncoder: MessageEncoder[ReserveStock] = CirceMessageCodec.derived[ReserveStock]
 
     val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
   // ----- a saga that asks two partners at once -----
 
+  /** What [[FanOutSaga]] can ask for. A bare union of the leaves now: each carries its own name and encoder, so the
+    * saga no longer needs a hand-written encoder that matches on all four to decide which codec and which name go
+    * together.
+    *
+    * The codecs are still per-leaf rather than derived for the trait, and for the original reason: what goes on the
+    * wire has to be the shape each partner's own decoder expects, not circe's `{"ReserveStockFor": {...}}` wrapper.
+    */
   sealed trait FanOutRequest
 
   final case class ReserveStockFor(orderId: String) extends FanOutRequest derives Encoder.AsObject, Decoder
 
+  object ReserveStockFor:
+
+    given RequestType[ReserveStockFor] = RequestType("reserve-for")
+
+    given MessageCodec[ReserveStockFor] = CirceMessageCodec.derived[ReserveStockFor]
+
   final case class ChargeFor(orderId: String, cents: Int) extends FanOutRequest derives Encoder.AsObject, Decoder
+
+  object ChargeFor:
+
+    given RequestType[ChargeFor] = RequestType("charge")
+
+    given MessageCodec[ChargeFor] = CirceMessageCodec.derived[ChargeFor]
 
   final case class ReleaseStockFor(orderId: String) extends FanOutRequest derives Encoder.AsObject, Decoder
 
+  object ReleaseStockFor:
+
+    given RequestType[ReleaseStockFor] = RequestType("release-for")
+
+    given MessageCodec[ReleaseStockFor] = CirceMessageCodec.derived[ReleaseStockFor]
+
   final case class RefundFor(orderId: String, cents: Int) extends FanOutRequest derives Encoder.AsObject, Decoder
 
+  object RefundFor:
+
+    given RequestType[RefundFor] = RequestType("refund")
+
+    given MessageCodec[RefundFor] = CirceMessageCodec.derived[RefundFor]
+
   private val PaymentTopic = "payment.commands"
+
+  /** The labels [[FanOutSaga]] gives its requests, at suite level for the same reason the topics are: the saga stamps
+    * them and the tests name them to build a reply, which is exactly the round trip a partner performs by echoing the
+    * key back.
+    */
+  private object FanOutRequests:
+
+    val Stock = "stock"
+
+    val Payment = "payment"
+
+    val Release = "release"
+
+    val Refund = "refund"
 
   /** What an instance has heard back so far. This is what `S` is actually for: a single-request saga can work from
     * [[SagaContext]] alone, but a fan-in has to remember which partners have answered while it waits for the rest.
@@ -197,13 +253,6 @@ object SagaRunnerSuite extends IOSuite:
 
     val triggers = Set(EventTypeName.of[OrderPlaced])
 
-    /** The ordinal *is* the position in `start`'s request list, so these two constants and that list have to be read
-      * together — getting them out of step would attribute stock's answer to payment.
-      */
-    private val StockOrdinal = 0
-
-    private val PaymentOrdinal = 1
-
     /** Why this saga gives up on a reply it cannot attribute. Shared with the test that checks it reaches the log: a
       * `Failed` reason is persisted nowhere, so the log is the only place it exists. Safe to pin, unlike the runner's
       * own wording, because this text belongs to the saga — rewording it moves both sides at once.
@@ -218,8 +267,8 @@ object SagaRunnerSuite extends IOSuite:
               key = orderId,
               data = FanOutState(orderId, stock = None, payment = None),
               request = List(
-                SagaRequest(RequestTopic, Some(orderId), ReserveStockFor(orderId)),
-                SagaRequest(PaymentTopic, Some(orderId), ChargeFor(orderId, 500)),
+                SagaRequest(FanOutRequests.Stock, RequestTopic, Some(orderId), ReserveStockFor(orderId)),
+                SagaRequest(FanOutRequests.Payment, PaymentTopic, Some(orderId), ChargeFor(orderId, 500)),
               ),
               timeout = Some(1.hour),
             ),
@@ -231,11 +280,11 @@ object SagaRunnerSuite extends IOSuite:
       state: FanOutState,
       reply: SagaReply[StockReserved],
     ): SagaDecision[TestEvent, FanOutState, FanOutRequest] =
-      reply.answering.map(_.ordinal) match
-        case Some(StockOrdinal)   => settle(state.copy(stock = Some(reply.payload.ok)))
-        case Some(PaymentOrdinal) => settle(state.copy(payment = Some(reply.payload.ok)))
-        case Some(other)          =>
-          SagaDecision.failed(s"reply named request ordinal $other, which this saga never sent")
+      reply.answering.map(_.label) match
+        case Some(FanOutRequests.Stock)   => settle(state.copy(stock = Some(reply.payload.ok)))
+        case Some(FanOutRequests.Payment) => settle(state.copy(payment = Some(reply.payload.ok)))
+        case Some(other)                  =>
+          SagaDecision.failed(s"reply named request '$other', which this saga never sent")
         case None =>
           // Refusing beats guessing: both partners answer in the same shape, so a wrong attribution here would confirm
           // an order whose payment had actually failed.
@@ -255,7 +304,9 @@ object SagaRunnerSuite extends IOSuite:
             messages = undoOf(state),
           )
 
-        case _ => SagaDecision.continue(state, timeout = Some(1.hour))
+        // No deadline argument, so the instance keeps the one it was given at start. Re-arming here would hand a slow
+        // partner a fresh window on every answer that arrives before it, which is not what "wait 1 hour" meant.
+        case _ => SagaDecision.continue(state)
 
     /** On a deadline the local event is not enough: a partner may well have done the work and simply not been heard,
       * and once this instance is terminal the runner drops any reply that turns up later. So the undo goes out here
@@ -280,36 +331,112 @@ object SagaRunnerSuite extends IOSuite:
     private def undoOf(state: FanOutState): List[SagaRequest[FanOutRequest]] =
       List(
         Option.unless(state.stock.contains(false))(
-          SagaRequest(RequestTopic, Some(state.orderId), ReleaseStockFor(state.orderId)),
+          SagaRequest(FanOutRequests.Release, RequestTopic, Some(state.orderId), ReleaseStockFor(state.orderId)),
         ),
         Option.unless(state.payment.contains(false))(
-          SagaRequest(PaymentTopic, Some(state.orderId), RefundFor(state.orderId, 500)),
+          SagaRequest(FanOutRequests.Refund, PaymentTopic, Some(state.orderId), RefundFor(state.orderId, 500)),
         ),
       ).flatten
 
     val stateCodec: MessageCodec[FanOutState] = CirceMessageCodec.derived[FanOutState]
 
-    private val stockCodec = CirceMessageCodec.derived[ReserveStockFor]
+    val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
-    private val chargeCodec = CirceMessageCodec.derived[ChargeFor]
+  /** Sends two requests in one round under a single label — the one thing [[SagaRequest.label]]'s contract forbids,
+    * because their replies would then be indistinguishable and each would be credited to the other's partner.
+    *
+    * The runner cannot refuse: the requests are the saga's own decision, already made, and withholding them would
+    * strand an instance that is about to go pending waiting for answers to commands nobody sent. So it warns instead,
+    * and this saga exists to check that it does.
+    */
+  object CollidingLabelSaga extends Saga[TestEvent, OrderState, ReserveStock, StockReserved]:
 
-    private val releaseCodec = CirceMessageCodec.derived[ReleaseStockFor]
+    val name = "colliding-labels"
 
-    private val refundCodec = CirceMessageCodec.derived[RefundFor]
+    val triggers = Set(EventTypeName.of[OrderPlaced])
 
-    /** Dispatches to each leaf's own codec instead of deriving one for the sealed trait, so what goes on the wire is
-      * the shape each partner's own decoder expects rather than circe's `{"ReserveStockFor": {...}}` sum wrapper.
-      *
-      * Note that there is no honest `decode` for this type — an incoming payload could be either leaf and nothing on it
-      * says which. That is exactly why the saga asks for a [[MessageEncoder]] and not a codec: before the split this
-      * had to be a stub that threw.
-      */
-    val requestEncoder: MessageEncoder[FanOutRequest] = new MessageEncoder[FanOutRequest]:
-      def encode(request: FanOutRequest): Either[Throwable, String] = request match
-        case r: ReserveStockFor => stockCodec.encode(r)
-        case c: ChargeFor       => chargeCodec.encode(c)
-        case r: ReleaseStockFor => releaseCodec.encode(r)
-        case r: RefundFor       => refundCodec.encode(r)
+    val Label = "both"
+
+    def start(event: EventEnvelope[TestEvent]): Option[SagaStart[OrderState, ReserveStock]] =
+      event.payload match
+        case OrderPlaced(orderId) =>
+          Some(
+            SagaStart(
+              key = orderId,
+              data = OrderState(orderId),
+              request = List(
+                SagaRequest(Label, RequestTopic, Some(orderId), ReserveStock(orderId)),
+                SagaRequest(Label, PaymentTopic, Some(orderId), ReserveStock(orderId)),
+              ),
+              timeout = Some(1.hour),
+            ),
+          )
+        case _ => None
+
+    def onReply(
+      ctx: SagaContext,
+      state: OrderState,
+      reply: SagaReply[StockReserved],
+    ): SagaDecision[TestEvent, OrderState, ReserveStock] = SagaDecision.completed()
+
+    def onTimeout(ctx: SagaContext, state: OrderState): SagaDecision[TestEvent, OrderState, ReserveStock] =
+      SagaDecision.compensated()
+
+    val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
+
+
+    val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
+
+  /** Continues on every reply, applying whichever [[SagaDeadline]] the reply asks for, so one saga covers all three
+    * cases.
+    *
+    * Reading the instruction out of `StockReserved.reason` is a shortcut, and a fair one: what is under test is what
+    * the runner does with an outcome, not how a saga arrived at it.
+    */
+  object DeadlineSaga extends Saga[TestEvent, OrderState, ReserveStock, StockReserved]:
+
+    val name = "deadline"
+
+    val triggers = Set(EventTypeName.of[OrderPlaced])
+
+    /** Instructions a test writes into the reply. */
+    val Keep = "keep"
+
+    val Never = "never"
+
+    val Move = "move"
+
+    /** Deliberately longer than the deadline `start` hands out, so moving it is visible as a step forward. */
+    val MovedTo: FiniteDuration = 2.hours
+
+    def start(event: EventEnvelope[TestEvent]): Option[SagaStart[OrderState, ReserveStock]] =
+      event.payload match
+        case OrderPlaced(orderId) =>
+          Some(
+            SagaStart(
+              key = orderId,
+              data = OrderState(orderId),
+              request = List(SagaRequest(SoleRequest, RequestTopic, Some(orderId), ReserveStock(orderId))),
+              timeout = Some(1.hour),
+            ),
+          )
+        case _ => None
+
+    def onReply(
+      ctx: SagaContext,
+      state: OrderState,
+      reply: SagaReply[StockReserved],
+    ): SagaDecision[TestEvent, OrderState, ReserveStock] =
+      reply.payload.reason match
+        case Some(Never) => SagaDecision.continue(state, SagaDeadline.Never)
+        case Some(Move)  => SagaDecision.continue(state, SagaDeadline.In(MovedTo))
+        case _           => SagaDecision.continue(state)
+
+    def onTimeout(ctx: SagaContext, state: OrderState): SagaDecision[TestEvent, OrderState, ReserveStock] =
+      SagaDecision.compensated()
+
+    val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
+
 
     val replyDecoder: MessageDecoder[StockReserved] = CirceMessageCodec.derived[StockReserved]
 
@@ -471,19 +598,38 @@ object SagaRunnerSuite extends IOSuite:
       })
       .void
 
+  /** A deadline that has already gone by. The timer loop can be driven straight away against one of these: the deadline
+    * is a value the caller chooses now, so nothing has to be waited out first.
+    */
+  private def alreadyPassed: Option[Instant] = Some(Instant.now().minusSeconds(1))
+
+  /** A deadline far enough out that nothing under test will reach it. */
+  private def farFuture: Option[Instant] = Some(Instant.now().plusSeconds(3600))
+
   private def instanceOf(fixture: Fixture, orderId: String): IO[Option[SagaRecord]] =
     fixture.repository.find(SagaId.instance(TestSaga.name, orderId))
 
   private def instanceOf(fixture: Fixture, sagaName: String, key: String): IO[Option[SagaRecord]] =
     fixture.repository.find(SagaId.instance(sagaName, key))
 
-  /** A reply attributed to one of [[FanOutSaga]]'s requests, exactly as `SagaHeaders.reply` would have built it. */
-  private def fanOutReply(id: java.util.UUID, ordinal: Int, payload: String, round: Int = 0): IncomingMessage =
+  /** A reply attributed to one of [[FanOutSaga]]'s requests, exactly as `SagaHeaders.reply` would have built it.
+    *
+    * The ordinal defaults to 0 for every partner, which is deliberately *wrong* for all but the first request: the
+    * whole point of the label is that attribution no longer reads the position, so every test here builds replies that
+    * would be misattributed if it ever started reading it again.
+    */
+  private def fanOutReply(
+    id: java.util.UUID,
+    label: String,
+    payload: String,
+    round: Int = 0,
+    ordinal: Int = 0,
+  ): IncomingMessage =
     reply(
       id,
       payload,
       sagaName = FanOutSaga.name,
-      inReplyTo = Some(SagaRequestRef.idempotencyKey(id, round, ordinal)),
+      inReplyTo = Some(SagaRequestRef.idempotencyKey(id, round, ordinal, label)),
     )
 
   private def runFanOutTrigger(fixture: Fixture, orderId: String): IO[Unit] =
@@ -494,6 +640,31 @@ object SagaRunnerSuite extends IOSuite:
     Ref.of[IO, List[IncomingMessage]](Nil).flatMap { acked =>
       runner(fixture, replies.toList, acked).replyLoop(FanOutSaga).compile.drain
     }
+
+  /** Start a [[DeadlineSaga]] instance, deliver one reply asking for `instruction`, and hand back what the instance's
+    * deadline was before and after — which is the whole of what [[SagaDeadline]] controls.
+    */
+  private def deadlineAround(
+    fixture: Fixture,
+    key: String,
+    instruction: String,
+  ): IO[(Option[Instant], Option[Instant])] =
+    val id = SagaId.instance(DeadlineSaga.name, key)
+    for
+      _      <- truncate(fixture)
+      _      <- append(fixture, OrderPlaced(key))
+      _      <- noReplies(fixture).flatMap(_.triggerLoop(DeadlineSaga).take(1).compile.drain)
+      before <- instanceOf(fixture, DeadlineSaga.name, key)
+      answer  = reply(
+                 id,
+                 s"""{"ok":true,"reason":"$instruction"}""",
+                 sagaName = DeadlineSaga.name,
+                 inReplyTo = Some(SagaRequestRef.idempotencyKey(id, 0, 0, SoleRequest)),
+               )
+      acked <- Ref.of[IO, List[IncomingMessage]](Nil)
+      _     <- runner(fixture, List(answer), acked).replyLoop(DeadlineSaga).compile.drain
+      after <- instanceOf(fixture, DeadlineSaga.name, key)
+    yield (before.flatMap(_.deadline), after.flatMap(_.deadline))
 
   private def outboxRows(fixture: Fixture): IO[List[(String, Option[String], String, Map[String, String])]] =
     fixture.pool
@@ -545,7 +716,9 @@ object SagaRunnerSuite extends IOSuite:
         headers.get(SagaHeaders.Name) == Some(TestSaga.name),
         headers.get(SagaHeaders.Id) == Some(expected.toString),
         headers.get(SagaHeaders.ReplyTo) == Some(ReplyTopic),
-        headers.get(SagaHeaders.IdempotencyKey) == Some(s"$expected:0:0"),
+        // Taken from the payload's own RequestType, not from anything the saga wrote down beside it.
+        headers.get(SagaHeaders.RequestType) == Some("reserve"),
+        headers.get(SagaHeaders.IdempotencyKey) == Some(s"$expected:0:0:$SoleRequest"),
       )
   }
 
@@ -563,8 +736,35 @@ object SagaRunnerSuite extends IOSuite:
       // deriving a codec for the sealed trait would have produced.
       rows.map(_._3) == List("""{"orderId":"o-fan"}""", """{"orderId":"o-fan","cents":500}"""),
       // Distinct keys within the one round, so a partner deduplicating on them cannot mistake one request for the other,
-      // and so the ordinal identifies which of the two a reply is answering.
-      rows.flatMap(_._4.get(SagaHeaders.IdempotencyKey)) == List(s"$id:0:0", s"$id:0:1"),
+      // and each carries the label that tells the saga which of the two a reply is answering.
+      rows.flatMap(_._4.get(SagaHeaders.IdempotencyKey)) ==
+        List(s"$id:0:0:${FanOutRequests.Stock}", s"$id:0:1:${FanOutRequests.Payment}"),
+      // Two payload types in one round, each named by its own RequestType. Getting this pairing wrong is what the saga
+      // used to risk every time it stamped a name beside a payload by hand.
+      rows.flatMap(_._4.get(SagaHeaders.RequestType)) == List("reserve-for", "charge"),
+    )
+  }
+
+  test("two requests sharing one label are still sent, and the collision is reported") { fixture =>
+    val id = SagaId.instance(CollidingLabelSaga.name, "o-collide")
+    for
+      _      <- truncate(fixture)
+      _      <- append(fixture, OrderPlaced("o-collide"))
+      logged <- capturingLogs { log =>
+                  given Logger[IO] = log
+                  noReplies(fixture).flatMap(_.triggerLoop(CollidingLabelSaga).take(1).compile.drain)
+                }.map(_._2)
+      record <- instanceOf(fixture, CollidingLabelSaga.name, "o-collide")
+      rows   <- outboxRows(fixture)
+    yield expect.all(
+      // Both go out, and the ordinal still keeps their keys apart, so a deduplicating partner is unharmed. What is lost
+      // is only the saga's ability to tell the two answers apart — which is its own doing, not something to fail on.
+      rows.size == 2,
+      rows.flatMap(_._4.get(SagaHeaders.IdempotencyKey)) ==
+        List(s"$id:0:0:${CollidingLabelSaga.Label}", s"$id:0:1:${CollidingLabelSaga.Label}"),
+      record.exists(_.status == SagaStatus.Pending),
+      // Nothing downstream will ever surface this, so the warning is the only signal the mistake exists.
+      logged.reported("WARN", CollidingLabelSaga.name),
     )
   }
 
@@ -628,16 +828,17 @@ object SagaRunnerSuite extends IOSuite:
       _     <- append(fixture, OrderPlaced("o-ref"))
       _     <- noReplies(fixture).flatMap(_.triggerLoop(ObservingSaga).take(1).compile.drain)
       acked <- Ref.of[IO, List[IncomingMessage]](Nil)
-      // What SagaHeaders.reply would have put there: the idempotency key of round 0, ordinal 0.
+      // What SagaHeaders.reply would have put there: the idempotency key of round 0, ordinal 0, under the label the saga
+      // gave that request.
       answer = reply(
                  id,
                  accepted,
                  sagaName = ObservingSaga.name,
-                 inReplyTo = Some(SagaRequestRef.idempotencyKey(id, 0, 0)),
+                 inReplyTo = Some(SagaRequestRef.idempotencyKey(id, 0, 0, SoleRequest)),
                )
       _        <- runner(fixture, List(answer), acked).replyLoop(ObservingSaga).compile.drain
       observed <- storedPayloads(fixture, "Unrelated")
-    yield expect(observed == List("""{"what": "0:0"}"""))
+    yield expect(observed == List(s"""{"what": "0:0:$SoleRequest"}"""))
   }
 
   test("a reply that names no request leaves the saga with nothing to go on") { fixture =>
@@ -665,7 +866,7 @@ object SagaRunnerSuite extends IOSuite:
                  id,
                  accepted,
                  sagaName = ObservingSaga.name,
-                 inReplyTo = Some(SagaRequestRef.idempotencyKey(other, 3, 7)),
+                 inReplyTo = Some(SagaRequestRef.idempotencyKey(other, 3, 7, SoleRequest)),
                )
       _        <- runner(fixture, List(answer), acked).replyLoop(ObservingSaga).compile.drain
       observed <- storedPayloads(fixture, "Unrelated")
@@ -679,10 +880,10 @@ object SagaRunnerSuite extends IOSuite:
     for
       _       <- truncate(fixture)
       _       <- runFanOutTrigger(fixture, "fan-both")
-      _       <- deliverToFanOut(fixture, fanOutReply(id, ordinal = 0, accepted))
+      _       <- deliverToFanOut(fixture, fanOutReply(id, FanOutRequests.Stock, accepted))
       midway  <- instanceOf(fixture, FanOutSaga.name, "fan-both")
       events  <- storedEvents(fixture)
-      _       <- deliverToFanOut(fixture, fanOutReply(id, ordinal = 1, accepted))
+      _       <- deliverToFanOut(fixture, fanOutReply(id, FanOutRequests.Payment, accepted))
       settled <- instanceOf(fixture, FanOutSaga.name, "fan-both")
       after   <- storedEvents(fixture)
     yield expect.all(
@@ -703,8 +904,8 @@ object SagaRunnerSuite extends IOSuite:
     for
       _ <- truncate(fixture)
       _ <- runFanOutTrigger(fixture, "fan-attr")
-      // The same payload twice — only the answered ordinal differs, which is the whole point.
-      _      <- deliverToFanOut(fixture, fanOutReply(id, ordinal = 1, accepted))
+      // The same payload either way — only the label of the request it answers differs, which is the whole point.
+      _      <- deliverToFanOut(fixture, fanOutReply(id, FanOutRequests.Payment, accepted))
       record <- instanceOf(fixture, FanOutSaga.name, "fan-attr")
     yield expect.all(
       record.exists(_.data.contains(""""payment":true""")),
@@ -712,12 +913,55 @@ object SagaRunnerSuite extends IOSuite:
     )
   }
 
+  test("attribution follows the label, not the position the request went out in") { fixture =>
+    val id = SagaId.instance(FanOutSaga.name, "fan-moved")
+    for
+      _ <- truncate(fixture)
+      _ <- runFanOutTrigger(fixture, "fan-moved")
+      // Payment is the *second* request the saga sends, so ordinal 1 is its real position. This reply claims ordinal 0 —
+      // stock's position — while naming payment's label, which is the shape a reordering of `start`'s list produces
+      // against replies already in flight. The label has to win, or the saga credits stock for payment's answer.
+      _      <- deliverToFanOut(fixture, fanOutReply(id, FanOutRequests.Payment, accepted, ordinal = 0))
+      record <- instanceOf(fixture, FanOutSaga.name, "fan-moved")
+    yield expect.all(
+      record.exists(_.data.contains(""""payment":true""")),
+      record.exists(_.data.contains(""""stock":null""")),
+    )
+  }
+
+  test("a reply naming a label the saga never used is refused rather than guessed at") { fixture =>
+    val id = SagaId.instance(FanOutSaga.name, "fan-alien")
+    for
+      _ <- truncate(fixture)
+      _ <- runFanOutTrigger(fixture, "fan-alien")
+      // Well-formed, this instance's own id, and a label from nowhere — a partner echoing a key it invented, or a saga
+      // whose labels were renamed under instances still in flight.
+      logged <- capturingLogs { log =>
+                  given Logger[IO] = log
+                  deliverToFanOut(fixture, fanOutReply(id, "shipping", accepted))
+                }.map(_._2)
+      record <- instanceOf(fixture, FanOutSaga.name, "fan-alien")
+      events <- storedEvents(fixture)
+    yield expect.all(
+      record.exists(_.status == SagaStatus.Failed),
+      events == List("OrderPlaced"),
+      // The label it could not place has to reach the log: a Failed instance persists no reason, so this line is the
+      // only thing that will tell whoever finds it which request the saga did not recognise.
+      logged.reported("WARN", "shipping"),
+    )
+  }
+
   test("a redelivered reply does not count as the partner that is still missing") { fixture =>
     val id = SagaId.instance(FanOutSaga.name, "fan-dup")
     for
-      _      <- truncate(fixture)
-      _      <- runFanOutTrigger(fixture, "fan-dup")
-      _      <- deliverToFanOut(fixture, fanOutReply(id, 0, accepted), fanOutReply(id, 0, accepted))
+      _       <- truncate(fixture)
+      _       <- runFanOutTrigger(fixture, "fan-dup")
+      started <- instanceOf(fixture, FanOutSaga.name, "fan-dup")
+      _       <- deliverToFanOut(
+             fixture,
+             fanOutReply(id, FanOutRequests.Stock, accepted),
+             fanOutReply(id, FanOutRequests.Stock, accepted),
+           )
       record <- instanceOf(fixture, FanOutSaga.name, "fan-dup")
       events <- storedEvents(fixture)
     yield expect.all(
@@ -726,9 +970,11 @@ object SagaRunnerSuite extends IOSuite:
       record.exists(_.status == SagaStatus.Pending),
       record.exists(_.data.contains(""""payment":null""")),
       events == List("OrderPlaced"),
-      // But each redelivery is still a `Continue`, so the step climbs and the deadline it carries is set afresh. A
-      // partner redelivering faster than the timeout would keep postponing the moment this instance gives up.
+      // Each redelivery is still a `Continue`, so the step climbs — twice, for two deliveries of one answer.
       record.exists(_.step == 2),
+      // The deadline does not move with it. This is what `SagaDeadline.Keep` buys: a partner redelivering faster than
+      // the timeout used to postpone the moment this instance gave up, indefinitely and invisibly.
+      record.flatMap(_.deadline) == started.flatMap(_.deadline),
     )
   }
 
@@ -737,8 +983,8 @@ object SagaRunnerSuite extends IOSuite:
     for
       _      <- truncate(fixture)
       _      <- runFanOutTrigger(fixture, "fan-undo")
-      _      <- deliverToFanOut(fixture, fanOutReply(id, 0, accepted))
-      _      <- deliverToFanOut(fixture, fanOutReply(id, 1, rejected))
+      _      <- deliverToFanOut(fixture, fanOutReply(id, FanOutRequests.Stock, accepted))
+      _      <- deliverToFanOut(fixture, fanOutReply(id, FanOutRequests.Payment, rejected))
       record <- instanceOf(fixture, FanOutSaga.name, "fan-undo")
       events <- storedEvents(fixture)
       rows   <- outboxRows(fixture)
@@ -750,9 +996,18 @@ object SagaRunnerSuite extends IOSuite:
       rows.size == 3,
       rows.last._1 == RequestTopic,
       // Identical on the wire to the request that reserved it. Only the key says otherwise: round 2, not round 0, which
-      // is what stops a partner deduplicating on that key from discarding the undo as a redelivery of the original.
+      // is what stops a partner deduplicating on that key from discarding the undo as a redelivery of the original —
+      // and it is labelled as the undo it is, not as the reservation it reverses.
       rows.last._3 == """{"orderId":"fan-undo"}""",
-      rows.last._4.get(SagaHeaders.IdempotencyKey) == Some(s"$id:2:0"),
+      rows.last._4.get(SagaHeaders.IdempotencyKey) == Some(s"$id:2:0:${FanOutRequests.Release}"),
+      // And it is named as the undo it is, not as the reservation it reverses — the compensation's payload type is a
+      // different type carrying a different name, so nothing had to remember to switch the name over.
+      rows.last._4.get(SagaHeaders.RequestType) == Some("release-for"),
+      // The two original requests were bounded by the instance's deadline; the undo is not. A terminal instance has no
+      // deadline left to quote, and that is the right answer rather than an omission: an undo should be honoured
+      // whenever it arrives, never declined for being late.
+      rows.take(2).forall(_._4.contains(SagaHeaders.ExpiresAt)),
+      !rows.last._4.contains(SagaHeaders.ExpiresAt),
     )
   }
 
@@ -763,8 +1018,7 @@ object SagaRunnerSuite extends IOSuite:
     val halfAnswered = """{"orderId":"fan-late","stock":true,"payment":null}"""
     for
       _      <- truncate(fixture)
-      _      <- fixture.repository.start(id, FanOutSaga.name, "fan-late", halfAnswered, Some(1.milli), Nil)
-      _      <- IO.sleep(100.millis)
+      _      <- fixture.repository.start(id, FanOutSaga.name, "fan-late", halfAnswered, alreadyPassed, Nil)
       _      <- noReplies(fixture).flatMap(_.timerLoop(FanOutSaga).take(1).compile.drain)
       record <- instanceOf(fixture, FanOutSaga.name, "fan-late")
       events <- storedEvents(fixture)
@@ -777,7 +1031,8 @@ object SagaRunnerSuite extends IOSuite:
       rows.size == 2,
       rows.map(_._1) == List(RequestTopic, PaymentTopic),
       rows.map(_._3) == List("""{"orderId":"fan-late"}""", """{"orderId":"fan-late","cents":500}"""),
-      rows.flatMap(_._4.get(SagaHeaders.IdempotencyKey)) == List(s"$id:1:0", s"$id:1:1"),
+      rows.flatMap(_._4.get(SagaHeaders.IdempotencyKey)) ==
+        List(s"$id:1:0:${FanOutRequests.Release}", s"$id:1:1:${FanOutRequests.Refund}"),
     )
   }
 
@@ -786,8 +1041,7 @@ object SagaRunnerSuite extends IOSuite:
     val stockDeclined = """{"orderId":"fan-nope","stock":false,"payment":null}"""
     for
       _    <- truncate(fixture)
-      _    <- fixture.repository.start(id, FanOutSaga.name, "fan-nope", stockDeclined, Some(1.milli), Nil)
-      _    <- IO.sleep(100.millis)
+      _    <- fixture.repository.start(id, FanOutSaga.name, "fan-nope", stockDeclined, alreadyPassed, Nil)
       _    <- noReplies(fixture).flatMap(_.timerLoop(FanOutSaga).take(1).compile.drain)
       rows <- outboxRows(fixture)
     yield expect.all(
@@ -929,14 +1183,52 @@ object SagaRunnerSuite extends IOSuite:
     yield expect.all(count == 0L, seen.size == 1, logged.reported("WARN", ghost.toString))
   }
 
+  // ----- deadlines -----
+
+  test("a continuing decision leaves the deadline exactly where it was") { fixture =>
+    // The default, and the reason the default matters: a fan-in re-arming on every partial reply would give a silent
+    // partner a fresh window each time one of its peers answered, and the instance would never actually give up.
+    deadlineAround(fixture, "d-keep", DeadlineSaga.Keep).map { (before, after) =>
+      expect.all(before.isDefined, after == before)
+    }
+  }
+
+  test("a continuing decision can move the deadline out") { fixture =>
+    deadlineAround(fixture, "d-move", DeadlineSaga.Move).map { (before, after) =>
+      expect.all(before.isDefined, after.exists(moved => before.exists(moved.isAfter)))
+    }
+  }
+
+  test("a continuing decision can drop the deadline altogether") { fixture =>
+    // No deadline means the timer loop's index never offers this instance again — a saga saying it will wait for as
+    // long as it takes.
+    deadlineAround(fixture, "d-never", DeadlineSaga.Never).map { (before, after) =>
+      expect.all(before.isDefined, after.isEmpty)
+    }
+  }
+
+  test("a request carries the very deadline its instance was given") { fixture =>
+    for
+      _      <- truncate(fixture)
+      _      <- append(fixture, OrderPlaced("o-exp"))
+      _      <- runTrigger(fixture)
+      record <- instanceOf(fixture, "o-exp")
+      rows   <- outboxRows(fixture)
+    yield expect.all(
+      record.flatMap(_.deadline).isDefined,
+      // Parsed rather than compared as text, because what has to match is the instant. This is the assertion the whole
+      // step exists for: the partner and the sweeper read one fact, not two clocks that happen to agree today.
+      rows.head._4.get(SagaHeaders.ExpiresAt).map(Instant.parse) == record.flatMap(_.deadline),
+    )
+  }
+
   // ----- timer loop -----
 
   test("an instance past its deadline is compensated") { fixture =>
     val id = SagaId.instance(TestSaga.name, "o1")
     for
       _      <- truncate(fixture)
-      _      <- fixture.repository.start(id, TestSaga.name, "o1", """{"orderId":"o1"}""", Some(1.milli), Nil)
-      _      <- IO.sleep(100.millis)
+      _      <- fixture.repository.start(id, TestSaga.name, "o1", """{"orderId":"o1"}""", alreadyPassed, Nil)
       _      <- noReplies(fixture).flatMap(_.timerLoop(TestSaga).take(1).compile.drain)
       record <- instanceOf(fixture, "o1")
       events <- storedEvents(fixture)
@@ -947,7 +1239,7 @@ object SagaRunnerSuite extends IOSuite:
     val id = SagaId.instance(TestSaga.name, "o1")
     for
       _      <- truncate(fixture)
-      _      <- fixture.repository.start(id, TestSaga.name, "o1", """{"orderId":"o1"}""", Some(1.hour), Nil)
+      _      <- fixture.repository.start(id, TestSaga.name, "o1", """{"orderId":"o1"}""", farFuture, Nil)
       _      <- noReplies(fixture).flatMap(_.timerLoop(TestSaga).take(1).compile.drain)
       record <- instanceOf(fixture, "o1")
       count  <- eventCount(fixture)
@@ -958,8 +1250,7 @@ object SagaRunnerSuite extends IOSuite:
     val id = SagaId.instance(TestSaga.name, "o1")
     for
       _      <- truncate(fixture)
-      _      <- fixture.repository.start(id, TestSaga.name, "o1", "not json at all", Some(1.milli), Nil)
-      _      <- IO.sleep(100.millis)
+      _      <- fixture.repository.start(id, TestSaga.name, "o1", "not json at all", alreadyPassed, Nil)
       logged <- capturingLogs { log =>
                   given Logger[IO] = log
                   noReplies(fixture).flatMap(_.timerLoop(TestSaga).take(1).compile.drain)

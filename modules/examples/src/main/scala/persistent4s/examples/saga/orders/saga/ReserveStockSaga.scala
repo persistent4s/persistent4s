@@ -24,7 +24,7 @@ import io.circe.{Decoder, Encoder}
 
 import persistent4s.*
 import persistent4s.circe.CirceMessageCodec
-import persistent4s.examples.saga.contract.{RequestHeaders, ReserveStock, ReleaseStock, Topics}
+import persistent4s.examples.saga.contract.{ReserveStock, ReleaseStock, Topics}
 import persistent4s.examples.saga.orders.domain.{OrderCancelled, OrderConfirmed, OrderPlaced, OrdersTags}
 import persistent4s.examples.saga.contract.PartnerReply
 import persistent4s.examples.saga.contract.{AuthorizePayment, CancelPayment}
@@ -54,9 +54,15 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
 
   val triggers: Set[EventTypeName] = Set(EventTypeName.of[OrderPlaced])
 
-  private val StockOrdinal = 0
+  private object Requests:
 
-  private val PaymentOrdinal = 1
+    val Stock = "stock"
+
+    val Payment = "payment"
+
+    val Release = "release"
+
+    val Cancel = "cancel"
 
   val NoAttribution = "reply did not say which request it answered"
 
@@ -71,22 +77,16 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
             data = OrderState(orderId, customerId, itemId, amount, price, None, None),
             request = List(
               SagaRequest(
+                label = Requests.Stock,
                 topic = Topics.InventoryCommands,
                 key = Some(itemId.toString),
                 payload = ReserveStock(orderId, itemId, amount),
-                headers = Map(
-                  RequestHeaders.ExpiresAt -> event.metadata.timestamp.plusMillis(ReplyTimeout.toMillis).toString,
-                  RequestHeaders.Kind      -> ReserveStock.Kind,
-                ),
               ),
               SagaRequest(
+                label = Requests.Payment,
                 topic = Topics.PaymentCommands,
                 key = Some(customerId.toString),
                 payload = AuthorizePayment(orderId, customerId, price),
-                headers = Map(
-                  RequestHeaders.ExpiresAt -> event.metadata.timestamp.plusMillis(ReplyTimeout.toMillis).toString,
-                  RequestHeaders.Kind      -> AuthorizePayment.Kind,
-                ),
               ),
             ),
             timeout = Some(ReplyTimeout),
@@ -99,11 +99,11 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
     state: OrderState,
     reply: SagaReply[PartnerReply],
   ): SagaDecision[OrderEvent, OrderState, OrderRequest] =
-    reply.answering.map(_.ordinal) match
-      case Some(StockOrdinal)   => settle(state.copy(stockSuccess = Some(reply.payload.accepted)))
-      case Some(PaymentOrdinal) => settle(state.copy(paymentSuccess = Some(reply.payload.accepted)))
-      case Some(other)          =>
-        SagaDecision.failed(s"reply named request ordinal $other, which this saga never sent")
+    reply.answering.map(_.label) match
+      case Some(Requests.Stock)   => settle(state.copy(stockSuccess = Some(reply.payload.accepted)))
+      case Some(Requests.Payment) => settle(state.copy(paymentSuccess = Some(reply.payload.accepted)))
+      case Some(other)            =>
+        SagaDecision.failed(s"reply named request `$other`, which this saga never sent")
       case None =>
         SagaDecision.failed(NoAttribution)
 
@@ -116,7 +116,7 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
           events = List(orderTag(state.orderId) -> OrderCancelled(state.orderId, "a partner declined")),
           messages = undoRequests(state),
         )
-      case _ => SagaDecision.continue(state, timeout = Some(ReplyTimeout))
+      case _ => SagaDecision.continue(state)
 
   override def onTimeout(
     ctx: SagaContext,
@@ -132,22 +132,18 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
     List(
       Option.unless(state.stockSuccess.contains(false))(
         SagaRequest(
+          Requests.Release,
           Topics.InventoryCommands,
           Some(state.itemId.toString),
           ReleaseStock(state.orderId, state.itemId),
-          Map(
-            RequestHeaders.Kind -> ReleaseStock.Kind,
-          ),
         ),
       ),
       Option.unless(state.paymentSuccess.contains(false))(
         SagaRequest(
+          Requests.Cancel,
           Topics.PaymentCommands,
           Some(state.customerId.toString),
           CancelPayment(state.orderId, state.customerId),
-          Map(
-            RequestHeaders.Kind -> CancelPayment.Kind,
-          ),
         ),
       ),
     ).flatten
@@ -155,7 +151,5 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
   private def orderTag(orderId: UUID): Set[Tag] = Set(OrdersTags.order(orderId))
 
   val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
-
-  val requestEncoder: MessageEncoder[OrderRequest] = OrderRequest.encoder
 
   val replyDecoder: MessageDecoder[PartnerReply] = summon[MessageCodec[PartnerReply]]

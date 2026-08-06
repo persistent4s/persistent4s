@@ -22,26 +22,124 @@ import java.util.UUID
 import scala.concurrent.duration.FiniteDuration
 import scala.util.Try
 
+/** What a decision does to the instance's deadline.
+  *
+  * Three cases rather than an `Option[FiniteDuration]`, because "wait another 30 seconds" and "keep the 30 seconds you
+  * were already given" are different instructions and a duration can only say the first. A fan-in that re-armed on
+  * every partial reply would hand a slow partner an unbounded extension, one reply at a time.
+  *
+  * Named with the `Saga` prefix, unlike most types that live only inside one API: every saga file needs
+  * `scala.concurrent.duration.*` for its durations, and that brings a `Deadline` of its own. Two wildcard imports
+  * offering one name is an ambiguity rather than a shadowing, so a bare `Deadline` here would fail to compile in
+  * exactly the files that use it most.
+  */
+enum SagaDeadline:
+
+  /** Leave the deadline exactly where it is. */
+  case Keep
+
+  /** Wait indefinitely: the timer loop never claims this instance. */
+  case Never
+
+  /** Give the instance `duration` from the moment this decision is applied. */
+  case In(duration: FiniteDuration)
+
 /** Identifies the saga instance a decision is being made for, so decision functions can build tags and messages that
   * reference the instance without carrying the key around in the state themselves.
   */
 final case class SagaContext(id: UUID, sagaName: String, key: String, step: Int)
 
-/** A command a saga wants to send, still typed. The runner encodes it with [[Saga.requestEncoder]] and stamps the
-  * [[SagaHeaders]] onto it, so a saga never serializes anything itself — its decision functions are pure and would have
-  * nowhere to report an encoding failure.
+/** What a request type is called on the wire.
   *
+  * The name is the contract between a saga and the service it asks, and it used to be kept by hand in three places at
+  * once: the header the sender stamped, the encoder that matched on the payload to serialize it, and the dispatch table
+  * the partner matched on to route it. Three agreements, checked by nobody — stamp one name beside another's payload
+  * and the message is silently dropped by the other service.
+  *
+  * Declared once, next to the type it names, and both sides read it from there:
+  *
+  * ```scala
+  * final case class ReserveStock(orderId: UUID, itemId: UUID, amount: Int)
+  *
+  * object ReserveStock:
+  *   given RequestType[ReserveStock] = RequestType("reserve")
+  *   given MessageCodec[ReserveStock] = CirceMessageCodec.derived
+  * ```
+  *
+  * Deliberately '''only''' the name. The sender needs an encoder and the receiver a decoder, and per
+  * [[MessageEncoder]]'s own reasoning a service often cannot supply the direction it does not use — so each side asks
+  * for this plus its own half, rather than both being made to provide a full codec.
+  *
+  * ⚠️ **STABLE IDENTIFIER** — it goes on the wire as [[SagaHeaders.RequestType]]. Renaming it while requests are in
+  * flight means the partner stops recognising them.
+  */
+trait RequestType[A]:
+
+  def name: String
+
+object RequestType:
+
+  def apply[A](name: String): RequestType[A] =
+    val declared = name
+    new RequestType[A]:
+      val name: String = declared
+
+/** A command a saga wants to send, named rather than serialized.
+  *
+  * Like [[PendingReply]], and for the same reason: a saga's decision functions are pure and have nowhere to report an
+  * encoding failure, so the payload is captured with its encoder here and turned into bytes by [[SagaRunner]], where a
+  * failure can be raised. Capturing it at construction is also what lets one saga send several unrelated request types
+  * without hand-writing an encoder that matches on all of them.
+  *
+  * @param label
+  *   names this request. Must be distinct within a round: two requests sharing a label have indistinguishable replies.
+  *   It travels inside [[SagaHeaders.IdempotencyKey]] and comes back on [[SagaHeaders.InReplyTo]], so a partner
+  *   replying with [[SagaHeaders.reply]] returns it without knowing it exists.
   * @param key
   *   partition key for the request; drives per-key ordering at the broker
   * @param headers
   *   extra headers to send alongside the saga's own; the saga headers win on a clash
   */
-final case class SagaRequest[+Req](
-  topic: String,
-  key: Option[String],
-  payload: Req,
-  headers: Map[String, String] = Map.empty,
-)
+sealed abstract class SagaRequest[+Req]:
+
+  def label: String
+
+  def topic: String
+
+  def key: Option[String]
+
+  def payload: Req
+
+  /** What the partner will see in [[SagaHeaders.RequestType]], taken from the payload's own [[RequestType]]. */
+  def requestType: String
+
+  def headers: Map[String, String]
+
+  /** The payload in wire form, or why it could not be produced. */
+  private[persistent4s] def encoded: Either[Throwable, String]
+
+object SagaRequest:
+
+  private final case class Deferred[+Req](
+    label: String,
+    topic: String,
+    key: Option[String],
+    payload: Req,
+    requestType: String,
+    headers: Map[String, String],
+    encode: () => Either[Throwable, String],
+  ) extends SagaRequest[Req]:
+
+    def encoded: Either[Throwable, String] = encode()
+
+  def apply[A](
+    label: String,
+    topic: String,
+    key: Option[String],
+    payload: A,
+    headers: Map[String, String] = Map.empty,
+  )(using requestType: RequestType[A], encoder: MessageEncoder[A]): SagaRequest[A] =
+    Deferred(label, topic, key, payload, requestType.name, headers, () => encoder.encode(payload))
 
 /** What a saga does when it recognises a trigger event: which instance to create, with what state, and which command(s)
   * to send.
@@ -61,7 +159,7 @@ final case class SagaStart[S, +Req](
 /** Where a saga instance goes after handling a reply or a deadline. */
 enum SagaOutcome[+S]:
 
-  case Continue(data: S, timeout: Option[FiniteDuration])
+  case Continue(data: S, deadline: SagaDeadline)
 
   case Completed
 
@@ -96,16 +194,19 @@ object SagaDecision:
 
   def continue[A <: Event, S, Req](
     data: S,
-    timeout: Option[FiniteDuration],
+    deadline: SagaDeadline = SagaDeadline.Keep,
     events: List[(Set[Tag], A)] = Nil,
     messages: List[SagaRequest[Req]] = Nil,
-  ): SagaDecision[A, S, Req] = SagaDecision(SagaOutcome.Continue(data, timeout), events, messages)
+  ): SagaDecision[A, S, Req] = SagaDecision(SagaOutcome.Continue(data, deadline), events, messages)
 
-/** Identifies one of the requests an instance has sent: the emission round it went out in, and its position within that
-  * round. Enough to tell a fan-out's answers apart — a saga built the request list itself, so it knows that round 1
-  * ordinal 0 went to one partner and ordinal 1 to another, without needing the replies to be distinguishable by shape.
+/** Identifies one of the requests an instance has sent: the emission round it went out in, its position within that
+  * round, and the label the saga gave it.
+  *
+  * The label is what a fan-out attributes on: it is chosen by the saga rather than derived from where the request sat
+  * in the list, so reordering that list cannot silently move an answer from one partner to another. The ordinal stays
+  * because it is what keeps the key unique even when a saga does label two requests the same.
   */
-final case class SagaRequestRef(round: Int, ordinal: Int)
+final case class SagaRequestRef(round: Int, ordinal: Int, label: String)
 
 object SagaRequestRef:
 
@@ -113,18 +214,19 @@ object SagaRequestRef:
     * [[parse]] reads it back off [[SagaHeaders.InReplyTo]], so the producer and the reader cannot drift — a second
     * spelling of the format would show up only as [[SagaReply.answering]] quietly being `None` forever.
     */
-  def idempotencyKey(instance: UUID, round: Int, ordinal: Int): String = s"$instance:$round:$ordinal"
+  def idempotencyKey(instance: UUID, round: Int, ordinal: Int, label: String): String =
+    s"$instance:$round:$ordinal:$label"
 
   /** `None` unless `key` is well-formed '''and''' belongs to `expected`, so a key echoed from somewhere else cannot be
     * mistaken for one of this instance's own requests.
     */
   def parse(key: String, expected: UUID): Option[SagaRequestRef] =
-    key.split(':') match
-      case Array(instance, round, ordinal) if instance == expected.toString =>
+    key.split(":", 4) match
+      case Array(instance, round, ordinal, label) if instance == expected.toString =>
         for
           r <- Try(round.toInt).toOption
           o <- Try(ordinal.toInt).toOption
-        yield SagaRequestRef(r, o)
+        yield SagaRequestRef(r, o, label)
       case _ => None
 
 /** A partner's answer, with everything the runner knows about how it arrived.
@@ -145,6 +247,42 @@ final case class SagaReply[+Rep](
   answering: Option[SagaRequestRef],
   headers: Map[String, String],
 )
+
+/** A reply a partner wants sent, named rather than serialized.
+  *
+  * Mirrors [[PendingEvent]] one layer down: a complete value that is not yet in wire form. That matters because the
+  * decision to reply is made in pure code — [[SagaCommandHandler.reply]] sees only the state, the command and the
+  * outcome — and pure code has nowhere to report an encoding failure. Naming the payload and deferring its encoding
+  * moves that failure somewhere it can be raised rather than thrown.
+  *
+  * Note what is '''absent''': the reply's partition key. It defaults to the saga instance, and the only safe
+  * alternatives are values that are also per-instance, so offering the choice buys nothing and costs a great deal when
+  * it is made wrongly — two partners picking differently scatter one instance's replies across partitions, where they
+  * are handled at once and the loser of [[SagaRepository.advance]]'s guard is discarded. A partner with a genuine
+  * reason can still build the message itself with [[SagaHeaders.reply]].
+  *
+  * @param headers
+  *   extra headers to send alongside the correlation ones; the correlation headers win on a clash.
+  */
+sealed abstract class PendingReply:
+
+  def headers: Map[String, String]
+
+  /** The payload in wire form, or why it could not be produced. */
+  private[persistent4s] def encoded: Either[Throwable, String]
+
+object PendingReply:
+
+  private final case class Deferred(
+    headers: Map[String, String],
+    encode: () => Either[Throwable, String],
+  ) extends PendingReply:
+
+    def encoded: Either[Throwable, String] = encode()
+
+  def apply[A](payload: A, headers: Map[String, String] = Map.empty)(using
+    encoder: MessageEncoder[A],
+  ): PendingReply = Deferred(headers, () => encoder.encode(payload))
 
 /** Headers the runner attaches to every saga request message. The partner must echo [[Name]] and [[Id]] back on its
   * reply so the runner can route it to the right saga and instance, and must publish that reply to [[ReplyTo]].
@@ -172,6 +310,16 @@ object SagaHeaders:
     * answer to that", which is a reference, not an identity, and it is what [[SagaReply.answering]] is read from.
     */
   val InReplyTo = "persistent4s.inReplyTo"
+
+  /** When the caller stops waiting, as an ISO-8601 instant. Stamped from the instance's own deadline, so a partner and
+    * the saga that asked it share one fact rather than each holding an opinion about how stale the request is.
+    */
+  val ExpiresAt = "persistent4s.expiresAt"
+
+  /** Which of the partner's commands this is, from the payload's [[RequestType]]. It is what
+    * [[SagaParticipant.on]] routes on, and the reason neither side has to write the name down twice.
+    */
+  val RequestType = "persistent4s.requestType"
 
   /** Build the reply to a saga request: `payload` addressed to the topic the request nominated, carrying back the
     * correlation headers [[SagaRunner]] needs to route it to the right saga and instance.
@@ -266,9 +414,6 @@ trait Saga[A <: Event, S, Req, Rep]:
     * this is the one payload here that genuinely needs both directions.
     */
   def stateCodec: MessageCodec[S]
-
-  /** Encodes the commands this saga sends. */
-  def requestEncoder: MessageEncoder[Req]
 
   /** Decodes reply payloads into [[Rep]]. */
   def replyDecoder: MessageDecoder[Rep]

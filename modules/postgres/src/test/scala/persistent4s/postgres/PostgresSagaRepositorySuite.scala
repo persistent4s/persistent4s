@@ -16,6 +16,9 @@
 
 package persistent4s.postgres
 
+import java.time.Instant
+import java.time.temporal.ChronoUnit
+
 import scala.concurrent.duration.*
 
 import cats.effect.{IO, Ref, Resource}
@@ -33,9 +36,13 @@ import persistent4s.{Event, OutgoingMessage, SagaId, SagaRecord, SagaStatus}
 
 /** Integration tests for [[PostgresSagaRepository]] against a real PostgreSQL instance via testcontainers.
   *
-  * Expiry is always produced by asking the database for a millisecond timeout and then waiting, never by comparing an
-  * `Instant` from this JVM against one from the container: the deadline is set on the database's clock, so only the
-  * database is entitled to decide whether it has passed.
+  * The deadline is now the caller's to compute — the repository stores the instant it is handed, so expiry here is
+  * produced by passing one that has already gone by rather than by asking for a short timeout and then sleeping. That
+  * makes these tests both faster and exact: the instant asserted on is the instant written.
+  *
+  * What that trades away is the guarantee the old shape had. `claimExpired` still compares against `clock_timestamp()`,
+  * so a deadline set from this JVM is now judged by the database's clock. Skew between the two moves only *when* the
+  * sweeper fires, never what any party was told, and under testcontainers both clocks are the host's anyway.
   */
 object PostgresSagaRepositorySuite extends IOSuite:
 
@@ -104,20 +111,28 @@ object PostgresSagaRepositorySuite extends IOSuite:
 
   private def sagaId(sagaName: String, key: String): java.util.UUID = SagaId.instance(sagaName, key)
 
-  /** Start an instance of `sagaName` keyed by `key`; its id is always `sagaId(sagaName, key)`. */
+  /** Start an instance of `sagaName` keyed by `key`; its id is always `sagaId(sagaName, key)`.
+    *
+    * Takes the deadline as a duration and resolves it here, which is what the runner does too. A negative one is a
+    * deadline already in the past — the whole of [[startExpired]].
+    */
   private def start(
     fixture: Fixture,
     sagaName: String,
     key: String,
-    timeout: Option[FiniteDuration],
+    expiresIn: Option[FiniteDuration],
     data: String = "state-0",
     messages: List[OutgoingMessage] = Nil,
   ): IO[Boolean] =
-    fixture.repository.start(sagaId(sagaName, key), sagaName, key, data, timeout, messages)
+    fixture.repository.start(
+      sagaId(sagaName, key), sagaName, key, data, expiresIn.map(d => Instant.now().plusMillis(d.toMillis)), messages,
+    )
 
-  /** Start an instance whose deadline the database has already passed. */
+  /** Start an instance whose deadline has already passed. No sleep: the deadline is a value now, so it can simply be
+    * written in the past.
+    */
   private def startExpired(fixture: Fixture, sagaName: String, key: String): IO[java.util.UUID] =
-    start(fixture, sagaName, key, timeout = Some(1.milli)).as(sagaId(sagaName, key)) <* IO.sleep(100.millis)
+    start(fixture, sagaName, key, expiresIn = Some(-1.second)).as(sagaId(sagaName, key))
 
   private def claimIds(fixture: Fixture, sagaName: String, limit: Int = 10): IO[List[java.util.UUID]] =
     Ref.of[IO, List[SagaRecord]](Nil).flatMap { claimed =>
@@ -145,12 +160,42 @@ object PostgresSagaRepositorySuite extends IOSuite:
     )
   }
 
-  test("start with no timeout leaves the deadline unset") { fixture =>
+  test("start with no deadline leaves the column unset") { fixture =>
     for
       _      <- truncate(fixture.pool)
-      ok     <- start(fixture, "reserve", "k1", timeout = None)
+      ok     <- start(fixture, "reserve", "k1", expiresIn = None)
       record <- fixture.repository.find(sagaId("reserve", "k1"))
     yield expect.all(ok, record.exists(_.deadline.isEmpty))
+  }
+
+  test("start stores the exact instant it is given") { fixture =>
+    // The point of taking an instant rather than a duration: this same value is stamped on the requests enqueued in
+    // this very transaction, so anything the repository did to it on the way in would put the partner and the sweeper
+    // back on separate opinions. Truncated to microseconds because that is all a timestamptz column holds.
+    val deadline = Instant.now().plusSeconds(3600).truncatedTo(ChronoUnit.MICROS)
+    for
+      _      <- truncate(fixture.pool)
+      _      <- fixture.repository.start(sagaId("reserve", "k1"), "reserve", "k1", "state-0", Some(deadline), Nil)
+      record <- fixture.repository.find(sagaId("reserve", "k1"))
+    yield expect(record.flatMap(_.deadline) == Some(deadline))
+  }
+
+  test("advance stores the exact instant it is given, and clears it when given none") { fixture =>
+    val moved = Instant.now().plusSeconds(7200).truncatedTo(ChronoUnit.MICROS)
+    val id = sagaId("reserve", "k1")
+    for
+      _         <- truncate(fixture.pool)
+      _         <- start(fixture, "reserve", "k1", Some(1.hour))
+      _         <- fixture.repository.advance(id, 0, SagaStatus.Pending, 1, "state-1", Some(moved))
+      pushed    <- fixture.repository.find(id)
+      _         <- fixture.repository.advance(id, 1, SagaStatus.Pending, 2, "state-2", None)
+      unset     <- fixture.repository.find(id)
+    yield expect.all(
+      pushed.flatMap(_.deadline) == Some(moved),
+      // `None` means no deadline, not "leave it as it was" — the runner resolves SagaDeadline.Keep to the record's own
+      // value before it gets here, so by this point the argument is always the deadline the row should end up with.
+      unset.exists(_.deadline.isEmpty),
+    )
   }
 
   test("start on an existing instance returns false and does not enqueue the request again") { fixture =>
@@ -235,7 +280,7 @@ object PostgresSagaRepositorySuite extends IOSuite:
       _       <- truncate(fixture.pool)
       expired <- startExpired(fixture, "alpha", "k1")
       _       <- start(fixture, "alpha", "k2", Some(1.hour))
-      _       <- start(fixture, "alpha", "k3", timeout = None)
+      _       <- start(fixture, "alpha", "k3", expiresIn = None)
       _       <- startExpired(fixture, "beta", "k4")
       claimed <- claimIds(fixture, "alpha")
     yield expect(claimed == List(expired))

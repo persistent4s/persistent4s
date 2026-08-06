@@ -21,8 +21,10 @@ import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.log4cats.Logger
 
-import persistent4s.{IncomingMessage, MessageCodec, MessagePublisher, MessageSubscriber, SagaHeaders}
-import persistent4s.examples.saga.contract.{AuthorizePayment, CancelPayment, PartnerReply, RequestHeaders}
+import persistent4s.{MessagePublisher, MessageSubscriber}
+import persistent4s.examples.saga.contract.{AuthorizePayment, CancelPayment, PartnerReply}
+import persistent4s.SagaParticipant
+import persistent4s.RequestContext
 
 /** A stub payment partner — just enough to exercise the fan-out saga end to end, not a real payments domain.
   *
@@ -33,63 +35,36 @@ import persistent4s.examples.saga.contract.{AuthorizePayment, CancelPayment, Par
   */
 object PaymentCommandConsumer:
 
-  private val replyCodec: MessageCodec[PartnerReply] = summon[MessageCodec[PartnerReply]]
-
   def stream[F[_]: Async: Logger](
     subscriber: MessageSubscriber[F],
     publisher: MessagePublisher[F],
     topic: String,
   ): Stream[F, Unit] =
-    subscriber.subscribe(topic, fromBeginning = true).evalMap { case (message, ack) =>
-      handle(publisher, message) *> ack
-    }
-
-  private def handle[F[_]: Async: Logger](publisher: MessagePublisher[F], message: IncomingMessage): F[Unit] =
-    message.headers.get(RequestHeaders.Kind) match
-      case Some(AuthorizePayment.Kind) =>
-        message.as[AuthorizePayment] match
-          case Left(error)    => decodeFailed(message, error)
-          case Right(command) => authorize(publisher, message, command)
-      case Some(CancelPayment.Kind) =>
-        message.as[CancelPayment] match
-          case Left(error)    => decodeFailed(message, error)
-          case Right(command) => cancel(command)
-      case other =>
-        Logger[F].error(
-          s"payment does not recognise command kind '$other' from '${message.topic}', dropping it: ${message.payload}",
-        )
-
-  private def decodeFailed[F[_]: Logger](message: IncomingMessage, error: Throwable): F[Unit] =
-    Logger[F].error(error)(
-      s"payment could not decode a command from '${message.topic}', dropping it: ${message.payload}",
-    )
+    SagaParticipant[F]
+      .replying[AuthorizePayment, PartnerReply](publisher)((ctx, command) => authorize(ctx, command))
+      .on[CancelPayment]((_, command) => cancel(command))
+      .subscribe(subscriber, topic)
 
   /** Accepts an even price, declines an odd one — arbitrary on purpose, just something a caller can pick by hand to
     * choose which branch of the saga runs.
+    *
+    * Returns the answer rather than sending it: encoding it, addressing it and publishing it are all the same in every
+    * partner, so `replying` does them. What is left is the only part that belongs to payment.
     */
   private def authorize[F[_]: Async: Logger](
-    publisher: MessagePublisher[F],
-    message: IncomingMessage,
+    ctx: RequestContext,
     command: AuthorizePayment,
-  ): F[Unit] =
-    val reply =
-      if command.price % 2 == 0 then PartnerReply.accept
+  ): F[PartnerReply] =
+    val answer =
+      if ctx.hasExpired then PartnerReply.reject("request expired")
+      else if command.price % 2 == 0 then PartnerReply.accept
       else PartnerReply.reject(s"price ${command.price} is odd")
-    for
-      _ <- Logger[F].info(
-             s"AuthorizePayment: order ${command.orderId}, customer ${command.customerId}, price ${command.price} -> " +
-               reply.reason.fold("accepted")(reason => s"declined: $reason"),
-           )
-      // `messages` on a CommandHandler asserts the same way for the same reason: this is pure code with nowhere to
-      // report an encoding failure, and PartnerReply on two fields cannot fail to encode.
-      payload = replyCodec
-                  .encode(reply)
-                  .fold(error => throw new IllegalStateException("PartnerReply must be encodable", error), identity)
-      _ <- SagaHeaders.reply(message, payload, key = Some(command.orderId.toString)) match
-             case Some(out) => publisher.publish(out)
-             case None      =>
-               Logger[F].warn(s"AuthorizePayment for order ${command.orderId} is not addressed; nobody will be answered")
-    yield ()
+    Logger[F]
+      .info(
+        s"AuthorizePayment: order ${command.orderId}, customer ${command.customerId}, price ${command.price} -> " +
+          answer.reason.fold("accepted")(reason => s"declined: $reason"),
+      )
+      .as(answer)
 
   /** Does nothing but log — there is no authorization record here to look up, so there is nothing to release, and
     * nothing a redelivered cancellation could double-undo either. No reply: this only ever arrives as part of a

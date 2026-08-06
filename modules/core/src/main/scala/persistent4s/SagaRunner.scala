@@ -16,15 +16,17 @@
 
 package persistent4s
 
+import java.time.Instant
 import java.util.UUID
 
 import scala.util.Try
-import scala.concurrent.duration.*
 
-import cats.effect.Async
+import cats.effect.{Async, Clock}
 import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.log4cats.Logger
+import scala.concurrent.duration.FiniteDuration
+import scala.concurrent.duration.DurationInt
 
 /** Drives a [[Saga]]. Three independent loops advance an instance through its life:
   *
@@ -72,9 +74,11 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
       case Some(start) =>
         val id = SagaId.instance(saga.name, start.key)
         for
+          now      <- Clock[F].realTimeInstant
+          deadline  = start.timeout.map(t => now.plusMillis(t.toMillis))
           data     <- encodeState(saga, start.data)
-          requests <- encodeRequests(saga, id, step = 0, start.request)
-          started  <- repository.start(id, saga.name, start.key, data, start.timeout, requests)
+          requests <- encodeRequests(saga, id, step = 0, start.request, deadline)
+          started  <- repository.start(id, saga.name, start.key, data, deadline, requests)
           _        <-
             if started then Logger[F].debug(s"saga '${saga.name}' started instance $id for key '${start.key}'")
             else Logger[F].debug(s"saga '${saga.name}' instance $id already exists, skipping")
@@ -85,31 +89,25 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
     * The order is deliberate. Appending first means a crash before [[SagaRepository.advance]] replays harmlessly — the
     * events carry deterministic ids and collapse on re-insert, and the commands carry an idempotency key. Advancing
     * first would risk a terminal instance whose events were never written, which nothing would ever retry.
-    *
-    * The flip side of that order is that two decisions reaching the same instance at the same step — a deadline firing
-    * just as a reply lands — both emit before either advances, and only one then wins the guard. Their emissions share
-    * a round and so share ids and idempotency keys, meaning the loser's collapse into the winner's rather than doubling
-    * up. Which of the two reached the partner first need not be the one that won the guard.
     */
   private def applyDecision[S, Req, Rep](
     saga: Saga[A, S, Req, Rep],
     record: SagaRecord,
     decision: SagaDecision[A, S, Req],
   ): F[Unit] =
-    val (status, nextStep, nextData, timeout) = decision.outcome match
-      case SagaOutcome.Continue(data, t) => (SagaStatus.Pending, record.step + 1, Some(data), t)
-      case SagaOutcome.Completed         => (SagaStatus.Completed, record.step, None, None)
-      case SagaOutcome.Compensated       => (SagaStatus.Compensated, record.step, None, None)
-      case SagaOutcome.Failed(_)         => (SagaStatus.Failed, record.step, None, None)
+    val (status, nextStep, nextData) = decision.outcome match
+      case SagaOutcome.Continue(data, _) => (SagaStatus.Pending, record.step + 1, Some(data))
+      case SagaOutcome.Completed         => (SagaStatus.Completed, record.step, None)
+      case SagaOutcome.Compensated       => (SagaStatus.Compensated, record.step, None)
+      case SagaOutcome.Failed(_)         => (SagaStatus.Failed, record.step, None)
 
-    // Emissions are keyed by round, not by the stored step. `startInstance` already used round 0, so a terminal
-    // decision keeping `record.step` would hand a compensating command the same idempotency key as the original
-    // request — and a partner deduplicating on that key would drop the compensation.
     val emissionRound = record.step + 1
 
     for
+      now      <- Clock[F].realTimeInstant
+      deadline  = nextDeadline(decision.outcome, record, now)
       data     <- nextData.fold(Async[F].pure(record.data))(encodeState(saga, _))
-      requests <- encodeRequests(saga, record.id, emissionRound, decision.messages)
+      requests <- encodeRequests(saga, record.id, emissionRound, decision.messages, deadline)
       events    = decision.events.zipWithIndex.map { case ((tags, event), ordinal) =>
                  PendingEvent(
                    payload = event,
@@ -121,17 +119,23 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
                  )
                }
       _     <- store.appendUncheckedWithMessages(requests, events)
-      moved <- repository.advance(record.id, record.step, status, nextStep, data, timeout)
+      moved <- repository.advance(record.id, record.step, status, nextStep, data, deadline)
       _     <-
         if !moved then
           Logger[F].warn(s"saga '${saga.name}' instance ${record.id} was already advanced, decision discarded")
         else
           decision.outcome match
-            // The reason is the one thing an operator wants when they find a Failed instance, and it is not persisted.
             case SagaOutcome.Failed(reason) =>
               Logger[F].warn(s"saga '${saga.name}' instance ${record.id} failed: $reason")
             case _ => Async[F].unit
     yield ()
+
+  private def nextDeadline(outcome: SagaOutcome[?], record: SagaRecord, now: Instant): Option[Instant] =
+    outcome match
+      case SagaOutcome.Continue(_, SagaDeadline.Keep)  => record.deadline
+      case SagaOutcome.Continue(_, SagaDeadline.Never) => None
+      case SagaOutcome.Continue(_, SagaDeadline.In(d)) => Some(now.plusMillis(d.toMillis))
+      case _                                       => None
 
   /** Encode each command and stamp the saga's own headers over any the caller supplied. */
   private def encodeRequests[S, Req, Rep](
@@ -139,9 +143,16 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
     id: UUID,
     step: Int,
     requests: List[SagaRequest[Req]],
+    deadline: Option[Instant],
   ): F[List[OutgoingMessage]] =
-    requests.zipWithIndex.traverse { case (request, ordinal) =>
-      saga.requestEncoder.encode(request.payload) match
+    val duplicated = requests.groupBy(_.label).collect { case (label, rs) if rs.sizeIs > 1 => label }
+    Async[F].whenA(duplicated.nonEmpty)(
+      Logger[F].warn(
+        s"saga '${saga.name}' instance $id emitted requests sharing labels ${duplicated.mkString(", ")}; " +
+          "their replies cannot be told apart",
+      ),
+    ) *> requests.zipWithIndex.traverse { case (request, ordinal) =>
+      request.encoded match
         case Left(error) =>
           Async[F].raiseError(
             new RuntimeException(s"saga '${saga.name}' failed to encode a request: ${error.getMessage}", error),
@@ -155,9 +166,10 @@ final case class SagaRunner[F[_]: Async: Logger, A <: Event] private (
               headers = request.headers ++ Map(
                 SagaHeaders.Name           -> saga.name,
                 SagaHeaders.Id             -> id.toString,
-                SagaHeaders.IdempotencyKey -> SagaRequestRef.idempotencyKey(id, step, ordinal),
+                SagaHeaders.IdempotencyKey -> SagaRequestRef.idempotencyKey(id, step, ordinal, request.label),
                 SagaHeaders.ReplyTo        -> replyTopic,
-              ),
+                SagaHeaders.RequestType    -> request.requestType,
+              ) ++ deadline.map(SagaHeaders.ExpiresAt -> _.toString),
             ),
           )
     }

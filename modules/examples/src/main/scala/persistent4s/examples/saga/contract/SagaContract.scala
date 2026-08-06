@@ -31,13 +31,6 @@ object PartnerReply:
 
   given MessageCodec[PartnerReply] = CirceMessageCodec.derived[PartnerReply]
 
-/** Headers the three services agree on, beyond the reserved `persistent4s.*` ones the runner stamps itself. */
-object RequestHeaders:
-
-  val Kind = "kind"
-
-  val ExpiresAt = "expiresAt"
-
 /** Topics services have to agree on. */
 object Topics:
 
