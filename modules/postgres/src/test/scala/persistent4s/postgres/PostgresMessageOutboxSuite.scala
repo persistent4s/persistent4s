@@ -71,6 +71,7 @@ object PostgresMessageOutboxSuite extends IOSuite:
     Resource.make {
       IO.blocking {
         val container = new PostgreSQLContainer[Nothing]("postgres:16-alpine")
+        container.withStartupTimeout(java.time.Duration.ofMinutes(2))
         container.start()
         container
       }

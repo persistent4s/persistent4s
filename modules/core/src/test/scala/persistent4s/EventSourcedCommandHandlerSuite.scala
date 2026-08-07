@@ -119,6 +119,55 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
   private val telemetry: CommandTelemetry[IO] =
     CommandTelemetry(Tracer.Implicits.noop, CommandHandlerMetrics(Counter.noop[IO, Long]))
 
+  private val ReplyTopic = "test.replies"
+
+  private val SagaInstance = "3f2a1c00-0000-0000-0000-0000000000001"
+
+  /** A request as [[SagaRunner]] would have stamped it, addressed unless 'addressed' says otherwise. */
+  private def sagaRequest(addressed: Boolean = true): RequestContext =
+    val correlation =
+      if addressed then
+        Map(
+          SagaHeaders.Name           -> "reserve",
+          SagaHeaders.Id             -> SagaInstance,
+          SagaHeaders.ReplyTo        -> ReplyTopic,
+          SagaHeaders.IdempotencyKey -> s"$SagaInstance:0:0:reserve",
+        )
+      else Map.empty
+    RequestContext(IncomingMessage("test.commands", Some("a"), "a", correlation), Instant.EPOCH)
+
+  private given MessageEncoder[String] with
+
+    def encode(message: String): Either[Throwable, String] = Right(message)
+
+  /** The encoder that cannot, for the one path where a reply's serilization fails. */
+  private val unencodableReply: MessageEncoder[String] =
+    new MessageEncoder[String]:
+      def encode(message: String): Either[Throwable, String] = Left(new RuntimeException("cannot encode the reply"))
+
+  /** Answers nothing for the command called "quiet", which is the only way to reach the `None` branch: a partner that
+    * is genuinely fire-and-forget for some commands and answers others.
+    */
+  final private case class Answering(request: RequestContext)(using MessageEncoder[String])
+      extends EventSourcedSagaCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
+
+    protected val behavior = handler(TestState(exists = false, value = 0)):
+      scope(EntityScope)(_.id)
+
+      on[Created].matching(_.id, _.id).evolve((state, event) => state.copy(exists = true, value = event.value))
+
+      on[Incremented].within(EntityScope).evolve((state, event) => state.copy(value = state.value + event.amount))
+
+      reject:
+        case (state, _) if !state.exists => missing
+
+      reply((_, command, outcome) =>
+        if command.id == "quiet" then None
+        else Some(PendingReply(outcome.fold(rejection => s"rejected:$rejection", events => s"accepted:${events.size}"))),
+      )
+
+      emit((state, command) => Incremented(command.id, state.value + 1))
+
   private val subject = new EventSourcedCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
 
     protected val behavior = handler(TestState(exists = false, value = 0)):
@@ -142,7 +191,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
 
       emit((state, command) => Incremented(command.id, state.value + 1))
 
-  private def reply(command: TestCommand, body: String): OutgoingMessage =
+  private def replyMessage(command: TestCommand, body: String): OutgoingMessage =
     OutgoingMessage(topic = "replies", key = Some(command.id), payload = body)
 
   /** Answers whoever asked, which is what `runWithMessages` exists for: the reply commits with the events, and on
@@ -161,7 +210,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
         case (state, _) if !state.exists => missing
 
       messages((_, command, outcome) =>
-        Right(List(reply(command, outcome.fold(_.toString, _.map(_.toString).mkString(","))))),
+        Right(List(replyMessage(command, outcome.fold(_.toString, _.map(_.toString).mkString(","))))),
       )
 
       emit((state, command) => Incremented(command.id, state.value + 1))
@@ -1004,7 +1053,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
         on[Incremented].within(EntityScope).evolve((state, event) => state.copy(value = state.value + event.amount))
         messages { (_, command, _) =>
           answers += 1
-          Right(List(reply(command, s"answer-$answers")))
+          Right(List(replyMessage(command, s"answer-$answers")))
         }
         emit((state, command) => Incremented(command.id, state.value + 1))
 
@@ -1052,4 +1101,91 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     result.failed.toOption match
       case Some(error: IllegalArgumentException) => expect(error.getMessage.contains("messages at most once"))
       case other                                 => failure(s"Expected duplicate messages error, got $other")
+  }
+
+  test("a saga handler's reply is encoded, addressed and comitted alongside its events") {
+    val tags = Set(EntityScope("a").toTag)
+    val store = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)))
+
+    Answering(sagaRequest())
+      .runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .map { result =>
+        val sent = store.enqueued.flatten
+        expect(result.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
+          expect(store.appended.exists(_._3.map(_.payload) == List(Incremented("a", 3)))) and
+          expect(sent.map(_.payload) == List("accepted:1")) and
+          expect(sent.map(_.topic) == List(ReplyTopic)) and
+          expect(sent.map(_.key) == List(Some(SagaInstance))) and
+          expect(sent.forall(_.headers.get(SagaHeaders.Id).contains(SagaInstance))) and
+          expect(sent.forall(_.headers.get(SagaHeaders.InReplyTo).contains(s"$SagaInstance:0:0:reserve")))
+      }
+  }
+
+  test("a saga handler answers a rejection too, in the transaction that writes no event") {
+    val store = new RecordingTransactionalStore(Nil)
+
+    Answering(sagaRequest())
+      .runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .map { result =>
+        expect(result == Left(TestRejection.Missing)) and
+          expect(store.appended.isEmpty) and
+          expect(store.enqueued.flatten.map(_.payload) == List("rejected:Missing"))
+      }
+  }
+
+  test("a saga handler that answers nothing enqueues nothing, and still commits its events") {
+    val tags = Set(EntityScope("quiet").toTag)
+    val store = new RecordingTransactionalStore(List(envelope(1L, Created("quiet", 2), tags)))
+
+    Answering(sagaRequest())
+      .runWithMessages[IO](TestCommand("quiet"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .map { result =>
+        expect(result.map(_.map(_.payload)) == Right(List(Incremented("quiet", 3)))) and
+          expect(store.appended.nonEmpty) and
+          expect(store.enqueued.flatten.isEmpty)
+      }
+  }
+
+  test("a saga handler asked to answer a request that nominates nowhere send nothing, and still commits") {
+    val tags = Set(EntityScope("a").toTag)
+    val store = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)))
+
+    Answering(sagaRequest(addressed = false))
+      .runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .map { result =>
+        expect(result.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
+          expect(store.appended.nonEmpty) and
+          expect(store.enqueued.flatten.isEmpty)
+      }
+  }
+
+  test("a reply that cannot be encoded aborts the command: no events, no messages") {
+    val tags = Set(EntityScope("a").toTag)
+    val store = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)))
+
+    Answering(sagaRequest())(using unencodableReply)
+      .runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .attempt
+      .map { result =>
+        expect(result.isLeft) and
+          expect(store.appended.isEmpty) and
+          expect(store.enqueued.isEmpty)
+      }
+  }
+
+  pureTest("a behavior cannot declare both reply and messages") {
+    val result = Try {
+      new EventSourcedSagaCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        val request: RequestContext = sagaRequest()
+        protected val behavior = handler(()):
+          tags(_ => Set(Tag("entity", "a")))
+          reply((_, _, _) => None)
+          messages((_, _, _) => Right(Nil))
+          on[LegacyObserved].ignore
+          emit(_ => LegacyObserved("a"))
+    }
+
+    result.failed.toOption match
+      case Some(error: IllegalArgumentException) => expect(error.getMessage.contains("messages at most once"))
+      case other                                 => failure(s"Expected a duplicate messages error, got $other")
   }

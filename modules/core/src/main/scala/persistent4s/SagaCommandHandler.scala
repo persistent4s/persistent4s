@@ -58,3 +58,30 @@ trait SagaCommandHandler[C, S, E <: Event] extends CommandHandler[C, S, E]:
       case None          => Right(Nil)
       case Some(pending) =>
         pending.encoded.map(payload => SagaHeaders.reply(request.message, payload, headers = pending.headers).toList)
+
+/** An [[EventSourcedCommandHandler]] whose command arrived as a saga request, and which answers it.
+  *
+  * The reply is enqueued in the transaction that appends the events, which is exactly why [[SagaParticipant]] cannot
+  * send it afterwards: "the stock is reserved" and "I told them it is reserved" have to become true together, or a
+  * crash between the two strands the asking saga until its deadline.
+  */
+trait EventSourcedSagaCommandHandler[C, S, A <: Event, R] extends EventSourcedCommandHandler[C, S, A, R]:
+
+  /** The request being answered: the address to reply to, and the clock reading that decides whether it is stale. */
+  def request: RequestContext
+
+  /** What to answer, or `None` to answer nothing. Declares the behavior's `messages`, so a behavior cannot use both.
+    *
+    * Yields nothing when the request nominated nowhere to answer — a command from something that is not a saga, which
+    * is legitimate. That is silent here on purpose: this is pure code with no logger, and [[SagaParticipant]] has
+    * already warned about the unaddressed request before dispatching it.
+    */
+  final protected def reply(
+    resolve: (S, C, Either[R, List[A]]) => Option[PendingReply],
+  )(using collector: CommandBehaviorCollector[C, S, A, R]): Unit =
+    messages((state, command, outcome) =>
+      resolve(state, command, outcome) match
+        case None          => Right(Nil)
+        case Some(pending) =>
+          pending.encoded.map(payload => SagaHeaders.reply(request.message, payload, headers = pending.headers).toList),
+    )
