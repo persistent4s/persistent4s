@@ -121,3 +121,32 @@ object CommandRuntime:
   /** Allow existing applications that only provide an EventStore to use typed command handlers without extra wiring. */
   given fromEventStore[F[_], A <: Event](using eventStore: EventStore[F, A]): CommandRuntime[F, A] =
     eventStoreOnly(eventStore)
+
+/** A [[CommandRuntime]] whose store can also enqueue [[OutgoingMessage]]s in the transaction that appends events.
+  *
+  * A distinct type rather than an optional field on [[CommandRuntime]], so a service wired without a transactional
+  * store fails to compile instead of failing on its first request. [[plain]] exists because a service usually has both
+  * kinds of handler: one that answers a saga, and local commands that answer nobody.
+  */
+final case class TransactionalCommandRuntime[F[_], A <: Event](
+  eventStore: EventStore[F, A] & TransactionalMessages[F, A],
+  snapshots: Option[CommandSnapshotStore[F]] = None,
+  telemetry: Option[CommandTelemetry[F]] = None,
+):
+
+  /** This runtime seen as an ordinary one, for handlers that enqueue nothing. */
+  val plain: CommandRuntime[F, A] = CommandRuntime(eventStore, snapshots, telemetry)
+
+  /** Execute `command` with `handler`, enqueueing its messages in the appending transaction. */
+  def execute[C, S, R](
+    handler: EventSourcedCommandHandler[C, S, A, R],
+    command: C,
+  )(using Concurrent[F]): F[Either[R, List[EventEnvelope[A]]]] =
+    handler.runWithMessages(command)(using summon[Concurrent[F]], this)
+
+  /** Execute a command for its outcome, discarding accepted events but preserving the typed rejection. */
+  def executeUnit[C, S, R](
+    handler: EventSourcedCommandHandler[C, S, A, R],
+    command: C,
+  )(using Concurrent[F]): F[Either[R, Unit]] =
+    execute(handler, command).map(_.void)

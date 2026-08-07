@@ -142,6 +142,30 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
 
       emit((state, command) => Incremented(command.id, state.value + 1))
 
+  private def reply(command: TestCommand, body: String): OutgoingMessage =
+    OutgoingMessage(topic = "replies", key = Some(command.id), payload = body)
+
+  /** Answers whoever asked, which is what `runWithMessages` exists for: the reply commits with the events, and on
+    * rejection it is all that commits.
+    */
+  private val answering = new EventSourcedCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
+
+    protected val behavior = handler(TestState(exists = false, value = 0)):
+      scope(EntityScope)(_.id)
+
+      on[Created].matching(_.id, _.id).evolve((state, event) => state.copy(exists = true, value = event.value))
+
+      on[Incremented].within(EntityScope).evolve((state, event) => state.copy(value = state.value + event.amount))
+
+      reject:
+        case (state, _) if !state.exists => missing
+
+      messages((_, command, outcome) =>
+        Right(List(reply(command, outcome.fold(_.toString, _.map(_.toString).mkString(","))))),
+      )
+
+      emit((state, command) => Incremented(command.id, state.value + 1))
+
   private def envelope[E <: TestEvent: EventSchema](
     position: Long,
     payload: E,
@@ -176,7 +200,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     *   how many appends lose an optimistic-concurrency conflict before one is allowed through, so the retry loop is
     *   observable from outside via [[readCount]] and [[appendAttempts]]
     */
-  final private class RecordingStore(
+  private class RecordingStore(
     history: List[EventEnvelope[TestEvent]],
     readFailure: Option[Throwable] = None,
     schema: TestEvent => Option[EventStorageSchema] = _ => None,
@@ -248,6 +272,33 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
         ),
         pending.payload,
       )
+
+  final private class RecordingTransactionalStore(
+    history: List[EventEnvelope[TestEvent]] = Nil,
+    appendConflicts: Int = 0,
+  ) extends RecordingStore(history, appendConflicts = appendConflicts)
+      with TransactionalMessages[IO, TestEvent]:
+
+    var enqueued: List[List[OutgoingMessage]] = Nil
+
+    private def record(messages: List[OutgoingMessage]): IO[Unit] =
+      IO { enqueued = enqueued :+ messages }
+
+    def appendWithMessages(
+      eventFilter: EventFilter,
+      expectedIndex: Long,
+      messages: List[OutgoingMessage],
+      events: List[PendingEvent[TestEvent]]*,
+    ): IO[List[EventEnvelope[TestEvent]]] =
+      val flattened = events.toList.flatten
+      if flattened.isEmpty then record(messages).as(List.empty)
+      else append(eventFilter, expectedIndex, flattened).flatTap(_ => record(messages))
+
+    def appendUncheckedWithMessages(
+      messages: List[OutgoingMessage],
+      events: List[PendingEvent[TestEvent]]*,
+    ): IO[List[EventEnvelope[TestEvent]]] =
+      record(messages) *> appendUnchecked(events*)
 
   final private class RecordingSnapshotStore(initial: Option[StoredCommandSnapshot]) extends CommandSnapshotStore[IO]:
 
@@ -818,7 +869,7 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       }
   }
 
-  test("a throwing headers resolver fails the command instead of the fibre") {
+  test("a throwing headers resolver fails the command instead of the fiber") {
     val expected = new RuntimeException("headers failure")
     val failingHeaders = new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
       protected val behavior = handler(()):
@@ -874,4 +925,131 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
           // The committed attempt is the second, and all three of its events share that one map.
           expect(store.appended.exists(_._3.forall(_.headers == Map("attempt" -> "2"))))
       }
+  }
+
+  test("runWithMessages commits the decided events and the handler's answer together") {
+    val tags = Set(EntityScope("a").toTag)
+    val store = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)))
+    val runtime = TransactionalCommandRuntime(store, None, Some(telemetry))
+
+    answering.runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], runtime).map { result =>
+      expect(result.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
+        expect(store.appended.exists(_._3.map(_.payload) == List(Incremented("a", 3)))) and
+        expect(store.enqueued.flatten.map(_.payload) == List("Incremented(a,3)"))
+    }
+  }
+
+  /** The reason the rejection is a `Left` rather than a raised error: it wrote no events, but it did answer, and the
+    * caller has to be able to tell that from a partner that died.
+    */
+  test("a rejected command still answers, and writes no event") {
+    val store = new RecordingTransactionalStore(Nil)
+
+    answering
+      .runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .map { result =>
+        expect(result == Left(TestRejection.Missing)) and
+          expect(store.appended.isEmpty) and
+          expect(store.enqueued.flatten.map(_.payload) == List("Missing"))
+      }
+  }
+
+  test("a handler declaring no messages enqueues nothing, and the same runtime serves it through plain") {
+    val tags = Set(EntityScope("a").toTag)
+    val viaMessages = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)))
+    val viaPlain = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)))
+
+    for
+      answered <- subject.runWithMessages[IO](TestCommand("a"))(using
+                    summon[Concurrent[IO]],
+                    TransactionalCommandRuntime(viaMessages),
+                  )
+      // A service with both kinds of handler builds one runtime and reaches for `plain` for the ones that answer nobody.
+      plain <-
+        subject.run[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(viaPlain).plain)
+    yield expect(answered.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
+      expect(viaPlain.enqueued.isEmpty)
+  }
+
+  test("a handler that cannot encode its answer writes nothing at all") {
+    val encodingFailure = new RuntimeException("cannot encode the reply")
+    val tags = Set(EntityScope("a").toTag)
+    val unencodable = new EventSourcedCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
+      protected val behavior = handler(TestState(exists = false, value = 0)):
+        scope(EntityScope)(_.id)
+        on[Created].matching(_.id, _.id).evolve((state, event) => state.copy(exists = true, value = event.value))
+        on[Incremented].within(EntityScope).ignore
+        messages((_, _, _) => Left(encodingFailure))
+        emit((state, command) => Incremented(command.id, state.value + 1))
+
+    val store = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)))
+
+    unencodable
+      .runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .attempt
+      .map { result =>
+        expect(result == Left(encodingFailure)) and
+          expect(store.appended.isEmpty) and
+          expect(store.enqueued.isEmpty)
+      }
+  }
+
+  test("the loser of a conflict recomputes its answer and leaves no stale message behind") {
+    var answers = 0
+    val tags = Set(EntityScope("a").toTag)
+    val retrying = new EventSourcedCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
+      protected val behavior = handler(TestState(exists = false, value = 0)):
+        scope(EntityScope)(_.id)
+        on[Created].matching(_.id, _.id).evolve((state, event) => state.copy(exists = true, value = event.value))
+        on[Incremented].within(EntityScope).evolve((state, event) => state.copy(value = state.value + event.amount))
+        messages { (_, command, _) =>
+          answers += 1
+          Right(List(reply(command, s"answer-$answers")))
+        }
+        emit((state, command) => Incremented(command.id, state.value + 1))
+
+    val store = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)), appendConflicts = 1)
+
+    retrying
+      .runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .map { result =>
+        expect(result.map(_.map(_.payload)) == Right(List(Incremented("a", 3)))) and
+          expect(store.appendAttempts == 2) and
+          expect(answers == 2) and
+          expect(store.enqueued.flatten.map(_.payload) == List("answer-2"))
+      }
+  }
+
+  test("a throwing messages resolver fails the command instead of the fiber") {
+    val expected = new RuntimeException("messages failure")
+    val tags = Set(EntityScope("a").toTag)
+    val failingMessages = new EventSourcedCommandHandler[TestCommand, TestState, TestEvent, TestRejection]:
+      protected val behavior = handler(TestState(exists = false, value = 0)):
+        scope(EntityScope)(_.id)
+        on[Created].matching(_.id, _.id).evolve((state, event) => state.copy(exists = true, value = event.value))
+        on[Incremented].within(EntityScope).ignore
+        messages((_, _, _) => throw expected)
+        emit((state, command) => Incremented(command.id, state.value + 1))
+    val store = new RecordingTransactionalStore(List(envelope(1L, Created("a", 2), tags)))
+
+    failingMessages
+      .runWithMessages[IO](TestCommand("a"))(using summon[Concurrent[IO]], TransactionalCommandRuntime(store))
+      .attempt
+      .map(result => expect(result == Left(expected)) and expect(store.appended.isEmpty))
+  }
+
+  pureTest("messages declared more than once are rejected") {
+    val result = Try {
+      new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        protected val behavior = handler(()):
+          tags(_ => Set(Tag("entity", "a")))
+          messages((_, _, _) => Right(Nil))
+          messages((_, _, _) => Right(Nil))
+          on[LegacyObserved].ignore
+          emit(_ => LegacyObserved("a"))
+    }
+
+    result.failed.toOption match
+      case Some(error: IllegalArgumentException) => expect(error.getMessage.contains("messages at most once"))
+      case other                                 => failure(s"Expected duplicate messages error, got $other")
   }

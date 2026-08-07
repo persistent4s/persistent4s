@@ -45,6 +45,7 @@ import persistent4s.{
   ProjectionCheckpoint,
   ProjectionRuntime,
 }
+import persistent4s.TransactionalCommandRuntime
 
 sealed trait PostgresModuleError extends Throwable
 
@@ -128,6 +129,9 @@ object PostgresModule:
 
     val commandRuntime: CommandRuntime[F, A] =
       CommandRuntime(eventStore, Some(snapshotStore), commandTelemetry)
+
+    val transactionalCommandRuntime: TransactionalCommandRuntime[F, A] =
+      TransactionalCommandRuntime(transactionalStore, Some(snapshotStore), commandTelemetry)
 
     def projectionRuntime(using Async[F], Logger[F], Tracer[F], Meter[F]): ProjectionRuntime[F, A] =
       ProjectionRuntime(DefaultProjector(eventStore, checkpoint))

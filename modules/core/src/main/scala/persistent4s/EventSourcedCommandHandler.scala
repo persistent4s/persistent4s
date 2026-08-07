@@ -123,6 +123,7 @@ final class CommandBehavior[C, S, A <: Event, R] private[persistent4s] (
   private[persistent4s] val initial: S,
   private val resolveLegacyTags: Option[C => Set[Tag]],
   private val resolveHeaders: Option[C => Map[String, String]],
+  private val resolveMessages: Option[(S, C, Either[R, List[A]]) => Either[Throwable, List[OutgoingMessage]]],
   private val scopes: List[CommandScopeResolver[C]],
   private val handlers: List[CommandEventHandler[C, S, A]],
   private val rejection: PartialFunction[(S, C), R],
@@ -149,6 +150,13 @@ final class CommandBehavior[C, S, A <: Event, R] private[persistent4s] (
 
   private[persistent4s] def headers(command: C): Map[String, String] =
     resolveHeaders.fold(Map.empty[String, String])(_(command))
+
+  private[persistent4s] def messages(
+    state: S,
+    command: C,
+    outcome: Either[R, List[A]],
+  ): Either[Throwable, List[OutgoingMessage]] =
+    resolveMessages.fold(Right(Nil): Either[Throwable, List[OutgoingMessage]])(_(state, command, outcome))
 
   private[persistent4s] def evolve(command: C, state: S, event: A): S =
     handlers.find(_.accepts(event)).fold(state)(_.evolve(command, state, event))
@@ -197,6 +205,8 @@ final class CommandBehaviorCollector[C, S, A <: Event, R] private[persistent4s] 
 
   private var resolveHeaders: Option[C => Map[String, String]] = None
 
+  private var resolveMessages: Option[(S, C, Either[R, List[A]]) => Either[Throwable, List[OutgoingMessage]]] = None
+
   private var rejection: PartialFunction[(S, C), R] = PartialFunction.empty
 
   private var emitEvents: Option[(S, C) => List[CommandEmission[A]]] = None
@@ -214,6 +224,12 @@ final class CommandBehaviorCollector[C, S, A <: Event, R] private[persistent4s] 
   private[persistent4s] def setHeaders(resolve: C => Map[String, String]): Unit =
     require(resolveHeaders.isEmpty, "Command behavior must declare headers at most once")
     resolveHeaders = Some(resolve)
+
+  private[persistent4s] def setMessages(
+    resolve: (S, C, Either[R, List[A]]) => Either[Throwable, List[OutgoingMessage]],
+  ): Unit =
+    require(resolveMessages.isEmpty, "Command behavior must declare messages at most once")
+    resolveMessages = Some(resolve)
 
   private[persistent4s] def addScope[K](scope: Scope[K], key: C => K): Unit =
     addScopes(scope, command => key(command) :: Nil)
@@ -273,7 +289,7 @@ final class CommandBehaviorCollector[C, S, A <: Event, R] private[persistent4s] 
     require(duplicateEventTypes.isEmpty, s"Duplicate command event handlers: ${duplicateEventTypes.mkString(", ")}")
 
     new CommandBehavior(
-      initial, resolveTags, resolveHeaders, commandScopes.toList, allHandlers, rejection,
+      initial, resolveTags, resolveHeaders, resolveMessages, commandScopes.toList, allHandlers, rejection,
       emitEvents.getOrElse(throw new IllegalArgumentException("Command behavior must declare an emitter")),
       snapshotDefinition,
     )
@@ -436,6 +452,21 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   ): Unit =
     collector.setHeaders(resolve)
 
+  /** Messages enqueued in the transaction that appends this command's events, so an event and the message it causes
+    * become visible together or not at all. Only [[runWithMessages]] consults this; [[run]] ignores it.
+    *
+    * `outcome` is `Left` when a [[reject]] rule turned the command down. Answering precisely when it writes nothing is
+    * the whole job of a partner that can say no: a rejection the caller never hears about is indistinguishable from a
+    * partner that has died, and costs the asker its full deadline to find out.
+    *
+    * Returning `Left` aborts everything: no events, no messages. It exists because these messages have to be
+    * serialized, and a pure function with no error channel could only throw.
+    */
+  final protected def messages(
+    resolve: (S, C, Either[R, List[A]]) => Either[Throwable, List[OutgoingMessage]],
+  )(using collector: CommandBehaviorCollector[C, S, A, R]): Unit =
+    collector.setMessages(resolve)
+
   /** Start a typed state transition declaration. High-level handlers require an explicit stable [[EventSchema]]. A
     * single typed scope shared by the command and event is matched automatically. No shared scope requires an explicit
     * `.allEvents`, while multiple shared scopes require `.within(scope)` or `.withinAll`.
@@ -553,6 +584,9 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
 
   final def headers(command: C): Map[String, String] = behavior.headers(command)
 
+  final def messages(state: S, command: C, outcome: Either[R, List[A]]): Either[Throwable, List[OutgoingMessage]] =
+    behavior.messages(state, command, outcome)
+
   final def evolve(command: C, state: S, event: A): S = behavior.evolve(command, state, event)
 
   final def validate(state: S, command: C): Either[R, Unit] = behavior.validate(state, command)
@@ -565,20 +599,43 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     runtime: CommandRuntime[F, A],
   ): F[Either[R, List[EventEnvelope[A]]]] =
     val cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
-    val execute =
-      suspend(behavior.selection(command)).flatMap(runWithRetry(command, _, maxRetries, cmdAttr))
-    runtime.telemetry.fold(execute) { telemetry =>
-      telemetry.tracer
+    traced(runtime.telemetry, cmdAttr) {
+      suspend(behavior.selection(command)).flatMap { selection =>
+        withRetry(runtime.telemetry, cmdAttr, maxRetries)(attempt(command, selection))
+      }
+    }
+
+  /** [[run]] plus the behavior's [[messages]], appended and enqueued in one transaction.
+    *
+    * If the command write no event, the rejection message is committed.
+    */
+  final def runWithMessages[F[_]: Concurrent](command: C)(using
+    runtime: TransactionalCommandRuntime[F, A],
+  ): F[Either[R, List[EventEnvelope[A]]]] =
+    val cmdAttr = Attribute("command.type", command.getClass.getSimpleName)
+    traced(runtime.telemetry, cmdAttr) {
+      suspend(behavior.selection(command)).flatMap { selection =>
+        withRetry(runtime.telemetry, cmdAttr, maxRetries)(attemptWithMessages(command, selection))
+      }
+    }
+
+  private def traced[F[_], B](
+    telemetry: Option[CommandTelemetry[F]],
+    cmdAttr: Attribute[String],
+  )(body: F[B]): F[B] =
+    telemetry.fold(body) { t =>
+      t.tracer
         .spanBuilder("persistent4s.commandhandler.handle")
         .addAttribute(cmdAttr)
         .build
-        .surround(execute)
+        .surround(body)
     }
 
-  private def countRetry[F[_]: Concurrent](cmdAttr: Attribute[String])(using
-    runtime: CommandRuntime[F, A],
+  private def countRetry[F[_]: Concurrent](
+    telemetry: Option[CommandTelemetry[F]],
+    cmdAttr: Attribute[String],
   ): F[Unit] =
-    runtime.telemetry.traverse_(_.metrics.retries.add(1L, cmdAttr))
+    telemetry.traverse_(_.metrics.retries.add(1L, cmdAttr))
 
   /** Execute a command and translate only its typed domain rejection into an application error. Existing failed effects
     * (storage, decoding and concurrency failures) pass through unchanged.
@@ -594,15 +651,67 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     eventCount: Long,
   )
 
-  private def runWithRetry[F[_]: Concurrent](
+  final private case class ReplayedCommand(
+    state: S,
+    index: Long,
+    validation: Either[R, Unit],
+  )
+
+  private def retryable: PartialFunction[Throwable, Throwable] = { case conflict: IndexConflictException =>
+    RetryableCommandAppendConflict(conflict)
+  }
+
+  private def readFilter(selection: ResolvedCommandSelection): EventFilter =
+    val readEventTypes =
+      if selection.scopeBased || readAllEventTypes then Set.empty[EventTypeName]
+      else behavior.eventTypes
+    EventFilter(readEventTypes, selection.tags)
+
+  /** Everything both commit paths share: resume from a snapshot, replay, cache the caught-up state, validate. The state
+    * is returned even when validation rejects, because a handler that answers a caller needs it to say why.
+    */
+  private def replay[F[_]: Concurrent](
     command: C,
     selection: ResolvedCommandSelection,
-    retriesLeft: Int,
+    filter: EventFilter,
+    fingerprint: String,
+  )(using runtime: CommandRuntime[F, A]): F[ReplayedCommand] =
+    for
+      start      <- loadSnapshot(command, selection, filter, fingerprint)
+      envelopes  <- runtime.eventStore.readFrom(start.globalPosition, filter).compile.toList
+      state      <- suspend(envelopes.foldLeft(start.state)((current, event) => behavior.evolve(command, current, event)))
+      index       = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(start.globalPosition)
+      eventCount  = start.eventCount + envelopes.size
+      _          <- saveSnapshotIfDue(command, selection, fingerprint, start.eventCount, state, index, eventCount)
+      validation <- suspend(behavior.validate(state, command))
+    yield ReplayedCommand(state, index, validation)
+
+  /** Scope checks, storage-schema checks and headers, in one place so the two commit paths cannot disagree. */
+  private def buildEvents[F[_]: Concurrent](
+    command: C,
+    decided: List[(Set[Tag], A)],
+  )(using runtime: CommandRuntime[F, A]): F[List[PendingEvent[A]]] =
+    suspend {
+      val eventHeaders = behavior.headers(command)
+      decided.map { (tags, event) =>
+        val description = behavior.describe(event)
+        val declared = EventStorageSchema(description.eventType, description.version)
+        runtime.eventStore.storageSchema(event).foreach { storage =>
+          if storage != declared then throw EventSchemaMismatch(declared, storage, event.getClass.getName)
+        }
+        PendingEvent(payload = event, tags = tags, eventType = description.eventType, isExternal = false, id = None,
+          headers = eventHeaders)
+      }
+    }
+
+  private def withRetry[F[_]: Concurrent, B](
+    telemetry: Option[CommandTelemetry[F]],
     cmdAttr: Attribute[String],
-  )(using runtime: CommandRuntime[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
-    attempt(command, selection).handleErrorWith {
+    retriesLeft: Int,
+  )(attempt: => F[B]): F[B] =
+    attempt.handleErrorWith {
       case RetryableCommandAppendConflict(_) if retriesLeft > 0 =>
-        countRetry(cmdAttr) *> runWithRetry(command, selection, retriesLeft - 1, cmdAttr)
+        countRetry(telemetry, cmdAttr) *> withRetry(telemetry, cmdAttr, retriesLeft - 1)(attempt)
       case RetryableCommandAppendConflict(conflict) =>
         Concurrent[F].raiseError(conflict)
       case error => Concurrent[F].raiseError(error)
@@ -612,46 +721,53 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     command: C,
     selection: ResolvedCommandSelection,
   )(using runtime: CommandRuntime[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
-    val readEventTypes =
-      if selection.scopeBased || readAllEventTypes then Set.empty[EventTypeName]
-      else behavior.eventTypes
-    val filter = EventFilter(readEventTypes, selection.tags)
+    val filter = readFilter(selection)
     val fingerprint = filterFingerprint(behavior.eventSchemas, selection.tags)
 
-    for
-      start      <- loadSnapshot(command, selection, filter, fingerprint)
-      envelopes  <- runtime.eventStore.readFrom(start.globalPosition, filter).compile.toList
-      state      <- suspend(envelopes.foldLeft(start.state)((current, event) => behavior.evolve(command, current, event)))
-      index       = envelopes.lastOption.map(_.metadata.globalPosition).getOrElse(start.globalPosition)
-      eventCount  = start.eventCount + envelopes.size
-      _          <- saveSnapshotIfDue(command, selection, fingerprint, start.eventCount, state, index, eventCount)
-      validation <- suspend(behavior.validate(state, command))
-      result     <- validation match
-                  case Left(rejection) => Concurrent[F].pure(Left(rejection))
-                  case Right(_)        =>
-                    for
-                      decided <- suspend(behavior.decide(state, command, selection))
-                      events  <- suspend {
-                                  val eventHeaders = behavior.headers(command)
-                                  decided.map { (tags, event) =>
-                                    val description = behavior.describe(event)
-                                    val declared = EventStorageSchema(description.eventType, description.version)
-                                    runtime.eventStore.storageSchema(event).foreach { storage =>
-                                      if storage != declared then
-                                        throw EventSchemaMismatch(declared, storage, event.getClass.getName)
-                                    }
-                                    PendingEvent(payload = event, tags = tags, eventType = description.eventType,
-                                      isExternal = false, id = None, headers = eventHeaders)
-                                  }
-                                }
+    replay(command, selection, filter, fingerprint).flatMap { replayed =>
+      replayed.validation match
+        case Left(rejection) => Concurrent[F].pure(Left(rejection))
+        case Right(_)        =>
+          for
+            decided  <- suspend(behavior.decide(replayed.state, command, selection))
+            events   <- buildEvents(command, decided)
+            appended <- runtime.eventStore.append(filter, replayed.index, events).adaptError(retryable)
+          yield Right(appended)
+    }
 
-                      appended <- runtime.eventStore
-                                    .append(filter, index, events)
-                                    .adaptError { case conflict: IndexConflictException =>
-                                      RetryableCommandAppendConflict(conflict)
-                                    }
-                    yield Right(appended)
-    yield result
+  /** [[attempt]] with the behavior's messages enqueued in the same transaction. Interleaved rather than composed with
+    * [[attempt]], because the messages are consulted on both outcomes and on the rejected one they are all that gets
+    * written.
+    */
+  private def attemptWithMessages[F[_]: Concurrent](
+    command: C,
+    selection: ResolvedCommandSelection,
+  )(using runtime: TransactionalCommandRuntime[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
+    given CommandRuntime[F, A] = runtime.plain
+
+    val filter = readFilter(selection)
+    val fingerprint = filterFingerprint(behavior.eventSchemas, selection.tags)
+
+    replay(command, selection, filter, fingerprint).flatMap { replayed =>
+      replayed.validation match
+        case Left(rejection) =>
+          // No events, so there is no local invariant to protect: `appendWithMessages` skips the conflict check and the
+          // rejection's message is enqueued alone. Deliberately not adapted to a retryable conflict — a store that
+          // conflicts here has broken the TransactionalMessages contract, and surfacing that beats retrying around it.
+          for
+            outgoing <- suspend(behavior.messages(replayed.state, command, Left(rejection))).rethrow
+            _        <- runtime.eventStore.appendWithMessages(filter, replayed.index, outgoing)
+          yield Left(rejection)
+        case Right(_) =>
+          for
+            decided  <- suspend(behavior.decide(replayed.state, command, selection))
+            outgoing <- suspend(behavior.messages(replayed.state, command, Right(decided.map(_._2)))).rethrow
+            events   <- buildEvents(command, decided)
+            appended <- runtime.eventStore
+                          .appendWithMessages(filter, replayed.index, outgoing, events)
+                          .adaptError(retryable)
+          yield Right(appended)
+    }
 
   private def loadSnapshot[F[_]: Concurrent](
     command: C,
