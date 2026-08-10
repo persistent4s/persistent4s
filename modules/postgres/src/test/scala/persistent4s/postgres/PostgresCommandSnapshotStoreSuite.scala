@@ -23,7 +23,6 @@ import cats.syntax.all.*
 
 import persistent4s.{SnapshotId, StoredCommandSnapshot}
 
-import org.testcontainers.containers.PostgreSQLContainer
 import skunk.Session
 import weaver.IOSuite
 
@@ -34,8 +33,7 @@ object PostgresCommandSnapshotStoreSuite extends IOSuite:
   type Res = PostgresCommandSnapshotStore[IO]
 
   override def sharedResource: Resource[IO, Res] =
-    postgresContainerResource.flatMap { container =>
-      val config = postgresConfig(container)
+    PostgresContainer.resource(maxConnections = 4).flatMap { config =>
       Session
         .Builder[IO]
         .withHost(config.host)
@@ -48,26 +46,6 @@ object PostgresCommandSnapshotStoreSuite extends IOSuite:
             .eval(pool.use(_.execute(PostgresCommandSnapshotStore.createTableCommand).void))
             .as(PostgresCommandSnapshotStore.make(pool))
         }
-    }
-
-  private type Container = PostgreSQLContainer[Nothing]
-
-  private def postgresConfig(container: Container): PostgresConfig =
-    PostgresConfig(
-      host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
-      password = container.getPassword, database = container.getDatabaseName, maxConnections = 4,
-    )
-
-  private def postgresContainerResource: Resource[IO, Container] =
-    Resource.make {
-      IO.blocking {
-        val container = new PostgreSQLContainer[Nothing]("postgres:16-alpine")
-        container.withStartupTimeout(java.time.Duration.ofMinutes(2))
-        container.start()
-        container
-      }
-    } { container =>
-      IO.blocking(container.stop()).handleErrorWith(_ => IO.unit)
     }
 
   private def freshSnapshotId(prefix: String): IO[SnapshotId] =

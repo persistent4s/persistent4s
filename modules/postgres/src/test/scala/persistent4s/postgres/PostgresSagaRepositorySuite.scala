@@ -25,7 +25,6 @@ import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import io.circe.{Decoder, Encoder}
 import io.circe.syntax.*
-import org.testcontainers.containers.PostgreSQLContainer
 import skunk.*
 import skunk.codec.all.*
 import skunk.implicits.*
@@ -61,8 +60,6 @@ object PostgresSagaRepositorySuite extends IOSuite:
 
   final case class TestEvent(value: String) extends Event derives Encoder, Decoder
 
-  private type Container = PostgreSQLContainer[Nothing]
-
   /** Short enough that a test can watch a claim expire, long enough that a claim survives a handler doing real work. */
   private val ClaimTtl: FiniteDuration = 2.seconds
 
@@ -71,25 +68,8 @@ object PostgresSagaRepositorySuite extends IOSuite:
     decodeEvent = (_, json) => json.as[TestEvent].left.map(error => error: Throwable),
   )
 
-  private def postgresConfig(container: Container): PostgresConfig =
-    PostgresConfig(
-      host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
-      password = container.getPassword, database = container.getDatabaseName, maxConnections = 16,
-    )
-
-  private def postgresContainerResource: Resource[IO, Container] =
-    Resource.make {
-      IO.blocking {
-        val container = new PostgreSQLContainer[Nothing]("postgres:16-alpine")
-        container.withStartupTimeout(java.time.Duration.ofMinutes(2))
-        container.start()
-        container
-      }
-    }(container => IO.blocking(container.stop()).handleErrorWith(_ => IO.unit))
-
   override def sharedResource: Resource[IO, Fixture] =
-    postgresContainerResource.flatMap { container =>
-      val config = postgresConfig(container)
+    PostgresContainer.resource().flatMap { config =>
       for
         // Built for its DDL: enableSaga creates saga_instances and, because start() enqueues through it, message_outbox.
         _    <- PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec, enableSaga = true)

@@ -24,7 +24,6 @@ import cats.effect.{IO, Ref, Resource}
 import cats.syntax.all.*
 import fs2.Stream
 import io.circe.{Decoder, Encoder}
-import org.testcontainers.containers.PostgreSQLContainer
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.noop.NoOpLogger
 import skunk.*
@@ -520,42 +519,24 @@ object SagaRunnerSuite extends IOSuite:
 
   // ----- fixture -----
 
-  private type Container = PostgreSQLContainer[Nothing]
-
-  private def postgresConfig(container: Container): PostgresConfig =
-    PostgresConfig(
-      host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
-      password = container.getPassword, database = container.getDatabaseName, maxConnections = 16,
-    )
-
   override def sharedResource: Resource[IO, Fixture] =
-    Resource
-      .make(
-        IO.blocking {
-          val container = new PostgreSQLContainer[Nothing]("postgres:16-alpine")
-          container.withStartupTimeout(java.time.Duration.ofMinutes(2))
-          container.start()
-          container
-        },
-      )(container => IO.blocking(container.stop()).handleErrorWith(_ => IO.unit))
-      .flatMap { container =>
-        val config = postgresConfig(container)
-        for
-          components <- PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec, enableSaga = true)
-          repository <- Resource.eval(
-                          IO.fromOption(components.sagaRepository)(
-                            new IllegalStateException("saga repository missing despite enableSaga = true"),
-                          ),
-                        )
-          pool <- Session
-                    .Builder[IO]
-                    .withHost(config.host)
-                    .withPort(config.port)
-                    .withUserAndPassword(config.user, config.password)
-                    .withDatabase(config.database)
-                    .pooled(4)
-        yield Fixture(components.transactionalStore, components.checkpoint, repository, pool)
-      }
+    PostgresContainer.resource().flatMap { config =>
+      for
+        components <- PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec, enableSaga = true)
+        repository <- Resource.eval(
+                        IO.fromOption(components.sagaRepository)(
+                          new IllegalStateException("saga repository missing despite enableSaga = true"),
+                        ),
+                      )
+        pool <- Session
+                  .Builder[IO]
+                  .withHost(config.host)
+                  .withPort(config.port)
+                  .withUserAndPassword(config.user, config.password)
+                  .withDatabase(config.database)
+                  .pooled(4)
+      yield Fixture(components.transactionalStore, components.checkpoint, repository, pool)
+    }
 
   // ----- helpers -----
 

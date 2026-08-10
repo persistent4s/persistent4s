@@ -37,7 +37,6 @@ import persistent4s.{
   Tag,
 }
 
-import org.testcontainers.containers.PostgreSQLContainer
 import org.typelevel.log4cats.Logger
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
@@ -83,37 +82,17 @@ object PostgresEventSchemaSuite extends IOSuite:
   type Res = Resources
 
   override def sharedResource: Resource[IO, Res] =
-    postgresContainerResource.flatMap { container =>
+    PostgresContainer.resource(maxConnections = 8).flatMap { config =>
       PostgresModule
-        .makeWithConfig[IO, VersionedEvent](postgresConfig(container), eventCodec)
+        .makeWithConfig[IO, VersionedEvent](config, eventCodec)
         .map(components => Resources(components.eventStore, components.sessions))
     }
-
-  private type Container = PostgreSQLContainer[Nothing]
 
   private val StableEventType = "library.value-changed"
 
   private val stableEventType = EventTypeName.fromString(StableEventType)
 
   private val eventCodec = CirceEventCodec.derived[VersionedEvent]
-
-  private def postgresConfig(container: Container): PostgresConfig =
-    PostgresConfig(
-      host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
-      password = container.getPassword, database = container.getDatabaseName, maxConnections = 8,
-    )
-
-  private def postgresContainerResource: Resource[IO, Container] =
-    Resource.make {
-      IO.blocking {
-        val container = new PostgreSQLContainer[Nothing]("postgres:16-alpine")
-        container.withStartupTimeout(java.time.Duration.ofMinutes(2))
-        container.start()
-        container
-      }
-    } { container =>
-      IO.blocking(container.stop()).handleErrorWith(_ => IO.unit)
-    }
 
   test("append persists the stable event id and current schema version") { resources =>
     for
@@ -206,8 +185,7 @@ object PostgresEventSchemaSuite extends IOSuite:
   }
 
   test("module initialization upgrades a pre-versioning events table in place") { _ =>
-    postgresContainerResource.use { container =>
-      val config = postgresConfig(container)
+    PostgresContainer.resource(maxConnections = 8).use { config =>
       Session
         .Builder[IO]
         .withHost(config.host)

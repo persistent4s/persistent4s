@@ -23,7 +23,6 @@ import cats.syntax.all.*
 
 import persistent4s.{ProjectionCheckpointConflict, ProjectionCheckpointState, ProjectionCommit}
 
-import org.testcontainers.containers.PostgreSQLContainer
 import org.typelevel.log4cats.Logger
 import skunk.*
 import skunk.codec.all.*
@@ -44,8 +43,7 @@ object PostgresAtomicRepositorySuite extends IOSuite:
   type Res = Resources
 
   override def sharedResource: Resource[IO, Res] =
-    postgresContainerResource.flatMap { container =>
-      val config = postgresConfig(container)
+    PostgresContainer.resource(maxConnections = 4).flatMap { config =>
       Session
         .Builder[IO]
         .withHost(config.host)
@@ -140,26 +138,6 @@ object PostgresAtomicRepositorySuite extends IOSuite:
         upsert = (_, states) => IO { upsertCalls = upsertCalls :+ states },
         batchSize = 2,
       )
-
-  private type Container = PostgreSQLContainer[Nothing]
-
-  private def postgresConfig(container: Container): PostgresConfig =
-    PostgresConfig(
-      host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
-      password = container.getPassword, database = container.getDatabaseName, maxConnections = 4,
-    )
-
-  private def postgresContainerResource: Resource[IO, Container] =
-    Resource.make {
-      IO.blocking {
-        val container = new PostgreSQLContainer[Nothing]("postgres:16-alpine")
-        container.withStartupTimeout(java.time.Duration.ofMinutes(2))
-        container.start()
-        container
-      }
-    } { container =>
-      IO.blocking(container.stop()).handleErrorWith(_ => IO.unit)
-    }
 
   private def fresh(prefix: String): IO[String] =
     IO(s"$prefix-${UUID.randomUUID()}")

@@ -28,7 +28,6 @@ import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.log4cats.Logger
 
-import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
 import persistent4s.{EventFilter, EventStoreNotification, IndexConflictException, Tag}
 import weaver.IOSuite
@@ -50,36 +49,16 @@ object PostgresEventStoreSuite extends IOSuite:
   type Res = PostgresModule.Components[IO, TestEvent]
 
   override def sharedResource: Resource[IO, Res] =
-    postgresContainerResource.flatMap { container =>
-      PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec)
+    PostgresContainer.resource().flatMap { config =>
+      PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec)
     }
 
   final case class TestEvent(value: String) extends Event derives Encoder.AsObject, Decoder
-
-  private type Container = PostgreSQLContainer[Nothing]
 
   private val eventCodec = CirceEventCodec.make[TestEvent](
     encodeEvent = _.asJson,
     decodeEvent = (_, json) => json.as[TestEvent].left.map(error => error: Throwable),
   )
-
-  private def postgresConfig(container: Container): PostgresConfig =
-    PostgresConfig(
-      host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
-      password = container.getPassword, database = container.getDatabaseName, maxConnections = 16,
-    )
-
-  private def postgresContainerResource: Resource[IO, Container] =
-    Resource.make {
-      IO.blocking {
-        val container = new PostgreSQLContainer[Nothing]("postgres:16-alpine")
-        container.withStartupTimeout(java.time.Duration.ofMinutes(2))
-        container.start()
-        container
-      }
-    } { container =>
-      IO.blocking(container.stop()).handleErrorWith(_ => IO.unit)
-    }
 
   private def appendOne(
     store: EventStore[IO, TestEvent],

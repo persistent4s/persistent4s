@@ -23,7 +23,6 @@ import scala.concurrent.duration.*
 import cats.effect.{IO, Ref, Resource}
 import cats.effect.std.SecureRandom
 import cats.syntax.all.*
-import org.testcontainers.containers.PostgreSQLContainer
 import skunk.*
 import skunk.codec.all.*
 import skunk.implicits.*
@@ -36,8 +35,7 @@ object PostgresLeaderElectionSuite extends IOSuite:
   type Res = Resource[IO, Session[IO]]
 
   override def sharedResource: Resource[IO, Res] =
-    postgresContainerResource.flatMap { container =>
-      val cfg = postgresConfig(container)
+    PostgresContainer.resource(maxConnections = 6).flatMap { cfg =>
       Session
         .Builder[IO]
         .withHost(cfg.host)
@@ -147,26 +145,6 @@ object PostgresLeaderElectionSuite extends IOSuite:
       INSERT INTO leader_leases (name, holder, expires_at)
       VALUES ($text, gen_random_uuid(), clock_timestamp() + interval '1 second')
     """.command
-
-  // --- container boilerplate ---
-
-  private type Container = PostgreSQLContainer[Nothing]
-
-  private def postgresConfig(container: Container): PostgresConfig =
-    PostgresConfig(
-      host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
-      password = container.getPassword, database = container.getDatabaseName, maxConnections = 6,
-    )
-
-  private def postgresContainerResource: Resource[IO, Container] =
-    Resource.make {
-      IO.blocking {
-        val container = new PostgreSQLContainer[Nothing]("postgres:16-alpine")
-        container.withStartupTimeout(java.time.Duration.ofMinutes(2))
-        container.start()
-        container
-      }
-    }(container => IO.blocking(container.stop()).handleErrorWith(_ => IO.unit))
 
   private def freshName(prefix: String): IO[String] =
     IO(s"$prefix-${UUID.randomUUID()}")
