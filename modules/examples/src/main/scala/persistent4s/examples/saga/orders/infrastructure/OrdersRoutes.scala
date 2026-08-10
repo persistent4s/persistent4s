@@ -26,11 +26,10 @@ import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.io.*
 
-import persistent4s.{CommandHandlerMetrics, EventStore, SagaId, SagaRecord}
+import persistent4s.{SagaId, SagaRecord}
 import persistent4s.examples.saga.docs.SwaggerRoutes
-import persistent4s.examples.saga.orders.domain.OrderEvent
-import persistent4s.examples.saga.orders.domain.customer.{RegisterCustomer, RegisterCustomerHandler}
-import persistent4s.examples.saga.orders.domain.order.{PlaceOrder, PlaceOrderHandler}
+import persistent4s.examples.saga.orders.domain.customer.RegisterCustomer
+import persistent4s.examples.saga.orders.domain.order.PlaceOrder
 import persistent4s.examples.saga.orders.saga.ReserveStockSaga
 
 final case class RegisterCustomerRequest(customerId: UUID, name: String) derives Decoder
@@ -54,18 +53,15 @@ object OrdersRoutes:
     api(module) <+> SwaggerRoutes.routes("saga/orders-openapi.yaml", "Orders service")
 
   private def api(module: OrdersModule): HttpRoutes[IO] =
-    given EventStore[IO, OrderEvent] = module.store
-
-    given CommandHandlerMetrics[IO] = module.commandMetrics
 
     HttpRoutes.of[IO] {
       case request @ POST -> Root / "customers" =>
         for
           body     <- request.as[RegisterCustomerRequest]
-          result   <- RegisterCustomerHandler.run[IO](RegisterCustomer(body.customerId, body.name)).attempt
+          result   <- module.commands.executeUnit(RegisterCustomer.Handler, RegisterCustomer(body.customerId, body.name))
           response <- result match
-                        case Left(error) => BadRequest(ErrorResponse(error.getMessage))
-                        case Right(_)    => Created(Json.obj("customerId" -> Json.fromString(body.customerId.toString)))
+                        case Left(rejection) => BadRequest(ErrorResponse(describe(rejection)))
+                        case Right(_)        => Created(Json.obj("customerId" -> Json.fromString(body.customerId.toString)))
         yield response
 
       // 202, not 201: everything this service can decide has been decided, and that is not enough to say the order will
@@ -74,15 +70,15 @@ object OrdersRoutes:
         for
           body     <- request.as[PlaceOrderRequest]
           command   = PlaceOrder(body.orderId, body.customerId, body.itemId, body.amount, body.price)
-          result   <- PlaceOrderHandler.run[IO](command).attempt
+          result   <- module.commands.executeUnit(PlaceOrder.Handler, command)
           response <- result match
-                        case Left(error) => BadRequest(ErrorResponse(error.getMessage))
-                        case Right(_)    =>
+                        case Left(rejection) => BadRequest(ErrorResponse(describe(rejection)))
+                        case Right(_)        =>
                           Accepted(OrderAccepted(body.orderId, "Placed", s"/orders/${body.orderId}"))
         yield response
 
       case GET -> Root / "orders" =>
-        module.orderRepository.getOrders.flatMap(Ok(_))
+        module.orderRepository.all.flatMap(Ok(_))
 
       case GET -> Root / "orders" / UUIDVar(orderId) =>
         module.orderRepository.find(orderId).flatMap {
@@ -98,6 +94,15 @@ object OrdersRoutes:
           case None         => NotFound(ErrorResponse(s"No saga instance for order: $orderId"))
         }
     }
+
+  private def describe(error: RegisterCustomer.Error): String = error match
+    case RegisterCustomer.Error.AlreadyRegistered(id) => s"Customer already registered: $id"
+    case RegisterCustomer.Error.BlankName             => "Customer name must not be blank"
+
+  private def describe(error: PlaceOrder.Error): String = error match
+    case PlaceOrder.Error.NoSuchCustomer(id)  => s"No such customer: $id"
+    case PlaceOrder.Error.AlreadyPlaced(id)   => s"Order already placed: $id"
+    case PlaceOrder.Error.NotPositive(amount) => s"Order amount must be positive, got $amount"
 
   /** Hand-written because [[SagaRecord]] is a library type with no circe instance — and it is the runner's bookkeeping,
     * not part of anyone's API, so it should not have one.

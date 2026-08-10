@@ -20,54 +20,52 @@ import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.log4cats.Logger
-import org.typelevel.otel4s.trace.Tracer
 
-import persistent4s.{CommandHandlerMetrics, EventStore, MessageSubscriber, TransactionalMessages}
-import persistent4s.examples.saga.contract.ReserveStock
+import persistent4s.{CommandRuntime, MessageSubscriber, RequestContext, SagaParticipant, TransactionalCommandRuntime}
+import persistent4s.examples.saga.contract.{ReleaseStock, ReserveStock}
 import persistent4s.examples.saga.inventory.domain.InventoryEvent
-import persistent4s.examples.saga.inventory.domain.item.ReserveStockHandler
-import persistent4s.examples.saga.contract.ReleaseStock
-import persistent4s.examples.saga.inventory.domain.item.ReleaseStockHandler
-import persistent4s.SagaParticipant
-import persistent4s.RequestContext
+import persistent4s.examples.saga.inventory.domain.item.{ReleaseStockHandler, ReserveStockHandler}
 
 object InventoryCommandConsumer:
 
-  private type MessagingStore[F[_]] = EventStore[F, InventoryEvent] & TransactionalMessages[F, InventoryEvent]
-
-  /** `metrics` is an ordinary parameter rather than a `using` one on purpose: context bounds desugar into the same
-    * trailing clause, so a partial `(using metrics)` at the call site would silently offer it as the `Async` instance.
+  /** `commands` is an ordinary parameter rather than a `using` one on purpose: [[CommandRuntime]] has a `given` derived
+    * from any in-scope `EventStore`, so an implicit one would silently resolve to a runtime with no snapshots and no
+    * telemetry the moment this argument was forgotten.
     */
-  def stream[F[_]: Async: Logger: Tracer](
+  def stream[F[_]: Async: Logger](
     subscriber: MessageSubscriber[F],
-    store: MessagingStore[F],
     topic: String,
-    metrics: CommandHandlerMetrics[F],
+    commands: TransactionalCommandRuntime[F, InventoryEvent],
   ): Stream[F, Unit] =
-    given MessagingStore[F] = store
-    given CommandHandlerMetrics[F] = metrics
     SagaParticipant[F]
-      .on[ReserveStock]((ctx, command) => reserve(ctx, command))
-      .on[ReleaseStock]((_, command) => release(command))
+      .on[ReserveStock]((ctx, command) => reserve(ctx, command, commands))
+      .on[ReleaseStock]((_, command) => release(command, commands.plain))
       .subscribe(subscriber, topic)
 
-  private def reserve[F[_]: Async: Logger: Tracer](ctx: RequestContext, command: ReserveStock)(using
-    MessagingStore[F],
-    CommandHandlerMetrics[F],
+  /** The transactional runtime, because the reply has to be enqueued in the transaction that appends the reservation:
+    * "the stock is reserved" and "I told them it is reserved" become true together or not at all.
+    */
+  private def reserve[F[_]: Async: Logger](
+    ctx: RequestContext,
+    command: ReserveStock,
+    commands: TransactionalCommandRuntime[F, InventoryEvent],
   ): F[Unit] =
-    ReserveStockHandler(ctx).runWithMessages[F](command).flatMap {
+    commands.execute(ReserveStockHandler(ctx), command).flatMap {
       case Right(Nil) =>
         Logger[F].info(s"order ${command.orderId} was already reserved; re-answered without reserving again")
       case Right(_) =>
         Logger[F].info(s"reserved ${command.amount} of item ${command.itemId} for order ${command.orderId}")
-      case Left(rejection) => Logger[F].info(s"declined order ${command.orderId}: ${rejection.getMessage}")
+      case Left(rejection) => Logger[F].info(s"declined order ${command.orderId}: ${rejection.message}")
     }
 
-  private def release[F[_]: Async: Logger: Tracer](command: ReleaseStock)(using
-    MessagingStore[F],
-    CommandHandlerMetrics[F],
+  /** `plain`, because a compensation answers nobody: the saga moved to Compensated when it sent this, and is not
+    * waiting on a reply. Nothing to enqueue means no reason to reach for the transactional path.
+    */
+  private def release[F[_]: Async: Logger](
+    command: ReleaseStock,
+    commands: CommandRuntime[F, InventoryEvent],
   ): F[Unit] =
-    ReleaseStockHandler.run[F](command).flatMap { events =>
-      if events.isEmpty then Logger[F].info(s"order ${command.orderId} had nothing reserved to release; no-op")
-      else Logger[F].info(s"released stock for order ${command.orderId}")
+    commands.execute(ReleaseStockHandler, command).flatMap {
+      case Right(events) if events.nonEmpty => Logger[F].info(s"released stock for order ${command.orderId}")
+      case _                                => Logger[F].info(s"order ${command.orderId} had nothing reserved to release; no-op")
     }

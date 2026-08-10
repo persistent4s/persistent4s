@@ -20,12 +20,18 @@ import java.util.UUID
 
 import io.circe.{Decoder, Encoder}
 
-import persistent4s.{Event, Tag}
+import persistent4s.{Event, EventSchema}
 
 sealed trait InventoryEvent extends Event
 
 /** Stock arriving. Unconditional — it depends on nothing that is already in the log. */
 final case class ItemRestocked(itemId: UUID, amount: Int) extends InventoryEvent derives Encoder, Decoder
+
+object ItemRestocked:
+
+  given EventSchema[ItemRestocked] =
+    EventSchema[ItemRestocked]("inventory.item-restocked")
+      .scopedBy(InventoryScopes.Item)(_.itemId)
 
 /** Stock committed to an order.
   *
@@ -35,12 +41,16 @@ final case class ItemRestocked(itemId: UUID, amount: Int) extends InventoryEvent
   */
 final case class StockReserved(itemId: UUID, orderId: UUID, amount: Int) extends InventoryEvent derives Encoder, Decoder
 
+object StockReserved:
+
+  given EventSchema[StockReserved] =
+    EventSchema[StockReserved]("inventory.stock-reserved")
+      .scopedBy(InventoryScopes.Item)(_.itemId)
+
 final case class StockReleased(itemId: UUID, orderId: UUID, amount: Int) extends InventoryEvent derives Encoder, Decoder
 
-object InventoryTags:
+object StockReleased:
 
-  /** The tag every item's events carry, and so the scope every stock decision reads and appends under. Defined once on
-    * purpose: it is the boundary that stops two orders from taking the same last unit, and two spellings of it would
-    * split that boundary in half without anything failing.
-    */
-  def item(itemId: UUID): Tag = Tag("item", itemId)
+  given EventSchema[StockReleased] =
+    EventSchema[StockReleased]("inventory.stock-released")
+      .scopedBy(InventoryScopes.Item)(_.itemId)

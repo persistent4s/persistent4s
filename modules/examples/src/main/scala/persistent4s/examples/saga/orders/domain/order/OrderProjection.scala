@@ -18,66 +18,27 @@ package persistent4s.examples.saga.orders.domain.order
 
 import java.util.UUID
 
-import cats.effect.*
-import cats.syntax.all.*
+import cats.ApplicativeThrow
 
 import persistent4s.*
-import persistent4s.examples.saga.orders.domain.{
-  CustomerRegistered,
-  OrderCancelled,
-  OrderConfirmed,
-  OrderPlaced,
-  OrderEvent,
-}
+import persistent4s.examples.saga.orders.domain.{OrderCancelled, OrderConfirmed, OrderEvent, OrderPlaced, OrdersScopes}
 
-/** The read model an order-status API is served from — and the reason a saga forces you to have one.
-  *
-  * Three of the four events this folds are about the same order, but only the first is written by a request the client
-  * made. `OrderConfirmed` and `OrderCancelled` arrive from the saga, seconds later and out of band, which is why
-  * `status` exists at all: there is no row shape in which "the order was accepted" and "the stock is ours" are the same
-  * fact.
-  */
-final class OrderProjection[F[_]: Async] private (
-  protected val repository: Repository[F, UUID, OrderView],
-) extends Projection[F, OrderEvent, UUID, OrderView]:
+/** The read model an order-status API is served from — and the reason a saga forces you to have one. */
+final class OrderProjection[F[_]: ApplicativeThrow](
+  protected val repository: AtomicRepository[F, UUID, OrderView],
+) extends ExactlyOnceEventSourcedProjection[F, OrderEvent, UUID, OrderView]:
 
   override val name: String = "order-projection"
 
-  override val filter: Set[EventTypeName] = Set(
-    EventTypeName.of[OrderPlaced],
-    EventTypeName.of[OrderConfirmed],
-    EventTypeName.of[OrderCancelled],
-  )
+  override protected val eventHandlers = handlersBy(OrdersScopes.Order):
 
-  override def resolveKeys(event: EventEnvelope[OrderEvent]): List[UUID] = event.payload match
-    case OrderPlaced(orderId, _, _, _, _) => List(orderId)
-    case OrderConfirmed(orderId)          => List(orderId)
-    case OrderCancelled(orderId, _)       => List(orderId)
-    // Unreachable through `filter`, and deliberately no key rather than an error: customers are not orders, and an
-    // empty list is how a projection says "not mine" without blocking the checkpoint.
-    case _: CustomerRegistered => Nil
+    on[OrderPlaced].upsert: (existing, event) =>
+      existing.getOrElse(
+        OrderView(event.orderId, event.customerId, event.itemId, event.amount, OrderStatus.Placed, reason = None),
+      )
 
-  override def handle(state: Option[OrderView], event: EventEnvelope[OrderEvent]): F[Option[OrderView]] =
-    (state, event.payload) match
-      case (None, OrderPlaced(orderId, customerId, itemId, amount, price)) =>
-        OrderView(orderId, customerId, itemId, amount, OrderStatus.Placed, reason = None).some.pure[F]
+    on[OrderConfirmed].update: (state, _) =>
+      state.copy(status = OrderStatus.Confirmed, reason = None)
 
-      // Already recorded. `handle` has to tolerate seeing an event twice, and rebuilding this row from the event would
-      // reset a status the saga has since decided — an order that was confirmed would silently go back to Placed.
-      case (Some(existing), _: OrderPlaced) => existing.some.pure[F]
-
-      case (Some(existing), OrderConfirmed(_)) =>
-        existing.copy(status = OrderStatus.Confirmed, reason = None).some.pure[F]
-
-      case (Some(existing), OrderCancelled(_, reason)) =>
-        existing.copy(status = OrderStatus.Cancelled, reason = Some(reason)).some.pure[F]
-
-      // A decision about an order that was never placed. Events arrive in append order, so the saga's own terminal
-      // events cannot outrun their trigger — reaching here means the log and this table disagree about reality.
-      case _ =>
-        Async[F].raiseError(new RuntimeException(s"Unexpected event ${event.payload} for state $state"))
-
-object OrderProjection:
-
-  def make[F[_]: Async](repository: Repository[F, UUID, OrderView]): F[OrderProjection[F]] =
-    Async[F].pure(new OrderProjection(repository))
+    on[OrderCancelled].update: (state, event) =>
+      state.copy(status = OrderStatus.Cancelled, reason = Some(event.reason))

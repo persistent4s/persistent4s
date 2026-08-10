@@ -18,32 +18,29 @@ package persistent4s.examples.saga.orders.domain.customer
 
 import java.util.UUID
 
-import persistent4s.{CommandHandler, EventTypeName, Tag}
-import persistent4s.examples.saga.orders.domain.{CustomerRegistered, OrderEvent, OrdersTags}
+import persistent4s.EventSourcedCommandHandler
+import persistent4s.examples.saga.orders.domain.{CustomerRegistered, OrderEvent, OrdersScopes}
 
 final case class RegisterCustomer(customerId: UUID, name: String)
 
-final case class RegisterCustomerState(exists: Boolean)
+object RegisterCustomer:
 
-object RegisterCustomerHandler extends CommandHandler[RegisterCustomer, RegisterCustomerState, OrderEvent]:
+  enum Error:
 
-  override def eventTypes: Option[Set[EventTypeName]] = Some(Set(EventTypeName.of[CustomerRegistered]))
+    case AlreadyRegistered(customerId: UUID)
 
-  def tags(command: RegisterCustomer): Set[Tag] = Set(OrdersTags.customer(command.customerId))
+    case BlankName
 
-  def initial: RegisterCustomerState = RegisterCustomerState(exists = false)
+  object Handler extends EventSourcedCommandHandler[RegisterCustomer, Boolean, OrderEvent, Error]:
 
-  def evolve(command: RegisterCustomer, state: RegisterCustomerState, event: OrderEvent): RegisterCustomerState =
-    event match
-      case _: CustomerRegistered => state.copy(exists = true)
-      case _                     => state
+    override protected val behavior = handler(initial = false):
+      scope(OrdersScopes.Customer)(_.customerId)
 
-  def validate(state: RegisterCustomerState, command: RegisterCustomer): Either[Throwable, Unit] =
-    if state.exists then Left(new IllegalStateException(s"Customer already registered: ${command.customerId}"))
-    else if command.name.isBlank then Left(new IllegalArgumentException("Customer name must not be blank"))
-    else Right(())
+      on[CustomerRegistered].evolve(_ => true)
 
-  def decide(state: RegisterCustomerState, command: RegisterCustomer): List[(Set[Tag], OrderEvent)] =
-    List(
-      Set(OrdersTags.customer(command.customerId)) -> CustomerRegistered(command.customerId, command.name),
-    )
+      reject:
+        case (true, command)                        => Error.AlreadyRegistered(command.customerId)
+        case (_, command) if command.name.isBlank() => Error.BlankName
+
+      emit: command =>
+        CustomerRegistered(command.customerId, command.name)

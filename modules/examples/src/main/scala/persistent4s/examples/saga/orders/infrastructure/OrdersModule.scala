@@ -41,10 +41,9 @@ import persistent4s.kafka.{KafkaConsumerConfig, KafkaMessageProducerConfig, Kafk
 import persistent4s.postgres.{PostgresConfig, PostgresModule, PostgresSagaRepository}
 
 final class OrdersModule private (
-  val store: EventStore[IO, OrderEvent] & EventNotification[IO],
+  val commands: CommandRuntime[IO, OrderEvent],
   val orderRepository: OrderRepository[IO],
   val sagaRepository: PostgresSagaRepository[IO],
-  val commandMetrics: CommandHandlerMetrics[IO],
 )
 
 /** Wiring for the service that hosts the saga.
@@ -94,10 +93,10 @@ object OrdersModule:
                     .withUserAndPassword(pgConfig.user, pgConfig.password)
                     .withDatabase(pgConfig.database)
                     .pooled(pgConfig.maxConnections)
-      orderRepo  = OrderRepository.make[IO](viewPool)
-      orderProj <- Resource.eval(OrderProjection.make[IO](orderRepo))
-      projector  = DefaultProjector[IO, OrderEvent](store, checkpoint)
-      _         <- projector.run(orderProj).compile.drain.background
+      orderRepo = OrderRepository.make[IO](viewPool)
+      orderProj = OrderProjection[IO](orderRepo)
+      projector = DefaultProjector[IO, OrderEvent](store, checkpoint)
+      _        <- projector.run(orderProj).compile.drain.background
       // Drains the requests the saga enqueued. Nothing reaches inventory without it.
       relay   <- KafkaModule.messageRelay[IO](messageOutbox, KafkaMessageProducerConfig(bootstrapServers = bootstrap))
       _       <- relay.run().background
@@ -107,7 +106,6 @@ object OrdersModule:
                      groupId = SagaRunner.replyGroupId(serviceGroupId, ReserveStockSaga.name),
                    ),
                  )
-      metrics <- Resource.eval(CommandHandlerMetrics.make[IO])
       // The *transactional* store: the runner enqueues a saga's requests in the same transaction that appends the
       // events causing them, which only the raw PostgreSQL store can do. Everything else here — the projector, the
       // command handlers behind the routes — goes through the instrumented `eventStore` above.
@@ -124,7 +122,7 @@ object OrdersModule:
              .drain
              .handleErrorWith(error => Logger[IO].error(error)("saga runner stopped; sagas will no longer advance"))
              .background
-    yield new OrdersModule(store, orderRepo, sagaRepo, metrics)
+    yield new OrdersModule(components.commandRuntime, orderRepo, sagaRepo)
 
   private def loadPgConfig: IO[PostgresConfig] =
     IO.delay(ConfigSource.default.at(pgConfigPath).load[PostgresConfig]).flatMap {

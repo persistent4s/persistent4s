@@ -16,11 +16,17 @@
 
 package persistent4s.examples.saga.inventory.domain.item
 
-import persistent4s.{PendingReply, SagaCommandHandler, SagaHeaders, Tag}
-import persistent4s.examples.saga.contract.{ReserveStock, PartnerReply}
-import persistent4s.examples.saga.inventory.domain.{InventoryEvent, InventoryTags, ItemRestocked, StockReserved}
-import persistent4s.examples.saga.inventory.domain.StockReleased
-import persistent4s.RequestContext
+import java.time.Instant
+
+import persistent4s.{EventSourcedSagaCommandHandler, PendingReply, RequestContext, SagaHeaders}
+import persistent4s.examples.saga.contract.{PartnerReply, ReserveStock}
+import persistent4s.examples.saga.inventory.domain.{
+  InventoryEvent,
+  InventoryScopes,
+  ItemRestocked,
+  StockReleased,
+  StockReserved,
+}
 
 /** What one item's log says about a single incoming request.
   *
@@ -30,7 +36,10 @@ import persistent4s.RequestContext
   *   how much this very `orderId` was already given, if the request has been honoured before. Folded per command, which
   *   is why the state is cheap: recognising a redelivery does not need a list of every order ever served.
   */
-final case class StockState(available: Int, alreadyReserved: Option[Int])
+final case class StockState(available: Int, alreadyReserved: Option[Int]):
+
+  /** Whether this exact request has already been served. Every rejection rule below is skipped when it has. */
+  def honoured: Boolean = alreadyReserved.isDefined
 
 /** Answers the orders service's `reserve-stock` saga.
   *
@@ -39,63 +48,71 @@ final case class StockState(available: Int, alreadyReserved: Option[Int])
   * replace it, because two orders can pass the same check at the same time and only one append can win.
   *
   * A '''case class''' rather than an object because the address to answer arrives with the request, which is what
-  * [[SagaCommandHandler.request]] carries — one instance per request, which is free.
+  * [[EventSourcedSagaCommandHandler.request]] carries. One instance per request, and with it one `behavior` — the
+  * expiry rule below closes over that request, so the definition cannot be shared the way every other handler's is.
   */
 final case class ReserveStockHandler(request: RequestContext)
-    extends SagaCommandHandler[ReserveStock, StockState, InventoryEvent]:
+    extends EventSourcedSagaCommandHandler[ReserveStock, StockState, InventoryEvent, ReserveStockHandler.Error]:
 
-  def tags(command: ReserveStock): Set[Tag] = Set(InventoryTags.item(command.itemId))
+  import ReserveStockHandler.Error
 
-  def initial: StockState = StockState(available = 0, alreadyReserved = None)
+  override protected val behavior = handler(StockState(available = 0, alreadyReserved = None)):
+    scope(InventoryScopes.Item)(_.itemId)
 
-  def evolve(command: ReserveStock, state: StockState, event: InventoryEvent): StockState =
-    event match
-      case ItemRestocked(_, amount)          => state.copy(available = state.available + amount)
-      case StockReserved(_, orderId, amount) =>
-        val taken = state.copy(available = state.available - amount)
-        if orderId == command.orderId then taken.copy(alreadyReserved = Some(amount)) else taken
-      case StockReleased(_, orderId, amount) =>
-        val added = state.copy(available = state.available + amount)
-        if orderId == command.orderId then added.copy(alreadyReserved = None) else added
+    on[ItemRestocked].evolve((state, event) => state.copy(available = state.available + event.amount))
 
-  def validate(state: StockState, command: ReserveStock): Either[Throwable, Unit] =
-    if state.alreadyReserved.isDefined then Right(())
-    else if request.hasExpired then
-      Left(
-        // Both instants, because this text is the whole of what the caller learns: it travels back in the reply and
-        // lands in the order's `reason` field, where "expired" alone leaves nobody able to say by how much.
-        new IllegalStateException(
-          s"request expired at ${request.message.headers.getOrElse(SagaHeaders.ExpiresAt, "?")}, " +
-            s"now ${request.receivedAt}",
-        ),
-      )
-    else if command.amount <= 0 then Left(new IllegalArgumentException("Reservation amount must be positive"))
-    else if state.available < command.amount then
-      Left(
-        new IllegalStateException(
-          s"insufficient stock: ${state.available} available, ${command.amount} requested",
-        ),
-      )
-    else Right(())
+    // Deliberately not `matching(_.orderId, _.orderId)`, unlike [[ReleaseStockHandler]]: every reservation on this
+    // item moves `available`, whoever it was for, and only the flag is about this order. Matching on the order here
+    // would leave the arithmetic reading a stock nobody else had ever touched.
+    on[StockReserved].evolve: (state, command, event) =>
+      val taken = state.copy(available = state.available - event.amount)
+      if event.orderId == command.orderId then taken.copy(alreadyReserved = Some(event.amount)) else taken
 
-  def decide(state: StockState, command: ReserveStock): List[(Set[Tag], InventoryEvent)] =
-    if state.alreadyReserved.isDefined then Nil
-    else
-      List(
-        Set(InventoryTags.item(command.itemId)) ->
-          StockReserved(command.itemId, command.orderId, command.amount),
-      )
+    on[StockReleased].evolve: (state, command, event) =>
+      val added = state.copy(available = state.available + event.amount)
+      if event.orderId == command.orderId then added.copy(alreadyReserved = None) else added
 
-  /** Always answers, and the rejection carries its reason: a caller that hears nothing has to wait out its whole
-    * deadline to learn what a single message could have told it immediately.
-    */
-  override def reply(
-    state: StockState,
-    command: ReserveStock,
-    outcome: Either[Throwable, List[InventoryEvent]],
-  ): Option[PendingReply] =
-    Some(
-      PendingReply(
-        outcome.fold(rejection => PartnerReply.reject(rejection.getMessage), _ => PartnerReply.accept),
-      ),
-    )
+    // Every rule is guarded on `!state.honoured`, and that guard is the idempotency this request depends on. Old
+    // `validate` said it once, by answering `Right` before it checked anything else; a rejection rule can only say
+    // "no", so it has to be said three times. A redelivery has already had its own amount taken out of `available`,
+    // so re-judging it would refuse the very request it succeeded at, and the saga would hear a rejection for stock
+    // it holds.
+    reject:
+      case (state, _) if !state.honoured && request.hasExpired =>
+        Error.Expired(request.message.headers.getOrElse(SagaHeaders.ExpiresAt, "?"), request.receivedAt)
+
+      case (state, command) if !state.honoured && command.amount <= 0 =>
+        Error.NotPositive(command.amount)
+
+      case (state, command) if !state.honoured && state.available < command.amount =>
+        Error.InsufficientStock(state.available, command.amount)
+
+    // Nothing to write for a request already served, and nothing to fail either — the reply still goes out, which is
+    // what makes a redelivery cost the caller one message instead of its whole deadline.
+    emitMany: (state, command) =>
+      if state.honoured then Nil
+      else List(StockReserved(command.itemId, command.orderId, command.amount))
+
+    // Always answers, and the rejection carries its reason: a caller that hears nothing has to wait out its whole
+    // deadline to learn what a single message could have told it immediately. `reply` is `messages` with the
+    // correlation headers filled in from the request, so this handler never touches `SagaHeaders` itself.
+    reply: (_, _, outcome) =>
+      Some(PendingReply(outcome.fold(error => PartnerReply.reject(error.message), _ => PartnerReply.accept)))
+
+object ReserveStockHandler:
+
+  enum Error:
+
+    case Expired(expiresAt: String, receivedAt: Instant)
+
+    case NotPositive(amount: Int)
+
+    case InsufficientStock(available: Int, requested: Int)
+
+    /** The whole of what the caller learns: this text travels back in the reply and lands in the order's `reason`
+      * field. [[Expired]] carries both instants because "expired" alone leaves nobody able to say by how much.
+      */
+    def message: String = this match
+      case Expired(expiresAt, receivedAt)          => s"request expired at $expiresAt, now $receivedAt"
+      case NotPositive(amount)                     => s"reservation amount must be positive, got $amount"
+      case InsufficientStock(available, requested) => s"insufficient stock: $available available, $requested requested"

@@ -16,29 +16,37 @@
 
 package persistent4s.examples.saga.inventory.domain.item
 
+import persistent4s.EventSourcedCommandHandler
 import persistent4s.examples.saga.contract.ReleaseStock
-import persistent4s.CommandHandler
-import persistent4s.Tag
-import persistent4s.examples.saga.inventory.domain.{InventoryEvent, InventoryTags, StockReserved, StockReleased}
+import persistent4s.examples.saga.inventory.domain.{InventoryEvent, InventoryScopes, StockReleased, StockReserved}
 
 final case class ReleaseState(amount: Option[Int])
 
-object ReleaseStockHandler extends CommandHandler[ReleaseStock, ReleaseState, InventoryEvent]:
+/** The compensation half of the saga: give back whatever this order is holding.
+  *
+  * Its rejection type is `Unit` because it turns nothing down. Releasing an order that holds nothing is not an error —
+  * it is the ordinary outcome of a compensation that arrives twice, or of one for a reservation that was refused — and
+  * it says so by emitting no events rather than by failing. `emitMany` is what allows that: an empty list is a
+  * successful command that wrote nothing.
+  *
+  * The handler object is not nested inside its command the way [[RestockItem]]'s is, because [[ReleaseStock]] belongs
+  * to the contract both services share, not to inventory.
+  */
+object ReleaseStockHandler extends EventSourcedCommandHandler[ReleaseStock, ReleaseState, InventoryEvent, Unit]:
 
-  override def tags(command: ReleaseStock): Set[Tag] = Set(InventoryTags.item(command.itemId))
+  override protected val behavior = handler(ReleaseState(None)):
+    scope(InventoryScopes.Item)(_.itemId)
 
-  override def evolve(command: ReleaseStock, state: ReleaseState, event: InventoryEvent): ReleaseState =
-    event match
-      case StockReserved(_, orderId, amount) if orderId == command.orderId => ReleaseState(Some(amount))
-      case StockReleased(_, orderId, amount) if orderId == command.orderId => ReleaseState(None)
-      case _                                                               => state
+    // The item is matched automatically as the one shared scope; `matching` adds the order on top. The order is
+    // deliberately not a scope of its own — the invariant being protected is per item, and scoping by order as well
+    // would put unrelated items into one concurrency boundary.
+    on[StockReserved]
+      .matching(_.orderId, _.orderId)
+      .evolve((_, event) => ReleaseState(Some(event.amount)))
 
-  def initial: ReleaseState = ReleaseState(None)
+    on[StockReleased]
+      .matching(_.orderId, _.orderId)
+      .evolve(_ => ReleaseState(None))
 
-  def validate(state: ReleaseState, command: ReleaseStock): Either[Throwable, Unit] = Right(())
-
-  def decide(state: ReleaseState, command: ReleaseStock): List[(Set[Tag], InventoryEvent)] =
-    state.amount match
-      case Some(amt) =>
-        List(Set(InventoryTags.item(command.itemId)) -> StockReleased(command.itemId, command.orderId, amt))
-      case None => Nil
+    emitMany: (state, command) =>
+      state.amount.toList.map(amount => StockReleased(command.itemId, command.orderId, amount))

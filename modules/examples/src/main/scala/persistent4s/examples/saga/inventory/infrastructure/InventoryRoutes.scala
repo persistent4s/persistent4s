@@ -25,10 +25,10 @@ import org.http4s.HttpRoutes
 import org.http4s.circe.CirceEntityCodec.*
 import org.http4s.dsl.io.*
 
-import persistent4s.{CommandHandlerMetrics, EventFilter, EventStore}
+import persistent4s.EventFilter
 import persistent4s.examples.saga.docs.SwaggerRoutes
-import persistent4s.examples.saga.inventory.domain.{InventoryEvent, InventoryTags}
-import persistent4s.examples.saga.inventory.domain.item.{ItemStock, RestockItem, RestockItemHandler}
+import persistent4s.examples.saga.inventory.domain.InventoryScopes
+import persistent4s.examples.saga.inventory.domain.item.{ItemStock, RestockItem}
 
 final case class RestockRequest(amount: Int) derives Decoder
 
@@ -43,18 +43,15 @@ object InventoryRoutes:
     api(module) <+> SwaggerRoutes.routes("saga/inventory-openapi.yaml", "Inventory service")
 
   private def api(module: InventoryModule): HttpRoutes[IO] =
-    given EventStore[IO, InventoryEvent] = module.store
-
-    given CommandHandlerMetrics[IO] = module.commandMetrics
-
     HttpRoutes.of[IO] {
       case request @ POST -> Root / "items" / UUIDVar(itemId) / "restock" =>
         for
           body     <- request.as[RestockRequest]
-          result   <- RestockItemHandler.run[IO](RestockItem(itemId, body.amount)).attempt
+          result   <- module.commands.executeUnit(RestockItem.Handler, RestockItem(itemId, body.amount))
           response <- result match
-                        case Left(error) => BadRequest(ErrorResponse(error.getMessage))
-                        case Right(_)    => readStock(module, itemId).flatMap(Ok(_))
+                        case Left(RestockItem.Error.NotPositive(amount)) =>
+                          BadRequest(ErrorResponse(s"Restock amount must be positive, got $amount"))
+                        case Right(_) => readStock(module, itemId).flatMap(Ok(_))
         yield response
 
       case GET -> Root / "items" / UUIDVar(itemId) =>
@@ -63,7 +60,7 @@ object InventoryRoutes:
 
   private def readStock(module: InventoryModule, itemId: UUID): IO[ItemStock] =
     module.store
-      .readFrom(0L, EventFilter(tags = Set(InventoryTags.item(itemId))))
+      .readFrom(0L, EventFilter(tags = Set(InventoryScopes.Item(itemId).toTag)))
       .compile
       .toList
       .map(envelopes => ItemStock.fold(itemId, envelopes.map(_.payload)))

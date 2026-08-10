@@ -25,10 +25,11 @@ import io.circe.{Decoder, Encoder}
 import persistent4s.*
 import persistent4s.circe.CirceMessageCodec
 import persistent4s.examples.saga.contract.{ReserveStock, ReleaseStock, Topics}
-import persistent4s.examples.saga.orders.domain.{OrderCancelled, OrderConfirmed, OrderPlaced, OrdersTags}
+import persistent4s.examples.saga.orders.domain.{OrderCancelled, OrderConfirmed, OrderPlaced}
 import persistent4s.examples.saga.contract.PartnerReply
 import persistent4s.examples.saga.contract.{AuthorizePayment, CancelPayment}
 import persistent4s.examples.saga.orders.domain.OrderEvent
+import persistent4s.examples.saga.orders.domain.OrdersScopes
 
 /** What an instance carries while it waits.
   *
@@ -52,7 +53,7 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
 
   val name: String = "place-order"
 
-  val triggers: Set[EventTypeName] = Set(EventTypeName.of[OrderPlaced])
+  val triggers: Set[EventTypeName] = summon[EventSchema[OrderPlaced]].acceptedEventTypes
 
   private object Requests:
 
@@ -148,7 +149,7 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
       ),
     ).flatten
 
-  private def orderTag(orderId: UUID): Set[Tag] = Set(OrdersTags.order(orderId))
+  private def orderTag(orderId: UUID): Set[Tag] = Set(OrdersScopes.Order(orderId).toTag)
 
   val stateCodec: MessageCodec[OrderState] = CirceMessageCodec.derived[OrderState]
 

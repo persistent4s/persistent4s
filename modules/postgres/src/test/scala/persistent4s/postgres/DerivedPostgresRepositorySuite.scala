@@ -363,4 +363,3 @@ object DerivedPostgresRepositorySuite extends IOSuite:
         PRIMARY KEY (tenant_id, item_id)
       )
     """.command
-
