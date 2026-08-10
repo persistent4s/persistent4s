@@ -31,6 +31,23 @@ import persistent4s.examples.saga.contract.{AuthorizePayment, CancelPayment}
 import persistent4s.examples.saga.orders.domain.OrderEvent
 import persistent4s.examples.saga.orders.domain.OrdersScopes
 
+/** What one partner answered.
+  *
+  * A sum rather than a `Boolean` beside an `Option[String]`, because a reason exists exactly when a partner declined
+  * and that pair could also represent "accepted, and here is why it failed". Carrying the words rather than the verdict
+  * is the point: they end up in the order's `reason` field, and the customer learns "insufficient stock: 3 available,
+  * 99 requested" instead of "a partner declined".
+  */
+enum PartnerOutcome derives Encoder.AsObject, Decoder:
+
+  case Accepted
+
+  case Declined(reason: String)
+
+  def declined: Boolean = this match
+    case Declined(_) => true
+    case Accepted    => false
+
 /** What an instance carries while it waits.
   *
   * A single-step saga barely needs one — [[SagaContext]] already hands the decision functions the instance's key, which
@@ -44,8 +61,8 @@ final case class OrderState(
   itemId: UUID,
   amount: Int,
   price: Int,
-  stockSuccess: Option[Boolean],
-  paymentSuccess: Option[Boolean],
+  stock: Option[PartnerOutcome],
+  payment: Option[PartnerOutcome],
 ) derives Encoder.AsObject,
       Decoder
 
@@ -66,6 +83,11 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
     val Cancel = "cancel"
 
   val NoAttribution = "reply did not say which request it answered"
+
+  /** Stands in when a partner says no without saying why. [[PartnerReply.reject]] always carries a reason, but the wire
+    * format allows one without, and an order cancelled for no stated reason is the least useful row in the table.
+    */
+  val NoReason = "no reason given"
 
   private val ReplyTimeout: FiniteDuration = 30.seconds
 
@@ -100,24 +122,35 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
     state: OrderState,
     reply: SagaReply[PartnerReply],
   ): SagaDecision[OrderEvent, OrderState, OrderRequest] =
+    val outcome =
+      if reply.payload.accepted then PartnerOutcome.Accepted
+      else PartnerOutcome.Declined(reply.payload.reason.getOrElse(NoReason))
+
     reply.answering.map(_.label) match
-      case Some(Requests.Stock)   => settle(state.copy(stockSuccess = Some(reply.payload.accepted)))
-      case Some(Requests.Payment) => settle(state.copy(paymentSuccess = Some(reply.payload.accepted)))
+      case Some(Requests.Stock)   => settle(state.copy(stock = Some(outcome)))
+      case Some(Requests.Payment) => settle(state.copy(payment = Some(outcome)))
       case Some(other)            =>
         SagaDecision.failed(s"reply named request `$other`, which this saga never sent")
       case None =>
         SagaDecision.failed(NoAttribution)
 
   private def settle(state: OrderState): SagaDecision[OrderEvent, OrderState, OrderRequest] =
-    (state.stockSuccess, state.paymentSuccess) match
-      case (Some(true), Some(true)) =>
+    (state.stock, state.payment) match
+      case (Some(PartnerOutcome.Accepted), Some(PartnerOutcome.Accepted)) =>
         SagaDecision.completed(events = List(orderTag(state.orderId) -> OrderConfirmed(state.orderId)))
-      case (Some(_), Some(_)) =>
+      case (Some(stock), Some(payment)) =>
         SagaDecision.compensated(
-          events = List(orderTag(state.orderId) -> OrderCancelled(state.orderId, "a partner declined")),
+          events = List(orderTag(state.orderId) -> OrderCancelled(state.orderId, declineReason(stock, payment))),
           messages = undoRequests(state),
         )
       case _ => SagaDecision.continue(state)
+
+  /** The declining partner's own words, carried across the service boundary into the order's `reason` field. Both
+    * partners can decline the same order, and then both reasons travel — dropping either would leave the row claiming a
+    * single cause for a decision that had two.
+    */
+  private def declineReason(outcomes: PartnerOutcome*): String =
+    outcomes.collect { case PartnerOutcome.Declined(reason) => reason }.mkString("; ")
 
   override def onTimeout(
     ctx: SagaContext,
@@ -131,7 +164,7 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
 
   private def undoRequests(state: OrderState): List[SagaRequest[OrderRequest]] =
     List(
-      Option.unless(state.stockSuccess.contains(false))(
+      Option.unless(state.stock.exists(_.declined))(
         SagaRequest(
           Requests.Release,
           Topics.InventoryCommands,
@@ -139,7 +172,7 @@ object ReserveStockSaga extends Saga[OrderEvent, OrderState, OrderRequest, Partn
           ReleaseStock(state.orderId, state.itemId),
         ),
       ),
-      Option.unless(state.paymentSuccess.contains(false))(
+      Option.unless(state.payment.exists(_.declined))(
         SagaRequest(
           Requests.Cancel,
           Topics.PaymentCommands,

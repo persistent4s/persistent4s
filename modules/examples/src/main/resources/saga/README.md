@@ -78,7 +78,7 @@ docker compose down -v && docker compose up -d
 | | |
 |---|---|
 | `POST /customers` | `{"customerId","name"}` → `201` |
-| `POST /orders` | `{"orderId","customerId","itemId","amount"}` → `202` |
+| `POST /orders` | `{"orderId","customerId","itemId","amount","price"}` → `202` |
 | `GET /orders` | every order with its status |
 | `GET /orders/{id}` | one order, or `404` |
 | `GET /orders/{id}/saga` | the saga instance behind it — status, step, deadline, serialized state |
@@ -107,7 +107,7 @@ curl -X POST localhost:8184/items/$ITEM/restock \
 ```bash
 ORDER=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
 curl -X POST localhost:8183/orders -H 'content-type: application/json' \
-  -d "{\"orderId\":\"$ORDER\",\"customerId\":\"$CUSTOMER\",\"itemId\":\"$ITEM\",\"amount\":2}"
+  -d "{\"orderId\":\"$ORDER\",\"customerId\":\"$CUSTOMER\",\"itemId\":\"$ITEM\",\"amount\":2,\"price\":100}"
 # {"orderId":"aaaa…","status":"Placed","outcomeAt":"/orders/aaaa…"}
 
 curl localhost:8183/orders/$ORDER         # 404 if you are very quick — see below
@@ -132,23 +132,23 @@ with `OrderCancelled` — the reason travels from inventory's validation all the
 ```bash
 ORDER=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
 curl -X POST localhost:8183/orders -H 'content-type: application/json' \
-  -d "{\"orderId\":\"$ORDER\",\"customerId\":\"$CUSTOMER\",\"itemId\":\"$ITEM\",\"amount\":99}"
+  -d "{\"orderId\":\"$ORDER\",\"customerId\":\"$CUSTOMER\",\"itemId\":\"$ITEM\",\"amount\":99,\"price\":100}"
 
 sleep 1
 curl localhost:8183/orders/$ORDER    # {"status":"Cancelled","reason":"insufficient stock: 3 available, 99 requested"}
 ```
 
-**3. Timeout.** Stop the inventory service (Ctrl-C in terminal B) and place an order. Nothing answers, the deadline
-passes, and the timer loop compensates. The request is still sitting in Kafka, so restarting inventory will process it —
-and its reply will be ignored, because the instance is no longer pending.
+**3. Timeout.** Stop the inventory service (Ctrl-C in terminal B) and place an order. Payment answers, inventory never
+does, the deadline passes, and the timer loop compensates. The request is still sitting in Kafka, so restarting inventory
+will process it — and its reply will be ignored, because the instance is no longer pending.
 
 ```bash
 ORDER=cccccccc-cccc-cccc-cccc-cccccccccccc
 curl -X POST localhost:8183/orders -H 'content-type: application/json' \
-  -d "{\"orderId\":\"$ORDER\",\"customerId\":\"$CUSTOMER\",\"itemId\":\"$ITEM\",\"amount\":1}"
+  -d "{\"orderId\":\"$ORDER\",\"customerId\":\"$CUSTOMER\",\"itemId\":\"$ITEM\",\"amount\":1,\"price\":100}"
 
 sleep 35
-curl localhost:8183/orders/$ORDER    # {"status":"Cancelled","reason":"inventory did not answer in time"}
+curl localhost:8183/orders/$ORDER    # {"status":"Cancelled","reason":"At least one partner did not answer on time"}
 ```
 
 Restart inventory afterwards and watch it *decline* the request it finds waiting on the topic:
