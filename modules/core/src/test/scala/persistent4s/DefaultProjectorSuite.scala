@@ -110,6 +110,26 @@ object DefaultProjectorSuite extends SimpleIOSuite:
     def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[EventEnvelope[A]]] =
       IO.pure(List.empty) // not needed for these tests
 
+    /** Adds an event directly, bypassing the notification queue — simulates data becoming visible with no signal to
+      * wake a polling consumer, so only a periodic re-check (not a notification) can discover it.
+      */
+    def appendSilently(pending: PendingEvent[A]): IO[Unit] =
+      events.update { current =>
+        val lastPos = current.lastOption.map(_.metadata.globalPosition).getOrElse(0L)
+        current :+ EventEnvelope(
+          EventMetadata(
+            lastPos + 1L,
+            pending.id.getOrElse(UUID.randomUUID()),
+            pending.tags,
+            pending.eventType,
+            pending.isExternal,
+            java.time.Instant.now(),
+            pending.headers,
+          ),
+          pending.payload,
+        )
+      }
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -717,4 +737,33 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                   yield n
                 }
     yield expect(result == 4) // 2 from first pass + 2 reprocessed after index reset
+  }
+
+  test("gapRecheckInterval re-polls even without a new notification") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states)
+      _          <- seed(store, (Set(entityTag("a")), TestEvent.Created("a")))
+      events     <- DefaultProjector(store, checkpoint, gapRecheckInterval = 20.millis)
+                  .run(projection)
+                  .compile
+                  .drain
+                  .background
+                  .use { _ =>
+                    for
+                      _ <- waitUntil(handled.get.map(_.length == 1))
+                      _ <- store.appendSilently(
+                             PendingEvent(
+                               TestEvent.Created("b"), Set(entityTag("b")),
+                               EventTypeName.fromInstance(TestEvent.Created("b")), false, None, Map.empty,
+                             ),
+                           )
+                      _      <- waitUntil(handled.get.map(_.length == 2)).timeout(2.seconds)
+                      events <- handled.get
+                    yield events
+                  }
+    yield expect(events.map(_.payload) == List(TestEvent.Created("a"), TestEvent.Created("b")))
   }

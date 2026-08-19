@@ -75,8 +75,14 @@ object PostgresOutboxSuite extends IOSuite:
     postgresContainerResource.flatMap { container =>
       val config = postgresConfig(container)
       for
-        components <- PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec, enableOutbox = true)
-        outbox     <- Resource.eval(
+        components <-
+          // Deliberately generous even beyond what the local benchmark called for (observed worst case ~180ms): CI
+          // runners are typically slower and noisier than a dev machine, and flaky tests cost more than a slightly
+          // slower suite.
+          PostgresModule.makeWithConfig[IO, TestEvent](
+            config, eventCodec, enableOutbox = true, gapTimeout = 3.seconds, appendTimeout = 1.second,
+          )
+        outbox <- Resource.eval(
                     IO.fromOption(components.outbox)(
                       new IllegalStateException("outbox missing despite enableOutbox = true"),
                     ),
@@ -95,6 +101,17 @@ object PostgresOutboxSuite extends IOSuite:
 
   private def truncate(pool: Resource[IO, Session[IO]]): IO[Unit] =
     pool.use(_.execute(sql"TRUNCATE events RESTART IDENTITY CASCADE".command)).void
+
+  // attempts * delay must comfortably clear the fixture's gapTimeout (3s) — this budgets 6s.
+  private def eventually[A](poll: IO[A])(
+    check: A => Boolean,
+    attempts: Int = 60,
+    delay: FiniteDuration = 100.millis,
+  ): IO[A] =
+    poll.flatMap { a =>
+      if check(a) || attempts <= 1 then IO.pure(a)
+      else IO.sleep(delay) *> eventually(poll)(check, attempts - 1, delay)
+    }
 
   private def outboxPositions(pool: Resource[IO, Session[IO]]): IO[List[Long]] =
     pool.use(_.execute(sql"SELECT global_position FROM event_outbox ORDER BY global_position".query(int8)))
@@ -199,7 +216,9 @@ object PostgresOutboxSuite extends IOSuite:
              )
              .void
       positions <- outboxPositions(pool)
-      stored    <- store.readFrom(0L, EventFilter()).compile.toList
+      stored    <- eventually(store.readFrom(0L, EventFilter()).compile.toList)(
+                  _.map(_.payload.value) == List("already-there", "fresh", "imported"),
+                )
     yield expect.all(
       pre == List(1L),
       // only the fresh local event's position, which is the one written after the pre-existing row
