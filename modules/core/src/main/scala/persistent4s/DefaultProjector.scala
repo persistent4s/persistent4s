@@ -54,6 +54,8 @@ import java.util.UUID
   * @param batchSize
   *   maximum number of events processed in a single batch (default: 100). A larger value reduces checkpoint overhead
   *   but increases memory usage and the reprocessing window after a failure.
+  * @param gapRecheckInterval
+  *   how often to re-poll even without a new-event notification (default: 10 seconds).
   */
 final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
@@ -61,6 +63,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
   batchSize: Int = 100,
   maxBatchPerPass: Int = 10,
   publishTimeout: FiniteDuration = 1.second,
+  gapRecheckInterval: FiniteDuration = 10.seconds,
 ) extends Projector[F, A]:
 
   final private case class Work(
@@ -348,6 +351,9 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
               .evalMap(notification => notificationHandler(wakeupState, notification))
               .drain
 
+          val gapRecheckTicks =
+            Stream.awakeEvery[F](gapRecheckInterval).evalMap(_ => markPending(wakeupState)).drain
+
           val passLimit = batchSize * maxBatchPerPass
 
           val projector =
@@ -370,7 +376,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
                 }
               }
 
-          projector.concurrently(notifications)
+          projector.concurrently(notifications).concurrently(gapRecheckTicks)
         }
       }
   }
