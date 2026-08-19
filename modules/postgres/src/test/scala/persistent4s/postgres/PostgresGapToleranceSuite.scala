@@ -36,10 +36,9 @@ import skunk.implicits.*
 
 import weaver.IOSuite
 
-/** Covers the gap-tolerant readFrom mechanism (PostgresEventStore's safe-boundary computation): a fresh
-  * sequence_number gap withholds anything past it, and a stale one (older than gapTimeout) gets bridged
-  * transparently. Kept as its own suite so it can use a short gapTimeout without affecting PostgresEventStoreSuite's
-  * unrelated CRUD/OCC coverage.
+/** Covers the gap-tolerant readFrom mechanism (PostgresEventStore's safe-boundary computation): a fresh sequence_number
+  * gap withholds anything past it, and a stale one (older than gapTimeout) gets bridged transparently. Kept as its own
+  * suite so it can use a short gapTimeout without affecting PostgresEventStoreSuite's unrelated CRUD/OCC coverage.
   */
 object PostgresGapToleranceSuite extends IOSuite:
 
@@ -50,6 +49,7 @@ object PostgresGapToleranceSuite extends IOSuite:
   // Deliberately generous even beyond what the local benchmark called for (observed worst case ~180ms): CI runners
   // are typically slower and noisier than a dev machine, and flaky tests cost more than a slightly slower suite.
   private val GapTimeout: FiniteDuration = 3.seconds
+
   private val AppendTimeout: FiniteDuration = 1.second
 
   type Res = PostgresModule.Components[IO, TestEvent]
@@ -57,7 +57,10 @@ object PostgresGapToleranceSuite extends IOSuite:
   override def sharedResource: Resource[IO, Res] =
     postgresContainerResource.flatMap { container =>
       PostgresModule.makeWithConfig[IO, TestEvent](
-        postgresConfig(container), eventCodec, gapTimeout = GapTimeout, appendTimeout = AppendTimeout,
+        postgresConfig(container),
+        eventCodec,
+        gapTimeout = GapTimeout,
+        appendTimeout = AppendTimeout,
       )
     }
 
@@ -136,38 +139,40 @@ object PostgresGapToleranceSuite extends IOSuite:
       yield expect(immediate.map(_.payload) == List(TestEvent("first")))
   }
 
-  test("an append exceeding appendTimeout is rolled back cleanly, raising AppendTimeoutException, without " +
-    "leaving the store stuck") {
-    case PostgresModule.Components(store, _, _, _, _, _, _, sessions, _) =>
-      val tag = Tag("timeout-test", UUID.randomUUID().toString)
-      // A timeout this tight can't complete even the first round-trip, so it deterministically triggers
-      // AppendTimeoutException regardless of real DB/network timing — no pg_sleep or held-open transaction needed.
-      val tightStore = PostgresEventStore[IO, TestEvent](sessions, eventCodec, gapTimeout = GapTimeout, appendTimeout = 1.nanosecond)
-      for
-        _ <- truncate(sessions)
-        timedOut <-
-          tightStore
-            .append(
-              EventFilter(Set.empty, Set(tag)),
-              0L,
-              List(PendingEvent(TestEvent("late"), Set(tag), EventTypeName.of[TestEvent], true, None, Map.empty)),
-            )
-            .attempt
-        afterTimeout <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
-        // Same tag, same expectedIndex=0: only succeeds if the rollback truly reverted the conflict check's view of
-        // this tag's revision, and only completes promptly if the timed-out attempt's advisory lock was released
-        // rather than leaked (a lock leak would make this hang until the store's own appendTimeout, or worse).
-        onTime <-
-          store
-            .append(
-              EventFilter(Set.empty, Set(tag)),
-              0L,
-              List(PendingEvent(TestEvent("on-time"), Set(tag), EventTypeName.of[TestEvent], true, None, Map.empty)),
-            )
-            .timeout(5.seconds)
-      yield expect.all(
-        timedOut.left.toOption.exists(_.isInstanceOf[AppendTimeoutException]),
-        afterTimeout.isEmpty,
-        onTime.map(_.payload) == List(TestEvent("on-time")),
-      )
+  test(
+    "an append exceeding appendTimeout is rolled back cleanly, raising AppendTimeoutException, without " +
+      "leaving the store stuck",
+  ) { case PostgresModule.Components(store, _, _, _, _, _, _, sessions, _) =>
+    val tag = Tag("timeout-test", UUID.randomUUID().toString)
+    // A timeout this tight can't complete even the first round-trip, so it deterministically triggers
+    // AppendTimeoutException regardless of real DB/network timing — no pg_sleep or held-open transaction needed.
+    val tightStore =
+      PostgresEventStore[IO, TestEvent](sessions, eventCodec, gapTimeout = GapTimeout, appendTimeout = 1.nanosecond)
+    for
+      _        <- truncate(sessions)
+      timedOut <-
+        tightStore
+          .append(
+            EventFilter(Set.empty, Set(tag)),
+            0L,
+            List(PendingEvent(TestEvent("late"), Set(tag), EventTypeName.of[TestEvent], true, None, Map.empty)),
+          )
+          .attempt
+      afterTimeout <- store.readFrom(0L, EventFilter(Set.empty, Set(tag))).compile.toList
+      // Same tag, same expectedIndex=0: only succeeds if the rollback truly reverted the conflict check's view of
+      // this tag's revision, and only completes promptly if the timed-out attempt's advisory lock was released
+      // rather than leaked (a lock leak would make this hang until the store's own appendTimeout, or worse).
+      onTime <-
+        store
+          .append(
+            EventFilter(Set.empty, Set(tag)),
+            0L,
+            List(PendingEvent(TestEvent("on-time"), Set(tag), EventTypeName.of[TestEvent], true, None, Map.empty)),
+          )
+          .timeout(5.seconds)
+    yield expect.all(
+      timedOut.left.toOption.exists(_.isInstanceOf[AppendTimeoutException]),
+      afterTimeout.isEmpty,
+      onTime.map(_.payload) == List(TestEvent("on-time")),
+    )
   }
