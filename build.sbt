@@ -52,7 +52,7 @@ Global / onChangedBuildSource := ReloadOnSourceChanges
 Global / semanticdbEnabled    := true // for metals
 
 // Versions
-val CatsEffectV = "3.7.0"
+val CatsEffectV = "3.7.1"
 
 val Fs2V = "3.13.0"
 
