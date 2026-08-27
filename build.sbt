@@ -169,11 +169,9 @@ lazy val examples = (project in file("modules/examples"))
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s"         % Smithy4sV,
       "com.disneystreaming.smithy4s" %% "smithy4s-http4s-swagger" % Smithy4sV,
       "org.http4s"                   %% "http4s-ember-server"     % Http4sV,
-      // The saga example writes its routes by hand instead of generating them from smithy, so the codegen ceremony
-      // does not bury the saga itself.
-      "org.http4s"    %% "http4s-dsl"      % Http4sV,
-      "org.http4s"    %% "http4s-circe"    % Http4sV,
-      "ch.qos.logback" % "logback-classic" % LogbackV,
+      "org.http4s"                   %% "http4s-dsl"              % Http4sV,
+      "org.http4s"                   %% "http4s-circe"            % Http4sV,
+      "ch.qos.logback"                % "logback-classic"         % LogbackV,
     ),
   )
 
