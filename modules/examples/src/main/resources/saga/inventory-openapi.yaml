@@ -1,0 +1,126 @@
+openapi: 3.0.3
+info:
+  title: Inventory service
+  version: "1.0"
+  description: |
+    Owns stock, one log scope per item, and answers the orders service's `reserve-stock` saga.
+
+    **There is no route for reserving stock.** The only way to ask for a reservation is to send a `ReserveStock` command
+    to the `inventory.commands` Kafka topic — which is what the saga does — because a reservation has to commit in the
+    same transaction as the reply that reports it. These two routes exist to set up and inspect stock; the interesting
+    behaviour is on the topic.
+
+    This service knows nothing about sagas. It reads a command, honours or declines it, and answers the address the
+    request nominated.
+servers:
+  - url: http://localhost:8184
+
+paths:
+  /items/{itemId}/restock:
+    post:
+      summary: Add stock to an item
+      description: |
+        An ordinary local command, and the contrast with the reservation path: unconditional, so it folds no state, sends
+        no message, and needs no saga.
+
+        Its concurrency scope is narrowed to `ItemRestocked`, which is deliberate — a concurrent reservation cannot bounce
+        a restock, while a concurrent restock *does* bounce a reservation, since stock arriving is exactly the news a
+        reservation wants to re-read before giving up.
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RestockRequest"
+      responses:
+        "200":
+          description: The item's stock after the restock
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemStock"
+        "400":
+          description: Non-positive amount
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /items/{itemId}:
+    get:
+      summary: Read an item's stock
+      description: |
+        Folded from the item's events on demand. There is no projection on this side: the arithmetic is the same one the
+        reservation handler folds to make its decision, so a read model here would be a second copy of it maintained
+        separately. An item with no events reads as `available: 0` rather than 404.
+      parameters:
+        - $ref: "#/components/parameters/ItemId"
+      responses:
+        "200":
+          description: What is left, and who holds the rest
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ItemStock"
+
+components:
+  parameters:
+    ItemId:
+      name: itemId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      example: 22222222-2222-2222-2222-222222222222
+
+  schemas:
+    RestockRequest:
+      type: object
+      required: [amount]
+      properties:
+        amount:
+          type: integer
+          minimum: 1
+      example:
+        amount: 5
+
+    ItemStock:
+      type: object
+      properties:
+        itemId:
+          type: string
+          format: uuid
+        available:
+          type: integer
+          description: Everything restocked minus everything reserved.
+        reservations:
+          type: array
+          items:
+            $ref: "#/components/schemas/Reservation"
+      example:
+        itemId: 22222222-2222-2222-2222-222222222222
+        available: 3
+        reservations:
+          - orderId: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+            amount: 2
+
+    Reservation:
+      type: object
+      properties:
+        orderId:
+          type: string
+          format: uuid
+          description: |
+            The orders service's id. Opaque here, and the reason honouring a request is idempotent: the handler folds its
+            own log and recognises an order it has already reserved for instead of reserving twice.
+        amount:
+          type: integer
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string

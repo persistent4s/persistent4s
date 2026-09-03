@@ -18,18 +18,14 @@ package persistent4s
 
 import fs2.Stream
 
-/** Subscribes to a topic and streams [[EventEnvelope]]s.
-  *
-  * Each emitted element is paired with an acknowledge action (`F[Unit]`) that must be invoked after successfully
-  * processing the envelope.
-  */
-trait EventSubscriber[F[_], A <: Event]:
+/** Subscribes to a topic and streams [[IncomingMessage]]s. */
+trait MessageSubscriber[F[_]]:
 
-  /** Stream decoded envelopes from `topic`, each paired with an acknowledge action.
+  /** Stream messages from `topic`, each paired with its acknowledge action.
     *
     * @param fromBeginning
     *   where to start when this subscription has no recorded position yet: the earliest retained record if true, only
     *   records arriving from now on if false. It has no effect once a position has been acknowledged — a resumed
     *   subscription always continues from there, whichever value is passed.
     */
-  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, (EventEnvelope[A], F[Unit])]
+  def subscribe(topic: String, fromBeginning: Boolean): Stream[F, (IncomingMessage, F[Unit])]

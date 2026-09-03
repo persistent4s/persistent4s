@@ -38,12 +38,13 @@ object MessageOutbox:
 
   extension [F[_]: MonadThrow](outbox: MessageOutbox[F])
 
-    /** Typed convenience: encode `message` via its [[MessageCodec]] and enqueue it to `topic`. Encoding failures are
-      * raised into `F`.
+    /** Typed convenience: encode `message` via its [[MessageEncoder]] and enqueue it to `topic`. Encoding failures are
+      * raised into `F`. Sending is not a reason to be able to read, so no decoder is asked for; a full [[MessageCodec]]
+      * satisfies this too.
       */
     def send[M](topic: String, key: Option[String], message: M, headers: Map[String, String] = Map.empty)(using
-      codec: MessageCodec[M],
+      encoder: MessageEncoder[M],
     ): F[Unit] =
-      codec.encode(message) match
+      encoder.encode(message) match
         case Right(payload) => outbox.enqueue(List(OutgoingMessage(topic, key, payload, headers)))
         case Left(error)    => error.raiseError[F, Unit]

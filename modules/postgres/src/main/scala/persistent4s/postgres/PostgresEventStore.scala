@@ -79,7 +79,8 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
   channelId: Identifier,
   outboxEnabled: Boolean,
 ) extends EventStore[F, A]
-    with EventNotification[F]:
+    with EventNotification[F]
+    with TransactionalMessages[F, A]:
 
   import PostgresEventStore.*
 
@@ -102,7 +103,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
     runAppend(None, events.flatten.toList, Nil)
 
   /** Atomic append with optimistic-concurrency check, plus message enqueue in the same transaction. */
-  def appendWithMessages(
+  override def appendWithMessages(
     eventFilter: EventFilter,
     expectedIndex: Long,
     messages: List[OutgoingMessage],
@@ -111,7 +112,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
     runAppend(Some((eventFilter, expectedIndex)), events.flatten.toList, messages)
 
   /** Atomic append without OCC, plus message enqueue in the same transaction. */
-  def appendUncheckedWithMessages(
+  override def appendUncheckedWithMessages(
     messages: List[OutgoingMessage],
     events: List[PendingEvent[A]]*,
   ): F[List[EventEnvelope[A]]] =
