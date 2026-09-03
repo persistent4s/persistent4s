@@ -6,36 +6,42 @@ A purely functional event sourcing library for Scala, built on [Typelevel](https
 
 ## Overview
 
-persistent4s provides both **aggregateless** and **aggregate-based** event sourcing patterns, letting you choose the right level of abstraction for your use case.
+persistent4s is **aggregateless**: commands and projections fold the events they actually need, declaring the scopes
+they touch instead of loading an aggregate root.
 
-- **Aggregateless** — work directly with event streams. Append events, read streams, build projections. No aggregate boilerplate.
-- **Aggregate** — optional layer on top, with state folding and command handling for when you need it.
 - **Typed scopes** — declare durable history and concurrency boundaries once, including multi-scope and multi-key commands.
+- **Command handling** — fold the state a command needs, return typed rejections, and append under an optimistic-concurrency check.
 - **Evolvable events** — stable event IDs, payload versions, aliases, and Circe JSON upcasters.
 - **Bounded replay** — versioned command snapshots backed by PostgreSQL, with event history remaining the source of truth.
+- **Projections** — exactly-once handlers, per-key parallel folding, and leader election so a horizontally scaled service keeps one writer per checkpoint.
 - **Atomic read models** — PostgreSQL repositories can commit projection state and its checkpoint in one transaction.
+- **Read-your-writes** — optionally wait for a projection to catch up before a command returns.
+- **Transactional outbox** — events and outgoing messages enqueued in the same transaction that appends, then relayed to Kafka.
+- **Sagas** — orchestration across services: requests leave through the outbox, replies arrive as messages, and no event of one service ever enters another's log.
 
 ## Modules
 
 | Module | Artifact | Description |
 |---|---|---|
-| core | `persistent4s-core` | Pure abstractions — `EventStore[F]`, domain types, aggregate support |
+| core | `persistent4s-core` | Pure abstractions — `EventStore[F]`, command handling, projections, domain types |
 | postgres | `persistent4s-postgres` | PostgreSQL implementation via [Skunk](https://github.com/tpolecat/skunk) |
 | circe | `persistent4s-circe` | JSON serialization via [Circe](https://github.com/circe/circe) |
-| kafka | `persistent4s-kafka` | Event publishing/subscribing via [fs2-kafka](https://github.com/fd4s/fs2-kafka) |
-| testkit | `persistent4s-testkit` | In-memory EventStore and test helpers for unit testing |
+| kafka | `persistent4s-kafka` | Event and message relaying via [fs2-kafka](https://github.com/fd4s/fs2-kafka) |
+| monitoring | `persistent4s-monitoring` | Developer-facing HTTP page for projection checkpoints — pause, resume, reindex |
 
 ## Getting started
 
 ```scala
 libraryDependencies ++= Seq(
-  "io.github.antoniojimeneznieto" %% "persistent4s-core"     % "<version>",
-  "io.github.antoniojimeneznieto" %% "persistent4s-postgres"  % "<version>",
-  "io.github.antoniojimeneznieto" %% "persistent4s-circe"     % "<version>",
-  "io.github.antoniojimeneznieto" %% "persistent4s-kafka"     % "<version>",
-  "io.github.antoniojimeneznieto" %% "persistent4s-testkit"   % "<version>" % Test,
+  "io.github.persistent4s" %% "persistent4s-core"       % "<version>",
+  "io.github.persistent4s" %% "persistent4s-postgres"   % "<version>",
+  "io.github.persistent4s" %% "persistent4s-circe"      % "<version>",
+  "io.github.persistent4s" %% "persistent4s-kafka"      % "<version>",
+  "io.github.persistent4s" %% "persistent4s-monitoring" % "<version>",
 )
 ```
+
+Runnable examples live in `modules/examples`, each with its own `docker-compose.yml` and README.
 
 ## Derived PostgreSQL projection repositories
 
