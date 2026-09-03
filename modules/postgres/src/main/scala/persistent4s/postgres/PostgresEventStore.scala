@@ -34,7 +34,7 @@ import persistent4s.*
 import skunk.*
 import skunk.circe.codec.all.jsonb
 import skunk.codec.all.*
-import skunk.data.Identifier
+import skunk.data.{Arr, Identifier}
 import skunk.implicits.*
 
 /** A pending event's storage form: the schema the codec owns plus its payload parsed as JSON. */
@@ -283,7 +283,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
       case (true, false) =>
         session.unique(lastSequenceByEventTypesQuery(eventTypeList.size))(eventTypeList)
       case (false, true) =>
-        session.unique(lastSequenceByTagsQuery(tagList.size))(tagList)
+        session.unique(lastSequenceByTagsQuery)(Arr(tagList*))
       case (false, false) =>
         session.unique(lastSequenceByBothQuery(tagList.size, eventTypeList.size))(
           tagList *: eventTypeList *: EmptyTuple,
@@ -293,9 +293,9 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
     session: Session[F],
     tags: Set[Tag],
   ): F[Unit] =
-    tags.toList
-      .sortBy(_.value)
-      .traverse_(tag => session.unique(acquireTagLockQuery)(tag.value).void)
+    val sortedTags = tags.toList.map(_.value).sorted
+    if sortedTags.isEmpty then Async[F].unit
+    else session.execute(acquireTagLocksQuery)(Arr(sortedTags*)).void
 
   private def insertEvents(
     session: Session[F],
@@ -450,8 +450,11 @@ object PostgresEventStore:
   private[postgres] val eventDecoder: Decoder[EventRow] =
     int8 *: uuid *: text *: int4 *: tagsCodec *: jsonb *: bool *: headersCodec *: timestamptz
 
-  private val acquireTagLockQuery: Query[String, String] =
-    sql"""SELECT pg_advisory_xact_lock(hashtextextended($text, 0))::text""".query(text)
+  private val acquireTagLocksQuery: Query[Arr[String], String] =
+    sql"""
+      SELECT pg_advisory_xact_lock(hashtextextended(t.tag, 0))::text
+      FROM (SELECT unnest($_text) AS tag ORDER BY 1) AS t
+    """.query(text)
 
   /** The no-op `DO UPDATE` makes a duplicate `event_id` still produce a `RETURNING` row, so the caller always gets the
     * committed envelope. `xmax = 0` then distinguishes a freshly inserted row from one that already existed: on a real
@@ -497,13 +500,15 @@ object PostgresEventStore:
       WHERE event_type = ANY(ARRAY[${text.list(numEventTypes)}])
     """.query(int8)
 
-  private def lastSequenceByTagsQuery(
-    numTags: Int,
-  ): Query[List[String], Long] =
+  private val lastSequenceByTagsQuery: Query[Arr[String], Long] =
     sql"""
-      SELECT COALESCE(MAX(et.sequence_number), 0)
-      FROM event_tags et
-      WHERE et.tag = ANY(ARRAY[${text.list(numTags)}])
+      SELECT COALESCE(MAX(perTag.latest), 0)
+      FROM unnest($_text) AS t(tag)
+      CROSS JOIN LATERAL (
+        SELECT MAX(et.sequence_number) AS latest
+        FROM event_tags et
+        WHERE et.tag = t.tag
+      ) AS perTag
     """.query(int8)
 
   private def lastSequenceByBothQuery(
