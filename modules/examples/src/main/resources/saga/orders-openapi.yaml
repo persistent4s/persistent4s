@@ -158,7 +158,7 @@ components:
 
     PlaceOrderRequest:
       type: object
-      required: [orderId, customerId, itemId, amount]
+      required: [orderId, customerId, itemId, amount, price]
       properties:
         orderId:
           type: string
@@ -173,11 +173,21 @@ components:
         amount:
           type: integer
           minimum: 1
+        price:
+          type: integer
+          description: |
+            Belongs to the payment service, which this service never consults — it is carried on `OrderPlaced` and
+            reaches payment as `AuthorizePayment`.
+
+            Payment accepts an **even** price and declines an **odd** one. That rule is arbitrary on purpose: it is the
+            knob for picking which way the saga settles. Even, with stock available, ends `Confirmed`; odd ends
+            `Cancelled` and releases the stock inventory had already reserved.
       example:
         orderId: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
         customerId: 11111111-1111-1111-1111-111111111111
         itemId: 22222222-2222-2222-2222-222222222222
         amount: 2
+        price: 100
 
     OrderAccepted:
       type: object
