@@ -109,7 +109,7 @@ object PostgresGapToleranceSuite extends IOSuite:
     appendOne(store, tags, "discarded-duplicate", Some(existingId)).void
 
   test("readFrom withholds events past a fresh gap, then bridges it once the gap goes stale") {
-    case PostgresModule.Components(store, _, _, _, _, _, _, sessions, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, sessions, _) =>
       val tag = Tag("gap-test", UUID.randomUUID().toString)
       val firstId = UUID.randomUUID()
       for
@@ -128,7 +128,7 @@ object PostgresGapToleranceSuite extends IOSuite:
   }
 
   test("readFrom(-1, ...) does not misdetect a gap before the very first event ever stored") {
-    case PostgresModule.Components(store, _, _, _, _, _, _, sessions, _) =>
+    case PostgresModule.Components(store, _, _, _, _, _, _, _, sessions, _) =>
       // -1 is DefaultProjector's real initial checkpoint sentinel (ProjectionCheckpointState's default), not 0 — the
       // very first safe-boundary check a fresh projection ever does uses it.
       val tag = Tag("gap-test", UUID.randomUUID().toString)
@@ -142,7 +142,7 @@ object PostgresGapToleranceSuite extends IOSuite:
   test(
     "an append exceeding appendTimeout is rolled back cleanly, raising AppendTimeoutException, without " +
       "leaving the store stuck",
-  ) { case PostgresModule.Components(store, _, _, _, _, _, _, sessions, _) =>
+  ) { case PostgresModule.Components(store, _, _, _, _, _, _, _, sessions, _) =>
     val tag = Tag("timeout-test", UUID.randomUUID().toString)
     // A timeout this tight can't complete even the first round-trip, so it deterministically triggers
     // AppendTimeoutException regardless of real DB/network timing — no pg_sleep or held-open transaction needed.

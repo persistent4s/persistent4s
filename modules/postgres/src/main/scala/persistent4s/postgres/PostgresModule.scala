@@ -118,6 +118,7 @@ object PostgresModule:
     outbox: Option[PostgresOutbox[F, A]],
     messageOutbox: Option[PostgresMessageOutbox[F]],
     leaderElection: PostgresLeaderElection[F],
+    sagaRepository: Option[PostgresSagaRepository[F]],
     sessions: Resource[F, Session[F]],
     sendNotification: EventStoreNotification => F[Unit],
   ):
@@ -171,6 +172,7 @@ object PostgresModule:
     configPath: String = defaultConfigPath,
     enableOutbox: Boolean = false,
     enableMessageOutbox: Boolean = false,
+    enableSaga: Boolean = false,
     gapTimeout: FiniteDuration = defaultGapTimeout,
     appendTimeout: FiniteDuration = defaultGapTimeout / 3,
   ): Resource[F, Components[F, A]] =
@@ -182,8 +184,9 @@ object PostgresModule:
              ),
            )
       pool       <- createSessionPool[F](config)
-      _          <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox))
-      components <- components[F, A](pool, codec, enableOutbox, enableMessageOutbox, gapTimeout, appendTimeout)
+      _          <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox, enableSaga))
+      components <-
+        components[F, A](pool, codec, enableOutbox, enableMessageOutbox, enableSaga, gapTimeout, appendTimeout)
     yield components
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
@@ -200,6 +203,7 @@ object PostgresModule:
     codec: EventCodec[A],
     enableOutbox: Boolean = false,
     enableMessageOutbox: Boolean = false,
+    enableSaga: Boolean = false,
     gapTimeout: FiniteDuration = defaultGapTimeout,
     appendTimeout: FiniteDuration = defaultGapTimeout / 3,
   ): Resource[F, Components[F, A]] =
@@ -210,8 +214,9 @@ object PostgresModule:
              ),
            )
       pool       <- createSessionPool[F](config)
-      _          <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox))
-      components <- components[F, A](pool, codec, enableOutbox, enableMessageOutbox, gapTimeout, appendTimeout)
+      _          <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox, enableSaga))
+      components <-
+        components[F, A](pool, codec, enableOutbox, enableMessageOutbox, enableSaga, gapTimeout, appendTimeout)
     yield components
 
   /** Wire the raw PostgreSQL store, wrap it with otel4s instrumentation, and expose the shared pool alongside command
@@ -223,6 +228,7 @@ object PostgresModule:
     codec: EventCodec[A],
     enableOutbox: Boolean,
     enableMessageOutbox: Boolean,
+    enableSaga: Boolean,
     gapTimeout: FiniteDuration,
     appendTimeout: FiniteDuration,
   ): Resource[F, Components[F, A]] =
@@ -240,8 +246,9 @@ object PostgresModule:
       checkpoint,
       PostgresCommandSnapshotStore.make[F](pool),
       if enableOutbox then Some(PostgresOutbox[F, A](pool, codec)) else None,
-      if enableMessageOutbox then Some(PostgresMessageOutbox[F](pool)) else None,
+      if enableMessageOutbox || enableSaga then Some(PostgresMessageOutbox[F](pool)) else None,
       PostgresLeaderElection.make[F](pool),
+      if enableSaga then Some(PostgresSagaRepository[F](pool)) else None,
       pool,
       raw.notify,
     )
@@ -305,6 +312,7 @@ object PostgresModule:
     pool: Resource[F, Session[F]],
     enableOutbox: Boolean,
     enableMessageOutbox: Boolean,
+    enableSaga: Boolean,
   ): F[Unit] =
     pool.use { session =>
       for
@@ -312,7 +320,7 @@ object PostgresModule:
         _                 <-
           if !eventsTableExists then Logger[F].info("Event store schema not found, creating schema...")
           else Logger[F].info("Event store schema already exists, ensuring required objects are present")
-        _ <- createSchema(session, enableOutbox, enableMessageOutbox)
+        _ <- createSchema(session, enableOutbox, enableMessageOutbox, enableSaga)
       yield ()
     }
 
@@ -323,13 +331,20 @@ object PostgresModule:
     session: Session[F],
     enableOutbox: Boolean,
     enableMessageOutbox: Boolean,
+    enableSaga: Boolean,
   ): F[Unit] =
     val outboxDdl =
       if enableOutbox then session.execute(PostgresOutbox.createTableCommand).void
       else Sync[F].unit
 
     val outboxMessageDdl =
-      if enableMessageOutbox then session.execute(PostgresMessageOutbox.createTableCommand).void
+      if enableMessageOutbox || enableSaga then session.execute(PostgresMessageOutbox.createTableCommand).void
+      else Sync[F].unit
+
+    val sagaDdl =
+      if enableSaga then
+        session.execute(PostgresSagaRepository.createTableCommand) *>
+          session.execute(PostgresSagaRepository.createDueIndexCommand).void
       else Sync[F].unit
 
     session.execute(createTableCommand) *>
@@ -342,7 +357,8 @@ object PostgresModule:
       outboxMessageDdl *>
       session.execute(PostgresProjectionCheckpoint.createTableCommand) *>
       session.execute(PostgresLeaderElection.createTableCommand) *>
-      session.execute(PostgresCommandSnapshotStore.createTableCommand).void
+      session.execute(PostgresCommandSnapshotStore.createTableCommand) *>
+      sagaDdl
 
   private val checkTableExistsQuery: Query[String, Long] =
     sql"""
