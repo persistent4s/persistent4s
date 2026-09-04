@@ -16,6 +16,8 @@
 
 package persistent4s.postgres
 
+import scala.concurrent.duration.*
+
 import cats.effect.*
 import cats.effect.std.{Console, SecureRandom}
 import cats.syntax.all.*
@@ -148,6 +150,8 @@ object PostgresModule:
 
   private val defaultConfigPath = "persistent4s.postgres"
 
+  private val defaultGapTimeout = 6.seconds
+
   /** Create a PostgresModule Resource that manages the lifecycle of the database connection and event store.
     *
     * @param codec
@@ -169,6 +173,8 @@ object PostgresModule:
     enableOutbox: Boolean = false,
     enableMessageOutbox: Boolean = false,
     enableSaga: Boolean = false,
+    gapTimeout: FiniteDuration = defaultGapTimeout,
+    appendTimeout: FiniteDuration = defaultGapTimeout / 3,
   ): Resource[F, Components[F, A]] =
     for
       config <- Resource.eval(loadConfig[F](configPath))
@@ -179,7 +185,8 @@ object PostgresModule:
            )
       pool       <- createSessionPool[F](config)
       _          <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox, enableSaga))
-      components <- components[F, A](pool, codec, enableOutbox, enableMessageOutbox, enableSaga)
+      components <-
+        components[F, A](pool, codec, enableOutbox, enableMessageOutbox, enableSaga, gapTimeout, appendTimeout)
     yield components
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
@@ -197,6 +204,8 @@ object PostgresModule:
     enableOutbox: Boolean = false,
     enableMessageOutbox: Boolean = false,
     enableSaga: Boolean = false,
+    gapTimeout: FiniteDuration = defaultGapTimeout,
+    appendTimeout: FiniteDuration = defaultGapTimeout / 3,
   ): Resource[F, Components[F, A]] =
     for
       _ <- Resource.eval(
@@ -206,7 +215,8 @@ object PostgresModule:
            )
       pool       <- createSessionPool[F](config)
       _          <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox, enableSaga))
-      components <- components[F, A](pool, codec, enableOutbox, enableMessageOutbox, enableSaga)
+      components <-
+        components[F, A](pool, codec, enableOutbox, enableMessageOutbox, enableSaga, gapTimeout, appendTimeout)
     yield components
 
   /** Wire the raw PostgreSQL store, wrap it with otel4s instrumentation, and expose the shared pool alongside command
@@ -219,12 +229,15 @@ object PostgresModule:
     enableOutbox: Boolean,
     enableMessageOutbox: Boolean,
     enableSaga: Boolean,
+    gapTimeout: FiniteDuration,
+    appendTimeout: FiniteDuration,
   ): Resource[F, Components[F, A]] =
     for
       given SecureRandom[F] <- Resource.eval(SecureRandom.javaSecuritySecureRandom[F])
-      raw                    = PostgresEventStore[F, A](pool, codec, outboxEnabled = enableOutbox)
-      store                 <- Resource.eval(InstrumentedEventStore.makeWithNotification[F, A](raw))
-      checkpoint            <- Resource.eval(
+      raw                    = PostgresEventStore[F, A](pool, codec, outboxEnabled = enableOutbox, gapTimeout = gapTimeout,
+              appendTimeout = appendTimeout)
+      store      <- Resource.eval(InstrumentedEventStore.makeWithNotification[F, A](raw))
+      checkpoint <- Resource.eval(
                       InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)),
                     )
     yield Components(

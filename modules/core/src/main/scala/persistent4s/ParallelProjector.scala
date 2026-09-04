@@ -49,6 +49,8 @@ import java.io.PrintWriter
   *   maximum number of events processed in a single batch (default: 100)
   * @param maxBatchPerPass
   *   maximum number of batches read in a single wake-up pass (default: 10)
+  * @param gapRecheckInterval
+  *   how often to re-poll even without a new-event notification (default: 10 seconds).
   */
 final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
@@ -56,6 +58,7 @@ final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
   batchSize: Int = 100,
   maxBatchPerPass: Int = 10,
   publishTimeout: FiniteDuration = 1.second,
+  gapRecheckInterval: FiniteDuration = 10.seconds,
 ) extends Projector[F, A]:
 
   final private case class Work(
@@ -346,6 +349,9 @@ final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
           .evalMap(notification => notificationHandler(wakeupState, notification))
           .drain
 
+      val gapRecheckTicks =
+        Stream.awakeEvery[F](gapRecheckInterval).evalMap(_ => markPending(wakeupState)).drain
+
       val passLimit = batchSize * maxBatchPerPass
 
       val projector =
@@ -368,6 +374,6 @@ final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
             }
           }
 
-      projector.concurrently(notifications)
+      projector.concurrently(notifications).concurrently(gapRecheckTicks)
     }
   }

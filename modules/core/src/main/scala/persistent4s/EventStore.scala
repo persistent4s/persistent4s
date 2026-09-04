@@ -68,8 +68,11 @@ trait EventStore[F[_], A <: Event]:
     * The source has already serialized those events under its own concurrency model, so re-checking on the receiving
     * side is meaningless.
     *
-    * The events are still assigned fresh `globalPosition` values in commit order and emit the same notification on
-    * commit, so projections wake up normally.
+    * The events are still assigned fresh `globalPosition` values and emit the same notification on commit, so
+    * projections wake up normally. `globalPosition` values are allocated at write time, not commit time, so two
+    * concurrent transactions can commit in the opposite order from which they were allocated; a gap-tolerant
+    * implementation (e.g. the Postgres store) copes with this by withholding a late-committing lower position from
+    * readers until it either fills in or is confirmed permanent, rather than letting it be silently skipped.
     *
     * The `events` parameter is variadic with the same semantics as [[append]]: multiple lists are flattened into a
     * single ordered sequence, and an empty call is a no-op (no writes, no notification).
