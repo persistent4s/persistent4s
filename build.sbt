@@ -1,6 +1,6 @@
 import org.typelevel.sbt.gha.{JavaSpec, PermissionValue, Permissions}
 
-ThisBuild / tlBaseVersion          := "0.2"
+ThisBuild / tlBaseVersion          := "0.3"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
 ThisBuild / scalaVersion           := "3.3.8"
 ThisBuild / tlJdkRelease           := Some(17)
