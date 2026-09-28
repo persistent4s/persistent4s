@@ -68,7 +68,7 @@ val LogbackV = "1.6.3"
 
 val TestcontainersV = "1.21.4"
 
-val Fs2KafkaV = "4.0.0"
+val Fs2KafkaV = "4.1.1"
 
 val WeaverV = "0.13.0"
 
