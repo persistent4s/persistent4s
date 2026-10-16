@@ -68,6 +68,32 @@ For events without declared scopes, command handlers select their history with `
 and accept those events with `on[PatientCreated].allEvents`. Projections provide the key directly,
 for example `on[PatientCreated](_.number).create(...)`. Scope keys are never guessed from fields.
 
+### Partial updates
+
+Use `PatchCodec` for update events with fields of type `Option[Option[A]]`:
+
+```scala
+import persistent4s.circe.PatchCodec
+
+final case class PatientUpdated(
+  number: Int,
+  name: Option[Option[String]] = None,
+) extends PatientEvent derives PatchCodec
+```
+
+`PatchCodec` supplies both Circe `Encoder` and `Decoder`. It uses the case class's field names.
+
+| Scala value | JSON field | Meaning |
+| --- | --- | --- |
+| `None` | omitted | Keep the current value |
+| `Some(None)` | `"name": null` | Clear the value |
+| `Some(Some("Alice"))` | `"name": "Alice"` | Set the value |
+
+Ordinary `Option[A]` fields keep Circe's usual behavior. Commands decide which fields may be
+cleared and omit supplied values that already match the current state. Event handlers apply only
+the supplied fields. `CirceEventCodec.derived` uses patch codecs like any other event codecs,
+including custom schemas, aliases, and older-version readers.
+
 ## Derived PostgreSQL projection repositories
 
 Projection states can use generated Skunk persistence without database annotations or handwritten CRUD:
