@@ -49,6 +49,8 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
 
   final case class LegacyObserved(id: String) extends TestEvent
 
+  final case class DerivedEvent(id: String, value: Int) extends TestEvent
+
   final case class CrossScoped(id: String, ownerId: String) extends TestEvent
 
   final case class MultiScoped(ids: List[String]) extends TestEvent
@@ -335,6 +337,19 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
       expect(ambiguous.failed.toOption.exists(_.getMessage.contains("withinAll")))
   }
 
+  pureTest("automatic schemas still require allEvents for typed command scopes") {
+    val missingIntent = Try {
+      new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        protected val behavior = handler(()):
+          scope(EntityScope)(_.id)
+          on[DerivedEvent].ignore
+          emit(command => DerivedEvent(command.id, 1))
+    }
+
+    expect(missingIntent.failed.toOption.exists(_.getMessage.contains("shares no typed scope"))) and
+      expect(missingIntent.failed.toOption.exists(_.getMessage.contains("allEvents")))
+  }
+
   pureTest("withinAll requires every shared scope key to match") {
     final case class CrossCommand(id: String, ownerId: String)
 
@@ -404,6 +419,41 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
               List(
                 PendingEvent(expectedEvent, commandTags, incrementedSchema.eventType, isExternal = false),
               ),
+            ),
+          ),
+        )
+    }
+  }
+
+  test("schema-less events replay and inherit command tags with class-name metadata") {
+    val derivedHandler = new EventSourcedCommandHandler[TestCommand, Int, TestEvent, Unit]:
+      protected val behavior = handler(0):
+        scope(EntityScope)(_.id)
+        on[DerivedEvent].allEvents.evolve((_, event) => event.value)
+        emit((state, command) => DerivedEvent(command.id, state + 1))
+
+    val tags = Set(EntityScope("a").toTag)
+    val eventType = EventTypeName.of[DerivedEvent]
+    val store = new RecordingStore(
+      List(envelope(7L, DerivedEvent("a", 2), tags)),
+      schema = _ => Some(EventStorageSchema(eventType, version = 1)),
+    )
+    val runtime = CommandRuntime.eventStoreOnly(store)
+
+    runtime.execute(derivedHandler, TestCommand("a")).map { result =>
+      val expectedFilter = EventFilter(Set.empty, tags)
+      val expectedEvent = DerivedEvent("a", 3)
+
+      expect(derivedHandler.eventTypes == Set(eventType)) and
+        expect(result.map(_.map(_.payload)) == Right(List(expectedEvent))) and
+        expect(result.map(_.map(_.metadata.eventVersion)) == Right(List(1))) and
+        expect(store.readFilter.contains(expectedFilter)) and
+        expect(
+          store.appended.contains(
+            (
+              expectedFilter,
+              7L,
+              List(PendingEvent(expectedEvent, tags, eventType, isExternal = false)),
             ),
           ),
         )

@@ -26,6 +26,15 @@ object EventSchemaSuite extends SimpleIOSuite:
 
   final case class TestEvent(value: String, entityId: UUID = new UUID(0L, 0L)) extends Event
 
+  final case class StableEvent(value: String) extends Event
+
+  object StableEvent:
+
+    given EventSchema[StableEvent] =
+      EventSchema[StableEvent]("library.stable-event", version = 2)
+        .withAlias("OldStableEvent")
+        .scopedBy(Scope[String]("library.value"))(_.value)
+
   private val legacyCodec = new EventCodec[TestEvent]:
     def encode(event: TestEvent): Either[Throwable, String] = Right(event.value)
 
@@ -75,6 +84,36 @@ object EventSchemaSuite extends SimpleIOSuite:
     val schema = EventSchema.legacy[TestEvent]
 
     expect(schema.eventType == EventTypeName.of[TestEvent]) and expect(schema.version == 1)
+  }
+
+  pureTest("events get a class-name schema without declaring a given") {
+    val schema = summon[EventSchema[TestEvent]]
+
+    expect(schema.eventType == EventTypeName.of[TestEvent]) and
+      expect(schema.version == 1) and
+      expect(schema.acceptedEventTypes == Set(EventTypeName.of[TestEvent])) and
+      expect(schema.scopeNames.isEmpty) and
+      expect(schema.resolveScopes(TestEvent("payload")).isEmpty)
+  }
+
+  pureTest("companion schemas keep their identifiers, versions, aliases, and scopes") {
+    val schema = summon[EventSchema[StableEvent]]
+
+    expect(schema.eventType.value == "library.stable-event") and
+      expect(schema.version == 2) and
+      expect(schema.acceptedEventTypes.map(_.value) == Set("library.stable-event", "OldStableEvent")) and
+      expect(schema.scopeNames == Set("library.value")) and
+      expect(schema.resolveScopes(StableEvent("abc")) == Set(Scope[String]("library.value").apply("abc")))
+  }
+
+  pureTest("local schemas take precedence over automatic and companion schemas") {
+    given EventSchema[TestEvent] = EventSchema("local.test-event", version = 4)
+    given EventSchema[StableEvent] = EventSchema("local.stable-event", version = 5)
+
+    expect(summon[EventSchema[TestEvent]].eventType.value == "local.test-event") and
+      expect(summon[EventSchema[TestEvent]].version == 4) and
+      expect(summon[EventSchema[StableEvent]].eventType.value == "local.stable-event") and
+      expect(summon[EventSchema[StableEvent]].version == 5)
   }
 
   pureTest("legacy codecs expose additive schema metadata without implementation changes") {

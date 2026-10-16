@@ -43,6 +43,31 @@ libraryDependencies ++= Seq(
 
 Runnable examples live in `modules/examples`, each with its own `docker-compose.yml` and README.
 
+## Event definitions
+
+Events only need their fields and JSON codecs:
+
+```scala
+import io.circe.{Decoder, Encoder}
+import persistent4s.Event
+import persistent4s.circe.CirceEventCodec
+
+sealed trait PatientEvent extends Event
+
+final case class PatientCreated(number: Int, name: String)
+    extends PatientEvent derives Encoder, Decoder
+
+val eventCodec = CirceEventCodec.derived[PatientEvent]
+```
+
+The default event name is `PatientCreated`, with version `1`. An explicit `EventSchema`
+still takes precedence when you need a fixed name, aliases, versions, or shared scope definitions.
+Renaming an event class changes its default stored name; use an explicit schema to keep the old name.
+
+For events without declared scopes, command handlers select their history with `scope(...)`
+and accept those events with `on[PatientCreated].allEvents`. Projections provide the key directly,
+for example `on[PatientCreated](_.number).create(...)`. Scope keys are never guessed from fields.
+
 ## Derived PostgreSQL projection repositories
 
 Projection states can use generated Skunk persistence without database annotations or handwritten CRUD:
