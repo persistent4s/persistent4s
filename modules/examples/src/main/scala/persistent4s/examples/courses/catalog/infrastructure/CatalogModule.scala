@@ -21,14 +21,18 @@ import com.comcast.ip4s.*
 import fs2.io.net.Network
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import org.typelevel.otel4s.metrics.Meter
-import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
+import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
 import pureconfig.ConfigSource
 import skunk.*
 
 given Tracer[IO] = Tracer.Implicits.noop
 
 given Meter[IO] = Meter.Implicits.noop
+
+given TracerProvider[IO] = TracerProvider.noop[IO]
+
+given MeterProvider[IO] = MeterProvider.noop[IO]
 
 given Logger[IO] = Slf4jLogger.getLogger[IO]
 

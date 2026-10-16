@@ -24,8 +24,8 @@ import com.comcast.ip4s.*
 import fs2.concurrent.Topic
 import fs2.io.net.Network
 
-import org.typelevel.otel4s.metrics.Meter
-import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
+import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
 
 import persistent4s.*
 import persistent4s.examples.library.api.ValidationError
@@ -41,6 +41,10 @@ import org.typelevel.log4cats.Logger
 given Tracer[IO] = Tracer.Implicits.noop
 
 given Meter[IO] = Meter.Implicits.noop
+
+given TracerProvider[IO] = TracerProvider.noop[IO]
+
+given MeterProvider[IO] = MeterProvider.noop[IO]
 
 given logger: Logger[IO] = Slf4jLogger.getLogger[IO]
 

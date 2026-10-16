@@ -52,17 +52,19 @@ Global / onChangedBuildSource := ReloadOnSourceChanges
 Global / semanticdbEnabled    := true // for metals
 
 // Versions
-val CatsEffectV = "3.7.0"
+val CatsEffectV = "3.7.1"
 
-val Fs2V = "3.13.0"
+val Fs2V = "3.14.0"
 
-val SkunkV = "2.0.0-RC2"
+val SkunkV = "2.0.0-RC3"
 
 val CirceV = "0.14.16"
 
 val Log4CatsV = "2.8.0"
 
 val Otel4sV = "1.1.0"
+
+val OtelInstrumentationV = "2.31.1-alpha"
 
 val LogbackV = "1.6.3"
 
@@ -99,15 +101,17 @@ lazy val postgres = (project in file("modules/postgres"))
   .settings(
     name                 := "persistent4s-postgres",
     libraryDependencies ++= List(
-      "org.tpolecat"          %% "skunk-core"      % SkunkV,
-      "org.tpolecat"          %% "skunk-circe"     % SkunkV,
-      "org.typelevel"         %% "otel4s-core"     % Otel4sV,
-      "org.typelevel"         %% "log4cats-core"   % Log4CatsV,
-      "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
-      "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
-      "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
-      "org.testcontainers"     % "postgresql"      % TestcontainersV % Test,
-      "org.typelevel"         %% "log4cats-noop"   % Log4CatsV       % Test,
+      "org.tpolecat"                    %% "skunk-core"                                  % SkunkV,
+      "org.tpolecat"                    %% "skunk-circe"                                 % SkunkV,
+      "org.typelevel"                   %% "otel4s-core"                                 % Otel4sV,
+      "io.opentelemetry.instrumentation" % "opentelemetry-instrumentation-api-incubator" % OtelInstrumentationV,
+      "org.typelevel"                   %% "log4cats-core"                               % Log4CatsV,
+      "com.github.pureconfig"           %% "pureconfig-core"                             % PureconfigV,
+      "org.typelevel"                   %% "weaver-cats"                                 % WeaverV         % Test,
+      "ch.qos.logback"                   % "logback-classic"                             % LogbackV        % Test,
+      "org.testcontainers"               % "postgresql"                                  % TestcontainersV % Test,
+      "org.typelevel"                   %% "log4cats-noop"                               % Log4CatsV       % Test,
+      "org.typelevel"                   %% "otel4s-oteljava-testkit"                     % Otel4sV         % Test,
     ),
   )
 

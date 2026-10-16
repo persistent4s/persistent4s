@@ -21,14 +21,16 @@ import cats.effect.std.{Console, SecureRandom}
 import cats.syntax.all.*
 
 import fs2.io.net.Network
+import io.opentelemetry.instrumentation.api.incubator.semconv.db.{SqlDialect, SqlQueryAnalyzer}
 import org.typelevel.otel4s.metrics.Histogram
 import org.typelevel.log4cats.Logger
-import org.typelevel.otel4s.metrics.Meter
-import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
+import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
 import pureconfig.ConfigSource
 import skunk.*
 import skunk.codec.all.*
 import skunk.implicits.*
+import skunk.telemetry.{QueryAnalyzer, TelemetryConfig}
 
 import persistent4s.{
   CommandRuntime,
@@ -88,6 +90,10 @@ object PostgresModuleError:
   *   - Establishing database connections
   *   - Creating the event store schema if it doesn't exist
   *   - Providing the PostgresEventStore instance
+  *
+  * Query spans use sanitized SQL summaries; pool and wire-protocol spans are disabled. Bound parameters are excluded
+  * from query attributes. Skunk can still include values in exception details or mixed literal/parameter SQL text, so
+  * applications must sanitize those fields before export. Providers must come from the application's telemetry SDK.
   */
 object PostgresModule:
 
@@ -163,7 +169,7 @@ object PostgresModule:
     *   initialized event, command-snapshot, checkpoint and shared-session components, or a clear connection/config
     *   failure
     */
-  def make[F[_]: Async: Network: Logger: Tracer: Meter: Console, A <: Event](
+  def make[F[_]: Async: Network: Logger: Tracer: Meter: TracerProvider: MeterProvider: Console, A <: Event](
     codec: EventCodec[A],
     configPath: String = defaultConfigPath,
     enableOutbox: Boolean = false,
@@ -191,7 +197,7 @@ object PostgresModule:
     * @return
     *   initialized event, command-snapshot, checkpoint and shared-session components
     */
-  def makeWithConfig[F[_]: Async: Network: Logger: Tracer: Meter: Console, A <: Event](
+  def makeWithConfig[F[_]: Async: Network: Logger: Tracer: Meter: TracerProvider: MeterProvider: Console, A <: Event](
     config: PostgresConfig,
     codec: EventCodec[A],
     enableOutbox: Boolean = false,
@@ -251,7 +257,7 @@ object PostgresModule:
         )
     }
 
-  private def createSessionPool[F[_]: Async: Network: Tracer: Meter: Console](
+  private def createSessionPool[F[_]: Async: Network: TracerProvider: MeterProvider: Meter: Console](
     config: PostgresConfig,
   ): Resource[F, Resource[F, Session[F]]] =
     for
@@ -262,6 +268,13 @@ object PostgresModule:
                    .withUserAndPassword(config.user, config.password)
                    .withDatabase(config.database)
                    .withSSL(toSkunkSSL(config.ssl))
+                   .withRedactionStrategy(RedactionStrategy.All)
+                   .withTelemetryConfig(
+                     TelemetryConfig.default
+                       .withPoolSpans(TelemetryConfig.PoolSpans.Disabled)
+                       .withProtocolSpans(TelemetryConfig.ProtocolSpans.Disabled)
+                       .withQueryAnalyzer(queryAnalyzer),
+                   )
                    .pooled(config.maxConnections)
                    .adaptError { case e => PostgresModuleError.ConnectionFailed(e) }
       waitDuration <- Resource.eval(
@@ -272,6 +285,18 @@ object PostgresModule:
                           .create,
                       )
     yield timedPool(rawPool, waitDuration)
+
+  private val queryAnalyzer: QueryAnalyzer =
+    val analyzer = SqlQueryAnalyzer.create(true)
+    QueryAnalyzer { sql =>
+      Option(analyzer.analyzeWithSummary(sql, SqlDialect.DOUBLE_QUOTES_ARE_IDENTIFIERS)).map { query =>
+        QueryAnalyzer.Analysis(
+          queryText = Option(query.getQueryText),
+          storedProcedureName = Option(query.getStoredProcedureName),
+          querySummary = Option(query.getQuerySummary),
+        )
+      }
+    }
 
   private def timedPool[F[_]: Async](
     pool: Resource[F, Session[F]],

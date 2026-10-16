@@ -161,6 +161,20 @@ remain explicit. SQL identifiers are validated and double-quoted exactly as decl
 replace generated callbacks with `DerivedPostgresRepository.customized`. Concrete repositories can continue to use
 `useSession` and the derived `rowCodec` for specialized Skunk queries; `all` may also be overridden.
 
+## PostgreSQL telemetry
+
+`PostgresModule.make` and `makeWithConfig` use Skunk 2.0.0-RC3. Supply `TracerProvider[F]` and
+`MeterProvider[F]` from the same telemetry SDK as the existing `Tracer[F]` and `Meter[F]`.
+Tests and examples that disable telemetry can supply the providers' explicit `noop` instances.
+
+Database spans keep the caller's trace and use SQL summaries such as `SELECT patients`.
+Pool and PostgreSQL protocol spans are disabled. Query attributes omit bound parameter values;
+the SQL analyzer removes literal values from unparameterized query text. Skunk's exception details
+and queries mixing literals with parameters can still contain values, so applications must sanitize
+those fields before export. Database duration and pool wait metrics remain available. Applications
+control sampling, including whether background database operations should start their own traces,
+through their telemetry SDK.
+
 ## Design principles
 
 - **Purely functional** — built on cats-effect `IO` and fs2 `Stream`
