@@ -192,3 +192,9 @@ lazy val monitoring = (project in file("modules/monitoring"))
   )
 
 addCommandAlias("lint", ";scalafmtAll ;scalafmtSbt")
+
+// Publish the modules used by persistent4s-template without changing release versioning.
+addCommandAlias(
+  "publishLocalDev",
+  ";set ThisBuild / version := \"0.3.1-SNAPSHOT\";core/publishLocal;circe/publishLocal;postgres/publishLocal",
+)
