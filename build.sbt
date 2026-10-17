@@ -197,8 +197,11 @@ lazy val monitoring = (project in file("modules/monitoring"))
 
 addCommandAlias("lint", ";scalafmtAll ;scalafmtSbt")
 
-// Publish the modules used by persistent4s-template without changing release versioning.
+// Publish the template's development dependencies to Nexus without changing release versioning.
 addCommandAlias(
-  "publishLocalDev",
-  ";set ThisBuild / version := \"0.3.1-SNAPSHOT\";core/publishLocal;circe/publishLocal;postgres/publishLocal",
+  "publishDev",
+  ";set ThisBuild / version := \"0.3.1-SNAPSHOT\";" +
+    "set every publishTo := Some(\"Lestoises snapshots\" at \"https://nexus.lestoises.ch/repository/maven-snapshots/\");" +
+    "set every credentials := Seq(Credentials(\"Sonatype Nexus Repository Manager\", \"nexus.lestoises.ch\", sys.env(\"NEXUS_USER\"), sys.env(\"NEXUS_PASSWORD\")));" +
+    "core/publish;circe/publish;postgres/publish",
 )

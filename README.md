@@ -94,15 +94,19 @@ cleared and omit supplied values that already match the current state. Event han
 the supplied fields. `CirceEventCodec.derived` uses patch codecs like any other event codecs,
 including custom schemas, aliases, and older-version readers.
 
-## Local development with the template
+## Development versions for the template
 
-Run `sbt publishLocalDev` in this repository to publish `core`, `circe`, and `postgres`
-as `0.3.1-SNAPSHOT` to your local Ivy repository. Then run `sbt ci` in `persistent4s-template`.
-Repeat the publish command after changing the library. In an open sbt session, run `reload`
-and `update`; reimport the build in Metals to pick up the new jars.
+With `NEXUS_USER` and `NEXUS_PASSWORD` set, run:
 
-This local version is not available from Maven. Other machines and CI must publish it locally
-from this checkout before building the template. Release publishing keeps its existing version rules.
+```sh
+sbt publishDev
+```
+
+This publishes `core`, `circe`, and `postgres` as `0.3.1-SNAPSHOT` to
+`https://nexus.lestoises.ch/repository/maven-snapshots/` for the team and CI.
+Template developers download these dependencies through sbt; no local publication is needed.
+After publishing library changes, refresh dependencies and force a backend image rebuild.
+Release publishing keeps its existing version rules.
 
 ## Derived PostgreSQL projection repositories
 
