@@ -416,7 +416,7 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   final protected def tags(resolve: C => Set[Tag])(using collector: CommandBehaviorCollector[C, S, A, R]): Unit =
     collector.setTags(resolve)
 
-  /** Start a typed state transition declaration. High-level handlers require an explicit stable [[EventSchema]]. A
+  /** Start a typed state transition declaration. Events use a class-name schema unless a custom one is provided. A
     * single typed scope shared by the command and event is matched automatically. No shared scope requires an explicit
     * `.allEvents`, while multiple shared scopes require `.within(scope)` or `.withinAll`.
     */

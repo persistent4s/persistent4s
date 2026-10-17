@@ -59,22 +59,6 @@ object EventSourcedProjectionSuite extends SimpleIOSuite:
 
   private val members = Scope[UUID]("library.member")
 
-  private given EventSchema[Created] = EventSchema.legacy[Created]
-
-  private given EventSchema[Incremented] = EventSchema.legacy[Incremented]
-
-  private given EventSchema[Replaced] = EventSchema.legacy[Replaced]
-
-  private given EventSchema[FannedOut] = EventSchema.legacy[FannedOut]
-
-  private given EventSchema[Removed] = EventSchema.legacy[Removed]
-
-  private given EventSchema[EffectFailed] = EventSchema.legacy[EffectFailed]
-
-  private given EventSchema[MetadataRecorded] = EventSchema.legacy[MetadataRecorded]
-
-  private given EventSchema[Guarded] = EventSchema.legacy[Guarded]
-
   private given stableCreatedSchema: EventSchema[StableCreated] =
     EventSchema[StableCreated]("library.book-created").withAlias("BookCreated")
 

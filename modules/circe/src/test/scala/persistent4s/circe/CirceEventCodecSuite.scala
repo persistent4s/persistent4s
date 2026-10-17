@@ -149,6 +149,18 @@ object CirceEventCodecSuite extends SimpleIOSuite:
     expect(openHierarchyCodec.decode(EventTypeName.fromString("UnknownEvent"), "{}").isLeft)
   }
 
+  pureTest("derived codecs use the automatic schema without an event companion") {
+    val derivedCodec = CirceEventCodec.derived[FirstEventFamily]
+    val event = FirstEvent("hello")
+    val schema = summon[EventSchema[FirstEvent]]
+    val encoded = derivedCodec.encodeWithSchema(event)
+
+    expect(encoded.map(_.eventType) == Right(schema.eventType)) and
+      expect(encoded.map(_.eventType.value) == Right("FirstEvent")) and
+      expect(encoded.map(_.version) == Right(1)) and
+      expect(encoded.flatMap(e => derivedCodec.decode(e.eventType, e.version, e.payload)) == Right(event))
+  }
+
   pureTest("derived codecs encode stable event schema metadata") {
     val event = NameChanged("current")
     val encoded = evolvingCodec.encodeWithSchema(event)

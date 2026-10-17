@@ -43,6 +43,64 @@ libraryDependencies ++= Seq(
 
 Runnable examples live in `modules/examples`, each with its own `docker-compose.yml` and README.
 
+## Event definitions
+
+Events only need their fields and JSON codecs:
+
+```scala
+import io.circe.{Decoder, Encoder}
+import persistent4s.Event
+import persistent4s.circe.CirceEventCodec
+
+sealed trait PatientEvent extends Event
+
+final case class PatientCreated(number: Int, name: String)
+    extends PatientEvent derives Encoder, Decoder
+
+val eventCodec = CirceEventCodec.derived[PatientEvent]
+```
+
+The default event name is `PatientCreated`, with version `1`. An explicit `EventSchema`
+still takes precedence when you need a fixed name, aliases, versions, or shared scope definitions.
+Renaming an event class changes its default stored name; use an explicit schema to keep the old name.
+
+For events without declared scopes, command handlers select their history with `scope(...)`
+and accept those events with `on[PatientCreated].allEvents`. Projections provide the key directly,
+for example `on[PatientCreated](_.number).create(...)`. Scope keys are never guessed from fields.
+
+### Partial updates
+
+Use `PatchCodec` for update events with fields of type `Option[Option[A]]`:
+
+```scala
+import persistent4s.circe.PatchCodec
+
+final case class PatientUpdated(
+  number: Int,
+  name: Option[Option[String]] = None,
+) extends PatientEvent derives PatchCodec
+```
+
+`PatchCodec` supplies both Circe `Encoder` and `Decoder`. It uses the case class's field names.
+
+| Scala value | JSON field | Meaning |
+| --- | --- | --- |
+| `None` | omitted | Keep the current value |
+| `Some(None)` | `"name": null` | Clear the value |
+| `Some(Some("Alice"))` | `"name": "Alice"` | Set the value |
+
+Ordinary `Option[A]` fields keep Circe's usual behavior. Commands decide which fields may be
+cleared and omit supplied values that already match the current state. Event handlers apply only
+the supplied fields. `CirceEventCodec.derived` uses patch codecs like any other event codecs,
+including custom schemas, aliases, and older-version readers.
+
+## Releases
+
+The GitHub release workflow publishes `persistent4s` to Maven Central.
+Applications use a published version through sbt; no private repository or local
+publication is required. Library changes must be released before applications
+can depend on them.
+
 ## Derived PostgreSQL projection repositories
 
 Projection states can use generated Skunk persistence without database annotations or handwritten CRUD:
@@ -99,6 +157,20 @@ remain explicit. SQL identifiers are validated and double-quoted exactly as decl
 `.column(_.scalaField, "database_column")` for legacy names, define a `PostgresField[A]` for a custom scalar codec, or
 replace generated callbacks with `DerivedPostgresRepository.customized`. Concrete repositories can continue to use
 `useSession` and the derived `rowCodec` for specialized Skunk queries; `all` may also be overridden.
+
+## PostgreSQL telemetry
+
+`PostgresModule.make` and `makeWithConfig` use Skunk 2.0.0-RC3. Supply `TracerProvider[F]` and
+`MeterProvider[F]` from the same telemetry SDK as the existing `Tracer[F]` and `Meter[F]`.
+Tests and examples that disable telemetry can supply the providers' explicit `noop` instances.
+
+Database spans keep the caller's trace and use SQL summaries such as `SELECT patients`.
+Pool and PostgreSQL protocol spans are disabled. Query attributes omit bound parameter values;
+the SQL analyzer removes literal values from unparameterized query text. Skunk's exception details
+and queries mixing literals with parameters can still contain values, so applications must sanitize
+those fields before export. Database duration and pool wait metrics remain available. Applications
+control sampling, including whether background database operations should start their own traces,
+through their telemetry SDK.
 
 ## Design principles
 

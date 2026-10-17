@@ -31,14 +31,18 @@ import org.http4s.client.Client
 import org.http4s.ember.client.EmberClientBuilder
 import org.http4s.implicits.*
 import org.testcontainers.containers.PostgreSQLContainer
-import org.typelevel.otel4s.metrics.Meter
+import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
 import org.typelevel.log4cats.Logger
-import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
 import weaver.IOSuite
 
 given Tracer[IO] = org.typelevel.otel4s.trace.Tracer.Implicits.noop
 
 given Meter[IO] = org.typelevel.otel4s.metrics.Meter.Implicits.noop
+
+given TracerProvider[IO] = TracerProvider.noop[IO]
+
+given MeterProvider[IO] = MeterProvider.noop[IO]
 
 given Logger[IO] = org.typelevel.log4cats.noop.NoOpLogger[IO]
 

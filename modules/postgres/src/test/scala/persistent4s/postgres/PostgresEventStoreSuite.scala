@@ -24,8 +24,8 @@ import cats.syntax.all.*
 import io.circe.syntax.*
 import io.circe.{Decoder, Encoder}
 
-import org.typelevel.otel4s.metrics.Meter
-import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
+import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
 import org.typelevel.log4cats.Logger
 
 import org.testcontainers.containers.PostgreSQLContainer
@@ -40,6 +40,10 @@ import persistent4s.PendingEvent
 given Tracer[IO] = Tracer.Implicits.noop
 
 given Meter[IO] = Meter.Implicits.noop
+
+given TracerProvider[IO] = TracerProvider.noop[IO]
+
+given MeterProvider[IO] = MeterProvider.noop[IO]
 
 object PostgresEventStoreSuite extends IOSuite:
 
