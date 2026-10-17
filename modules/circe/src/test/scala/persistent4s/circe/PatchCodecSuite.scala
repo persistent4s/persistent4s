@@ -72,8 +72,8 @@ object PatchCodecSuite extends SimpleIOSuite:
         .build
 
   private val examples: List[(String, NameUpdate)] = List(
-    "{}" -> NameUpdate(None),
-    """{"name":null}""" -> NameUpdate(Some(None)),
+    "{}"                   -> NameUpdate(None),
+    """{"name":null}"""    -> NameUpdate(Some(None)),
     """{"name":"Alice"}""" -> NameUpdate(Some(Some("Alice"))),
   )
 
@@ -114,8 +114,10 @@ object PatchCodecSuite extends SimpleIOSuite:
 
     expect(update.asJson.noSpaces == expected) and
       expect(parser.decode[MixedUpdate](expected) == Right(update)) and
-      expect(parser.decode[MixedUpdate]("""{"number":1,"metadata":null}""") ==
-        Right(MixedUpdate(1, None, None, None, None, Json.Null)))
+      expect(
+        parser.decode[MixedUpdate]("""{"number":1,"metadata":null}""") ==
+          Right(MixedUpdate(1, None, None, None, None, Json.Null)),
+      )
   }
 
   pureTest("required fields and invalid dates remain errors") {

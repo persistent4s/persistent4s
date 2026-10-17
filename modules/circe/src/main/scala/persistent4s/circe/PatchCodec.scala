@@ -43,7 +43,7 @@ object PatchCodec:
   inline def derived[A](using mirror: Mirror.ProductOf[A]): PatchCodec[A] =
     instance(mirror, fields[mirror.MirroredElemTypes, mirror.MirroredElemLabels])
 
-  private final case class Field(
+  final private case class Field(
     name: String,
     encoder: Encoder[Any],
     decoder: Decoder[Any],
@@ -54,10 +54,15 @@ object PatchCodec:
     new PatchCodec[A]:
       def encodeObject(value: A): JsonObject =
         val values = value.asInstanceOf[Product].productIterator
-        JsonObject.fromIterable(fields.iterator.zip(values).collect {
-          case (field, entry) if !field.omitNone || entry != None =>
-            field.name -> field.encoder(entry)
-        }.toList)
+        JsonObject.fromIterable(
+          fields.iterator
+            .zip(values)
+            .collect {
+              case (field, entry) if !field.omitNone || entry != None =>
+                field.name -> field.encoder(entry)
+            }
+            .toList,
+        )
 
       def apply(cursor: HCursor): Decoder.Result[A] =
         if !cursor.value.isObject then Left(DecodingFailure("Expected an object", cursor.history))
@@ -75,14 +80,14 @@ object PatchCodec:
 
   private def nestedOptionDecoder[A](inner: Decoder[Option[A]]): Decoder[Option[Option[A]]] =
     Decoder.withReattempt {
-      case cursor: HCursor => inner(cursor).map(Some(_))
+      case cursor: HCursor                                => inner(cursor).map(Some(_))
       case cursor: FailedCursor if !cursor.incorrectFocus => Right(None)
-      case cursor => Left(DecodingFailure("Expected an object field", cursor.history))
+      case cursor                                         => Left(DecodingFailure("Expected an object field", cursor.history))
     }
 
   private inline def fields[Types <: Tuple, Labels <: Tuple]: List[Field] =
     inline erasedValue[(Types, Labels)] match
-      case _: (EmptyTuple, EmptyTuple) => Nil
+      case _: (EmptyTuple, EmptyTuple)            => Nil
       case _: ((head *: tail), (label *: labels)) =>
         val name = constValue[label].asInstanceOf[String]
         val encoder = summonInline[Encoder[head]].asInstanceOf[Encoder[Any]]
