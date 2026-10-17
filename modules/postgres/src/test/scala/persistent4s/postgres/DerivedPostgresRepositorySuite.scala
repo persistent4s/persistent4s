@@ -307,6 +307,117 @@ object DerivedPostgresRepositorySuite extends IOSuite:
     )
   }
 
+  test("ordering and pagination apply globally across shuffled IN batches") { resources =>
+    isolatedScalar(resources).use { repository =>
+      val states = paginationStates(8)
+      val shuffled = List(7, 1, 5, 0, 6, 2, 4, 3, 7).map(states(_).rowId)
+
+      for
+        _    <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
+        page <- repository
+                  .filterBy(_.rowId)
+                  .in(shuffled)
+                  .and(_.revision)
+                  .in(List(7, 5, 3, 1, 6, 4, 2, 0))
+                  .orderBy(_.revision)
+                  .limit(3)
+                  .offset(2L)
+                  .run
+      yield expect(page == states.slice(2, 5))
+    }
+  }
+
+  test("descending ordering appends an ascending tie-breaker before pagination") { resources =>
+    isolatedScalar(resources).use { repository =>
+      val states = paginationStates(8).zipWithIndex.map { case (state, index) =>
+        state.copy(revision = index / 2)
+      }
+
+      for
+        _    <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
+        page <- repository.query
+                  .orderByDescending(_.revision)
+                  .orderBy(_.displayName)
+                  .offset(1L)
+                  .limit(4)
+                  .run
+      yield expect(page == List(7, 4, 5, 2).map(states(_)))
+    }
+  }
+
+  test("omitting every optional filter still applies ordering and a row limit") { resources =>
+    isolatedScalar(resources).use { repository =>
+      val states = paginationStates(5)
+
+      for
+        _    <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
+        page <- repository
+                  .filterBy(_.displayName)
+                  .is(Option.empty[String])
+                  .and(_.active)
+                  .is(Option.empty[Boolean])
+                  .orderBy(_.revision)
+                  .limit(2)
+                  .run
+      yield expect(page == states.take(2))
+    }
+  }
+
+  test("greater-than cursors return consecutive bounded pages") { resources =>
+    isolatedScalar(resources).use { repository =>
+      val states = paginationStates(7)
+
+      for
+        _     <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
+        first <- repository
+                   .filterBy(_.revision)
+                   .greaterThan(Option.empty[Int])
+                   .orderBy(_.revision)
+                   .limit(3)
+                   .run
+        second <- repository
+                    .filterBy(_.revision)
+                    .greaterThan(Some(first.last.revision))
+                    .orderBy(_.revision)
+                    .limit(3)
+                    .run
+        last <- repository
+                  .filterBy(_.revision)
+                  .greaterThan(second.last.revision)
+                  .orderBy(_.revision)
+                  .limit(3)
+                  .run
+      yield expect.all(
+        first == states.take(3),
+        second == states.slice(3, 6),
+        last == states.drop(6),
+      )
+    }
+  }
+
+  test("a zero limit returns no rows") { resources =>
+    isolatedScalar(resources).use { repository =>
+      val states = paginationStates(3)
+
+      for
+        _    <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
+        page <- repository.query.orderBy(_.revision).limit(0).run
+      yield expect(page.isEmpty)
+    }
+  }
+
+  test("negative limits and offsets are rejected") { resources =>
+    isolatedScalar(resources).use { repository =>
+      for
+        limit  <- IO.defer(repository.query.limit(-1).run).attempt
+        offset <- IO.defer(repository.query.offset(-1L).run).attempt
+      yield expect.all(
+        limit.left.exists(_.isInstanceOf[IllegalArgumentException]),
+        offset.left.exists(_.isInstanceOf[IllegalArgumentException]),
+      )
+    }
+  }
+
   test("derived state and checkpoint commit together and a stale checkpoint rolls both back") { resources =>
     val id = UUID.randomUUID()
     val name = s"derived-${UUID.randomUUID()}"
@@ -338,6 +449,23 @@ object DerivedPostgresRepositorySuite extends IOSuite:
       .derived[ScalarState]("derived_scalar_state")
       .key(_.rowId)
       .withBatchSize(2)
+
+  private def paginationStates(count: Int): List[ScalarState] =
+    List.tabulate(count) { index =>
+      ScalarState(UUID.randomUUID(), s"name-$index", None, index, active = true)
+    }
+
+  private def isolatedScalar(resources: Resources): Resource[IO, DerivedPostgresRepository[IO, UUID, ScalarState]] =
+    val table = PostgresTable.derived[ScalarState]("derived_paged_state").key(_.rowId).withBatchSize(2)
+    Resource
+      .make(
+        resources.pool
+          .use(_.execute(sql"CREATE TABLE derived_paged_state (LIKE derived_scalar_state INCLUDING ALL)".command))
+          .void,
+      ) { _ =>
+        resources.pool.use(_.execute(sql"DROP TABLE derived_paged_state".command)).void
+      }
+      .as(DerivedPostgresRepository(resources.pool, table))
 
   private val compositeTable: PostgresTable[(UUID, UUID), CompositeState] =
     PostgresTable
