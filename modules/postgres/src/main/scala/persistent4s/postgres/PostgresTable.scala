@@ -19,6 +19,7 @@ package persistent4s.postgres
 import cats.MonadThrow
 import cats.syntax.all.*
 
+import skunk.codec.all.{int4, int8}
 import skunk.util.Origin
 import skunk.{AppliedFragment, Codec, Command, Fragment, Query, Void}
 
@@ -197,6 +198,18 @@ final class PostgresTable[K, S <: Product] private (
       Origin.unknown,
     )(value)
 
+  private[postgres] def filterGreaterThanPredicate[A](
+    scalaFieldName: String,
+    codec: Codec[A],
+    value: A,
+  ): AppliedFragment =
+    val column = filterColumn(scalaFieldName, codec)
+    Fragment[A](
+      List(Left(s"$column > "), Right(codec.sql)),
+      codec,
+      Origin.unknown,
+    )(value)
+
   private[postgres] def filterValuesPredicate[A](
     scalaFieldName: String,
     codec: Codec[A],
@@ -224,13 +237,48 @@ final class PostgresTable[K, S <: Product] private (
     sqlFragment(s"${filterColumn(scalaFieldName)} IS NOT NULL")
 
   private[postgres] def filterQuery(predicates: List[AppliedFragment]): AppliedFragment =
-    require(predicates.nonEmpty, "A generated PostgreSQL filter query requires at least one predicate")
+    selectQuery(predicates, Nil, None, None)
 
-    val conjunction = predicates.tail.foldLeft(predicates.head) { (combined, predicate) =>
-      combined |+| sqlFragment(" AND ") |+| predicate
+  private[postgres] def filterQuery(plan: PostgresFilterPlan): AppliedFragment =
+    val predicates = plan.clauses.map { clause =>
+      clause.alternatives match
+        case single :: Nil => single
+        case alternatives  =>
+          val disjunction = alternatives.tail.foldLeft(alternatives.head) { (combined, alternative) =>
+            combined |+| sqlFragment(" OR ") |+| alternative
+          }
+          sqlFragment("(") |+| disjunction |+| sqlFragment(")")
     }
-    val applied =
-      sqlFragment(s"SELECT ${quotedColumns.mkString(", ")} FROM $quotedTable WHERE ") |+| conjunction
+    selectQuery(predicates, plan.ordering, plan.limit, plan.offset)
+
+  private def selectQuery(
+    predicates: List[AppliedFragment],
+    ordering: List[PostgresOrdering],
+    limit: Option[Int],
+    offset: Option[Long],
+  ): AppliedFragment =
+    val select = sqlFragment(s"SELECT ${quotedColumns.mkString(", ")} FROM $quotedTable")
+    val filtered = predicates match
+      case Nil           => select
+      case first :: rest =>
+        val conjunction = rest.foldLeft(first) { (combined, predicate) =>
+          combined |+| sqlFragment(" AND ") |+| predicate
+        }
+        select |+| sqlFragment(" WHERE ") |+| conjunction
+    val ordered =
+      if ordering.isEmpty then filtered
+      else
+        val columns = ordering.map { order =>
+          val direction = if order.descending then "DESC" else "ASC"
+          s"${filterColumn(order.scalaFieldName)} $direction"
+        }
+        filtered |+| sqlFragment(columns.mkString(" ORDER BY ", ", ", ""))
+    val limited = limit.fold(ordered) { count =>
+      ordered |+| Fragment[Int](List(Left(" LIMIT "), Right(int4.sql)), int4, Origin.unknown)(count)
+    }
+    val applied = offset.fold(limited) { count =>
+      limited |+| Fragment[Long](List(Left(" OFFSET "), Right(int8.sql)), int8, Origin.unknown)(count)
+    }
 
     require(
       applied.fragment.encoder.types.size <= Short.MaxValue.toInt,

@@ -40,6 +40,14 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
   def all: F[List[S]] =
     useSession(_.execute(mapping.allQuery))
 
+  /** Start a query without filters. Add ordering and a limit before loading a large table.
+    *
+    * @return
+    *   an immutable query over this repository
+    */
+  final def query: PostgresFilterQuery[F, K, S] =
+    new PostgresFilterQuery(this, PostgresFilterPlan())
+
   /** Select one state field to filter. The selector must reference the field directly.
     *
     * Example: `repository.filterBy(_.active).is(true).run`, or
@@ -56,7 +64,7 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
     postgresField: PostgresField[A],
     optional: Boolean,
   ): PostgresFieldFilter[F, K, S, A] =
-    new PostgresFilterQuery(this, PostgresFilterPlan()).filterField(scalaFieldName, postgresField, optional)
+    query.filterField(scalaFieldName, postgresField, optional)
 
   private[postgres] def addValueFilter[A](
     plan: PostgresFilterPlan,
@@ -70,6 +78,16 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
       else mapping.filterValuePredicate(scalaFieldName, postgresField.codec, value)
 
     plan.append(PostgresFilterClause(predicate :: Nil))
+
+  private[postgres] def addGreaterThanFilter[A](
+    plan: PostgresFilterPlan,
+    scalaFieldName: String,
+    value: A,
+    postgresField: PostgresField[A],
+  ): PostgresFilterPlan =
+    plan.append(
+      PostgresFilterClause(mapping.filterGreaterThanPredicate(scalaFieldName, postgresField.codec, value) :: Nil),
+    )
 
   private[postgres] def addValuesFilter[A](
     plan: PostgresFilterPlan,
@@ -113,7 +131,12 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
     plan.append(PostgresFilterClause(mapping.filterNotNullPredicate(scalaFieldName) :: Nil))
 
   private[postgres] def runFilter(plan: PostgresFilterPlan): F[List[S]] =
-    if plan.matchesNothing then Async[F].pure(List.empty)
+    if plan.matchesNothing || plan.limit.contains(0) then Async[F].pure(List.empty)
+    else if plan.hasQueryOptions then
+      useSession { session =>
+        val applied = mapping.filterQuery(plan)
+        session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
+      }
     else if plan.clauses.isEmpty then all
     else
       val predicateCombinations =

@@ -53,6 +53,27 @@ final class PostgresFieldFilter[F[_], K, S <: Product, A] private[postgres] (
   /** More explicit alias for [[is]]. */
   def equalTo(value: A): PostgresFilterQuery[F, K, S] = is(value)
 
+  /** Match values greater than the supplied value using SQL `>`.
+    *
+    * @param value
+    *   exclusive lower bound
+    * @return
+    *   the query with this condition
+    */
+  def greaterThan(value: A): PostgresFilterQuery[F, K, S] =
+    query.greaterThan(scalaFieldName, value, postgresField)
+
+  /** Omit the lower bound when an optional API input is absent.
+    *
+    * @param value
+    *   optional exclusive lower bound for a required state field
+    * @return
+    *   the query with this condition, or unchanged when absent
+    */
+  @targetName("greaterThanOptionalInput")
+  def greaterThan(value: Option[A])(using NotGiven[A <:< Option[Any]]): PostgresFilterQuery[F, K, S] =
+    value.fold(query)(greaterThan)
+
   /** Match any supplied value with SQL `IN`. An empty collection makes the complete query match no rows. */
   def in(values: IterableOnce[A]): PostgresFilterQuery[F, K, S] =
     query.within(scalaFieldName, values, postgresField, optionalField)
