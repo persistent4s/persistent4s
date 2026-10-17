@@ -21,7 +21,7 @@ import skunk.AppliedFragment
 /** An immutable, parameterized `AND` query over a derived PostgreSQL state.
   *
   * Build one with [[DerivedPostgresRepository.query]] or [[DerivedPostgresRepository.filterBy]], then call [[run]].
-  * Filtering, ordering, and pagination run in PostgreSQL. Without [[limit]], `run` loads every matching row.
+  * Filtering, ordering, and pagination run in PostgreSQL. Without [[withLimit]], `run` loads every matching row.
   */
 final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
   private[postgres] val repository: DerivedPostgresRepository[F, K, S],
@@ -54,30 +54,48 @@ final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
   final inline def orderByDescending[A](inline field: S => A): PostgresFilterQuery[F, K, S] =
     ${ DerivedPostgresRepositoryMacros.orderBy[F, K, S, A]('this, 'field, '{ true }) }
 
-  /** Limit the rows returned by PostgreSQL.
+  /** Limit the rows returned by PostgreSQL. [[run]] rejects a negative count.
     *
     * @param count
     *   maximum row count; zero returns no rows
     * @return
-    *   the query with this non-negative limit
+    *   the query with this limit
     */
-  def limit(count: Int): PostgresFilterQuery[F, K, S] =
-    require(count >= 0, "PostgreSQL query limit must not be negative")
+  def withLimit(count: Int): PostgresFilterQuery[F, K, S] =
     copy(plan = plan.copy(limit = Some(count)))
 
-  /** Skip rows in PostgreSQL. For deep pages, prefer a filter on the last returned key.
+  /** Skip rows in PostgreSQL. [[run]] rejects a negative count. For deep pages, prefer a filter on the last returned
+    * key.
     *
     * @param count
     *   non-negative number of rows to skip
     * @return
     *   the query with this offset
     */
-  def offset(count: Long): PostgresFilterQuery[F, K, S] =
-    require(count >= 0, "PostgreSQL query offset must not be negative")
+  def withOffset(count: Long): PostgresFilterQuery[F, K, S] =
     copy(plan = plan.copy(offset = Some(count)))
 
+  /** Alias for [[withLimit]].
+    *
+    * @param count
+    *   maximum row count; zero returns no rows
+    * @return
+    *   the query with this limit
+    */
+  def limit(count: Int): PostgresFilterQuery[F, K, S] = withLimit(count)
+
+  /** Alias for [[withOffset]].
+    *
+    * @param count
+    *   number of rows to skip
+    * @return
+    *   the query with this offset
+    */
+  def offset(count: Long): PostgresFilterQuery[F, K, S] = withOffset(count)
+
   /** Execute this query and load its results. No ordering is implied unless explicitly supplied. Ordered or paged
-    * queries use one SQL statement and must fit PostgreSQL's parameter limit.
+    * queries use one SQL statement and must fit PostgreSQL's parameter limit. Negative limits and offsets fail with
+    * [[IllegalArgumentException]] before opening a database connection.
     *
     * @return
     *   matching rows, ordered and bounded as requested

@@ -154,24 +154,26 @@ omitted, `run` loads all rows unless a limit is supplied.
 Apply ordering and pagination before `run` so PostgreSQL does the work:
 
 ```scala
-repository.query.orderBy(_.bookId).limit(100).run
+repository.query.orderBy(_.bookId).withLimit(100).withOffset(200).run
 
 repository.filterBy(_.author).is(author)
-  .and(_.bookId).greaterThan(lastBookId)
   .orderBy(_.bookId)
-  .limit(100)
+  .withLimit(50)
+  .withOffset(200)
   .run
 ```
 
 `query` starts without filters. `orderBy` sorts ascending; `orderByDescending` sorts descending. Repeated ordering
-calls add tie breakers. Include a unique field for stable pages. `limit` bounds the number of rows returned, while
-`offset` skips rows in SQL. For deep pages, prefer `greaterThan` on an indexed unique field, as above, so the database
-can continue from the last value instead of counting skipped rows. A missing optional `greaterThan` input omits that
-condition, which selects the first page. Limits and offsets must be non-negative; a zero limit returns no rows.
+calls add tie breakers. Include a unique field for stable pages. `withLimit` bounds the number of rows returned, while
+`withOffset` skips rows in SQL. Both are checked when `run` executes: a negative value fails with `IllegalArgumentException`
+before opening a database connection. A zero limit returns no rows. `limit` and `offset` remain aliases.
+
+For deep pages, `filterBy(_.bookId).greaterThan(lastBookId)` can continue from an indexed unique value instead of
+counting skipped rows. A missing optional `greaterThan` input omits that condition, which selects the first page.
 
 Ordered or paged `IN` filters use one SQL statement, so the order and limit apply to the complete result. Plans exceeding
 the PostgreSQL parameter limit are rejected. Unordered, unbounded `IN` filters retain batched execution. Calling `run`
-without `limit` still loads all matches; sorting or taking rows from its returned list happens in application memory.
+without `withLimit` still loads all matches; sorting or taking rows from its returned list happens in application memory.
 
 The generated repository uses the existing `PostgresAtomicRepository`, so projection-state writes and checkpoint
 updates run on the same Skunk session and transaction. Schema migrations, constraints, indexes, and application queries
