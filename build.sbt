@@ -1,6 +1,6 @@
 import org.typelevel.sbt.gha.{JavaSpec, PermissionValue, Permissions}
 
-ThisBuild / tlBaseVersion          := "0.3"
+ThisBuild / tlBaseVersion          := "0.4"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
 ThisBuild / scalaVersion           := "3.3.8"
 ThisBuild / tlJdkRelease           := Some(17)
@@ -196,12 +196,3 @@ lazy val monitoring = (project in file("modules/monitoring"))
   )
 
 addCommandAlias("lint", ";scalafmtAll ;scalafmtSbt")
-
-// Publish the template's development dependencies to Nexus without changing release versioning.
-addCommandAlias(
-  "publishDev",
-  ";set ThisBuild / version := \"0.3.1-SNAPSHOT\";" +
-    "set every publishTo := Some(\"Lestoises snapshots\" at \"https://nexus.lestoises.ch/repository/maven-snapshots/\");" +
-    "set every credentials := Seq(Credentials(\"Sonatype Nexus Repository Manager\", \"nexus.lestoises.ch\", sys.env(\"NEXUS_USER\"), sys.env(\"NEXUS_PASSWORD\")));" +
-    "core/publish;circe/publish;postgres/publish",
-)

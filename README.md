@@ -94,19 +94,12 @@ cleared and omit supplied values that already match the current state. Event han
 the supplied fields. `CirceEventCodec.derived` uses patch codecs like any other event codecs,
 including custom schemas, aliases, and older-version readers.
 
-## Development versions for the template
+## Releases
 
-With `NEXUS_USER` and `NEXUS_PASSWORD` set, run:
-
-```sh
-sbt publishDev
-```
-
-This publishes `core`, `circe`, and `postgres` as `0.3.1-SNAPSHOT` to
-`https://nexus.lestoises.ch/repository/maven-snapshots/` for the team and CI.
-Template developers download these dependencies through sbt; no local publication is needed.
-After publishing library changes, refresh dependencies and force a backend image rebuild.
-Release publishing keeps its existing version rules.
+The GitHub release workflow publishes `persistent4s` to Maven Central.
+Applications use a published version through sbt; no private repository or local
+publication is required. Library changes must be released before applications
+can depend on them.
 
 ## Derived PostgreSQL projection repositories
 
