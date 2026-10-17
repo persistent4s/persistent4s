@@ -320,8 +320,8 @@ object DerivedPostgresRepositorySuite extends IOSuite:
                   .and(_.revision)
                   .in(List(7, 5, 3, 1, 6, 4, 2, 0))
                   .orderBy(_.revision)
-                  .limit(3)
-                  .offset(2L)
+                  .withLimit(3)
+                  .withOffset(2L)
                   .run
       yield expect(page == states.slice(2, 5))
     }
@@ -338,8 +338,8 @@ object DerivedPostgresRepositorySuite extends IOSuite:
         page <- repository.query
                   .orderByDescending(_.revision)
                   .orderBy(_.displayName)
-                  .offset(1L)
-                  .limit(4)
+                  .withOffset(1L)
+                  .withLimit(4)
                   .run
       yield expect(page == List(7, 4, 5, 2).map(states(_)))
     }
@@ -357,7 +357,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
                   .and(_.active)
                   .is(Option.empty[Boolean])
                   .orderBy(_.revision)
-                  .limit(2)
+                  .withLimit(2)
                   .run
       yield expect(page == states.take(2))
     }
@@ -373,19 +373,19 @@ object DerivedPostgresRepositorySuite extends IOSuite:
                    .filterBy(_.revision)
                    .greaterThan(Option.empty[Int])
                    .orderBy(_.revision)
-                   .limit(3)
+                   .withLimit(3)
                    .run
         second <- repository
                     .filterBy(_.revision)
                     .greaterThan(Some(first.last.revision))
                     .orderBy(_.revision)
-                    .limit(3)
+                    .withLimit(3)
                     .run
         last <- repository
                   .filterBy(_.revision)
                   .greaterThan(second.last.revision)
                   .orderBy(_.revision)
-                  .limit(3)
+                  .withLimit(3)
                   .run
       yield expect.all(
         first == states.take(3),
@@ -401,21 +401,24 @@ object DerivedPostgresRepositorySuite extends IOSuite:
 
       for
         _    <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
-        page <- repository.query.orderBy(_.revision).limit(0).run
+        page <- repository.query.orderBy(_.revision).withLimit(0).run
       yield expect(page.isEmpty)
     }
   }
 
-  test("negative limits and offsets are rejected") { resources =>
-    isolatedScalar(resources).use { repository =>
-      for
-        limit  <- IO.defer(repository.query.limit(-1).run).attempt
-        offset <- IO.defer(repository.query.offset(-1L).run).attempt
-      yield expect.all(
-        limit.left.exists(_.isInstanceOf[IllegalArgumentException]),
-        offset.left.exists(_.isInstanceOf[IllegalArgumentException]),
-      )
-    }
+  test("run rejects negative bounds before opening a connection or returning an empty page") { _ =>
+    val pool = Resource.eval(IO.raiseError[Session[IO]](new AssertionError("Database connection must not be opened")))
+    val repository = DerivedPostgresRepository(pool, scalarTable)
+    val queries = List(
+      repository.query.withLimit(-1),
+      repository.query.withOffset(-1L),
+      repository.query.withLimit(0).withOffset(-1L),
+      repository.filterBy(_.rowId).in(List.empty[UUID]).withLimit(-1),
+      repository.filterBy(_.rowId).in(List.empty[UUID]).withOffset(-1L),
+    )
+    val results = queries.map(_.run.attempt)
+
+    results.sequence.map(replies => expect(replies.forall(_.left.exists(_.isInstanceOf[IllegalArgumentException]))))
   }
 
   test("derived state and checkpoint commit together and a stale checkpoint rolls both back") { resources =>

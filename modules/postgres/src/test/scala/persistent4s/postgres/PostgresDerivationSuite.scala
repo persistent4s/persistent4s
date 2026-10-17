@@ -251,8 +251,8 @@ object PostgresDerivationSuite extends SimpleIOSuite:
       .greaterThan(Some(200))
       .orderByDescending(_.displayTitle)
       .orderBy(_.bookId)
-      .limit(20)
-      .offset(3000000000L)
+      .withLimit(20)
+      .withOffset(3000000000L)
     val applied = table.filterQuery(query.plan)
 
     IO.pure(
@@ -271,9 +271,9 @@ object PostgresDerivationSuite extends SimpleIOSuite:
     val table = PostgresTable.derived[BookState]("books").key(_.bookId)
     val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
     val base = repository.query.orderBy(_.bookId)
-    val page = table.filterQuery(base.limit(2).offset(4).plan)
+    val page = table.filterQuery(base.withLimit(2).withOffset(4).plan)
     val omitted = table.filterQuery(
-      repository.filterBy(_.HTTPStatus).greaterThan(Option.empty[Int]).orderBy(_.bookId).limit(2).plan,
+      repository.filterBy(_.HTTPStatus).greaterThan(Option.empty[Int]).orderBy(_.bookId).withLimit(2).plan,
     )
 
     IO.pure(
@@ -287,8 +287,10 @@ object PostgresDerivationSuite extends SimpleIOSuite:
           "ORDER BY \"book_id\" ASC LIMIT $1",
         base.plan.limit.isEmpty,
         base.plan.offset.isEmpty,
-        base.limit(1).limit(2).plan.limit.contains(2),
-        base.offset(1).offset(2).plan.offset.contains(2L),
+        base.withLimit(1).withLimit(2).plan.limit.contains(2),
+        base.withOffset(1).withOffset(2).plan.offset.contains(2L),
+        base.withLimit(Int.MaxValue).plan.limit.contains(Int.MaxValue),
+        base.limit(2).offset(4).plan == base.withLimit(2).withOffset(4).plan,
       ),
     )
   }
@@ -302,8 +304,8 @@ object PostgresDerivationSuite extends SimpleIOSuite:
       .and(_.HTTPStatus)
       .in(List(200, 201, 202))
       .orderBy(_.bookId)
-      .limit(2)
-      .offset(1)
+      .withLimit(2)
+      .withOffset(1)
     val applied = table.filterQuery(query.plan)
 
     IO.pure(
@@ -322,7 +324,7 @@ object PostgresDerivationSuite extends SimpleIOSuite:
   test("paged SQL queries reject plans exceeding PostgreSQL's parameter limit") {
     val table = PostgresTable.derived[BookState]("books").key(_.bookId)
     val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
-    val query = repository.filterBy(_.HTTPStatus).in(0 until Short.MaxValue.toInt).limit(1)
+    val query = repository.filterBy(_.HTTPStatus).in(0 until Short.MaxValue.toInt).withLimit(1)
 
     IO(table.filterQuery(query.plan)).attempt.map { result =>
       expect(
@@ -333,19 +335,35 @@ object PostgresDerivationSuite extends SimpleIOSuite:
     }
   }
 
-  test("query bounds reject negatives and a zero limit returns without acquiring a session") {
+  test("query bounds fail through IO before acquiring a session, including empty queries") {
     val table = PostgresTable.derived[BookState]("books").key(_.bookId)
-    val pool = Resource.eval(IO.raiseError[skunk.Session[IO]](new AssertionError("A zero limit accessed PostgreSQL")))
+    val pool = Resource.eval(IO.raiseError[skunk.Session[IO]](new AssertionError("Query bounds accessed PostgreSQL")))
     val repository = DerivedPostgresRepository[IO, UUID, BookState](pool, table)
+    val negativeLimit = repository.query.withLimit(-1).run
+    val negativeOffset = repository.query.withOffset(-1).run
+    val invalidZeroLimit = repository.query.withLimit(0).withOffset(-1).run
+    val invalidEmptyFilter = repository.filterBy(_.bookId).in(List.empty[UUID]).withLimit(-1).run
 
     for
-      negativeLimit  <- IO(repository.query.limit(-1)).attempt
-      negativeOffset <- IO(repository.query.offset(-1)).attempt
-      empty          <- repository.query.limit(0).run
+      limitFailure  <- negativeLimit.attempt
+      offsetFailure <- negativeOffset.attempt
+      zeroFailure   <- invalidZeroLimit.attempt
+      emptyFailure  <- invalidEmptyFilter.attempt
+      aliasFailure  <- repository.query.limit(-1).offset(0).run.attempt
+      empty         <- repository.query.withLimit(0).run
+      corrected     <- repository.query.withLimit(-1).withLimit(0).run
     yield expect.all(
-      negativeLimit.left.exists(_.isInstanceOf[IllegalArgumentException]),
-      negativeOffset.left.exists(_.isInstanceOf[IllegalArgumentException]),
+      limitFailure.left.exists(error =>
+        error.isInstanceOf[IllegalArgumentException] && error.getMessage.contains("limit must not be negative"),
+      ),
+      offsetFailure.left.exists(error =>
+        error.isInstanceOf[IllegalArgumentException] && error.getMessage.contains("offset must not be negative"),
+      ),
+      zeroFailure.left.exists(_.isInstanceOf[IllegalArgumentException]),
+      emptyFailure.left.exists(_.isInstanceOf[IllegalArgumentException]),
+      aliasFailure.left.exists(_.isInstanceOf[IllegalArgumentException]),
       empty.isEmpty,
+      corrected.isEmpty,
     )
   }
 
@@ -497,7 +515,7 @@ object PostgresDerivationSuite extends SimpleIOSuite:
       import persistent4s.postgres.*
       final case class OrderedState(id: java.util.UUID, title: String, revision: Int) derives PostgresRow
       def valid(repository: DerivedPostgresRepository[IO, java.util.UUID, OrderedState]): IO[List[OrderedState]] =
-        repository.query.orderBy(_.title).orderByDescending(_.id).limit(20).offset(50L)
+        repository.query.orderBy(_.title).orderByDescending(_.id).withLimit(20).withOffset(50L)
           .and(_.revision).greaterThan(Some(3)).run
     """)
     val computedErrors = typeCheckErrors("""
