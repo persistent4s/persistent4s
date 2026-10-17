@@ -40,6 +40,15 @@ private object DerivedPostgresRepositoryMacros:
 
     '{ $query.filterField(${ Expr(fieldName) }, $postgresField, ${ Expr(optional) }) }
 
+  def orderBy[F[_]: Type, K: Type, S <: Product: Type, A: Type](
+    query: Expr[PostgresFilterQuery[F, K, S]],
+    selector: Expr[S => A],
+    descending: Expr[Boolean],
+  )(using Quotes): Expr[PostgresFilterQuery[F, K, S]] =
+    val fieldName = selectedField(selector, "A PostgreSQL ordering")
+
+    '{ $query.orderField(${ Expr(fieldName) }, $descending) }
+
   private def isOptional[A: Type](using quotes: Quotes): Boolean =
     import quotes.reflect.*
     TypeRepr.of[A].dealias <:< TypeRepr.of[Option[Any]]

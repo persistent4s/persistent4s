@@ -20,7 +20,7 @@ import java.util.UUID
 
 import scala.compiletime.testing.{Error, typeCheckErrors}
 
-import cats.effect.IO
+import cats.effect.{IO, Resource}
 
 import skunk.codec.all.{int4, text, uuid}
 import skunk.implicits.*
@@ -237,6 +237,118 @@ object PostgresDerivationSuite extends SimpleIOSuite:
     )
   }
 
+  test("ordered queries use mapped columns and bind cursor, limit, and long offset values") {
+    val table = PostgresTable
+      .derived[BookState]("library.books")
+      .key(_.bookId)
+      .column(_.bookId, "id")
+      .column(_.displayTitle, "title")
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val query = repository
+      .filterBy(_.displayTitle)
+      .is("Dune")
+      .and(_.HTTPStatus)
+      .greaterThan(Some(200))
+      .orderByDescending(_.displayTitle)
+      .orderBy(_.bookId)
+      .limit(20)
+      .offset(3000000000L)
+    val applied = table.filterQuery(query.plan)
+
+    IO.pure(
+      expect.all(
+        applied.fragment.sql ==
+          "SELECT \"id\", \"title\", \"http_status\", \"description\" FROM \"library\".\"books\" " +
+          "WHERE \"title\" = $1 AND \"http_status\" > $2 ORDER BY \"title\" DESC, \"id\" ASC LIMIT $3 OFFSET $4",
+        applied.fragment.encoder.encode(applied.argument).map(_.map(_.value)) ==
+          List(Some("Dune"), Some("200"), Some("20"), Some("3000000000")),
+        applied.fragment.encoder.types.map(_.name) == List("text", "int4", "int4", "int8"),
+      ),
+    )
+  }
+
+  test("unfiltered and omitted-filter queries retain SQL ordering and pagination") {
+    val table = PostgresTable.derived[BookState]("books").key(_.bookId)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val base = repository.query.orderBy(_.bookId)
+    val page = table.filterQuery(base.limit(2).offset(4).plan)
+    val omitted = table.filterQuery(
+      repository.filterBy(_.HTTPStatus).greaterThan(Option.empty[Int]).orderBy(_.bookId).limit(2).plan,
+    )
+
+    IO.pure(
+      expect.all(
+        page.fragment.sql ==
+          "SELECT \"book_id\", \"display_title\", \"http_status\", \"description\" FROM \"books\" " +
+          "ORDER BY \"book_id\" ASC LIMIT $1 OFFSET $2",
+        page.fragment.encoder.encode(page.argument).map(_.map(_.value)) == List(Some("2"), Some("4")),
+        omitted.fragment.sql ==
+          "SELECT \"book_id\", \"display_title\", \"http_status\", \"description\" FROM \"books\" " +
+          "ORDER BY \"book_id\" ASC LIMIT $1",
+        base.plan.limit.isEmpty,
+        base.plan.offset.isEmpty,
+        base.limit(1).limit(2).plan.limit.contains(2),
+        base.offset(1).offset(2).plan.offset.contains(2L),
+      ),
+    )
+  }
+
+  test("paged IN queries combine every chunk before applying a single SQL limit") {
+    val table = PostgresTable.derived[BookState]("books").key(_.bookId).withBatchSize(2)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val query = repository
+      .filterBy(_.displayTitle)
+      .in(List("Dune", "Foundation", "Solaris"))
+      .and(_.HTTPStatus)
+      .in(List(200, 201, 202))
+      .orderBy(_.bookId)
+      .limit(2)
+      .offset(1)
+    val applied = table.filterQuery(query.plan)
+
+    IO.pure(
+      expect.all(
+        applied.fragment.sql ==
+          "SELECT \"book_id\", \"display_title\", \"http_status\", \"description\" FROM \"books\" " +
+          "WHERE (\"display_title\" IN ($1, $2) OR \"display_title\" IN ($3)) " +
+          "AND (\"http_status\" IN ($4, $5) OR \"http_status\" IN ($6)) " +
+          "ORDER BY \"book_id\" ASC LIMIT $7 OFFSET $8",
+        applied.fragment.encoder.encode(applied.argument).map(_.map(_.value)) ==
+          List("Dune", "Foundation", "Solaris", "200", "201", "202", "2", "1").map(Some(_)),
+      ),
+    )
+  }
+
+  test("paged SQL queries reject plans exceeding PostgreSQL's parameter limit") {
+    val table = PostgresTable.derived[BookState]("books").key(_.bookId)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val query = repository.filterBy(_.HTTPStatus).in(0 until Short.MaxValue.toInt).limit(1)
+
+    IO(table.filterQuery(query.plan)).attempt.map { result =>
+      expect(
+        result.left.exists(error =>
+          error.isInstanceOf[IllegalArgumentException] && error.getMessage.contains("exceeding the protocol limit"),
+        ),
+      )
+    }
+  }
+
+  test("query bounds reject negatives and a zero limit returns without acquiring a session") {
+    val table = PostgresTable.derived[BookState]("books").key(_.bookId)
+    val pool = Resource.eval(IO.raiseError[skunk.Session[IO]](new AssertionError("A zero limit accessed PostgreSQL")))
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](pool, table)
+
+    for
+      negativeLimit  <- IO(repository.query.limit(-1)).attempt
+      negativeOffset <- IO(repository.query.offset(-1)).attempt
+      empty          <- repository.query.limit(0).run
+    yield expect.all(
+      negativeLimit.left.exists(_.isInstanceOf[IllegalArgumentException]),
+      negativeOffset.left.exists(_.isInstanceOf[IllegalArgumentException]),
+      empty.isEmpty,
+    )
+  }
+
   test("derivation rejects an unsupported state field") {
     val errors: List[Error] = typeCheckErrors("""
       import persistent4s.postgres.*
@@ -375,6 +487,48 @@ object PostgresDerivationSuite extends SimpleIOSuite:
         computedSelectorErrors.exists(_.message.contains("must select exactly one state field directly")),
         storedSelectorErrors.exists(_.message.contains("must be an inline lambda")), wrongValueErrors.nonEmpty,
         scalarNullErrors.nonEmpty,
+      ),
+    )
+  }
+
+  test("query ordering requires direct fields and cursor filters preserve field types") {
+    val validErrors = typeCheckErrors("""
+      import cats.effect.IO
+      import persistent4s.postgres.*
+      final case class OrderedState(id: java.util.UUID, title: String, revision: Int) derives PostgresRow
+      def valid(repository: DerivedPostgresRepository[IO, java.util.UUID, OrderedState]): IO[List[OrderedState]] =
+        repository.query.orderBy(_.title).orderByDescending(_.id).limit(20).offset(50L)
+          .and(_.revision).greaterThan(Some(3)).run
+    """)
+    val computedErrors = typeCheckErrors("""
+      import cats.effect.IO
+      import persistent4s.postgres.*
+      final case class OrderedState(id: java.util.UUID, title: String) derives PostgresRow
+      def invalid(repository: DerivedPostgresRepository[IO, java.util.UUID, OrderedState]) =
+        repository.query.orderBy(_.title.toUpperCase).run
+    """)
+    val storedErrors = typeCheckErrors("""
+      import cats.effect.IO
+      import persistent4s.postgres.*
+      final case class OrderedState(id: java.util.UUID, title: String) derives PostgresRow
+      val title: OrderedState => String = _.title
+      def invalid(repository: DerivedPostgresRepository[IO, java.util.UUID, OrderedState]) =
+        repository.query.orderByDescending(title).run
+    """)
+    val wrongValueErrors = typeCheckErrors("""
+      import cats.effect.IO
+      import persistent4s.postgres.*
+      final case class OrderedState(id: java.util.UUID, revision: Int) derives PostgresRow
+      def invalid(repository: DerivedPostgresRepository[IO, java.util.UUID, OrderedState]) =
+        repository.filterBy(_.revision).greaterThan("one").run
+    """)
+
+    IO.pure(
+      expect.all(
+        validErrors.isEmpty,
+        computedErrors.exists(_.message.contains("must select exactly one state field directly")),
+        storedErrors.exists(_.message.contains("must be an inline lambda")),
+        wrongValueErrors.nonEmpty,
       ),
     )
   }
