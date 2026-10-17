@@ -131,29 +131,34 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
     plan.append(PostgresFilterClause(mapping.filterNotNullPredicate(scalaFieldName) :: Nil))
 
   private[postgres] def runFilter(plan: PostgresFilterPlan): F[List[S]] =
-    if plan.matchesNothing || plan.limit.contains(0) then Async[F].pure(List.empty)
-    else if plan.hasQueryOptions then
-      useSession { session =>
-        val applied = mapping.filterQuery(plan)
-        session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
-      }
-    else if plan.clauses.isEmpty then all
-    else
-      val predicateCombinations =
-        plan.clauses.foldLeft(List(List.empty[skunk.AppliedFragment])) { (combinations, clause) =>
-          for
-            combination <- combinations
-            alternative <- clause.alternatives
-          yield combination :+ alternative
-        }
+    Async[F].defer {
+      require(plan.limit.forall(_ >= 0), "PostgreSQL query limit must not be negative")
+      require(plan.offset.forall(_ >= 0), "PostgreSQL query offset must not be negative")
 
-      useSession { session =>
-        predicateCombinations.traverse { predicates =>
-          val applied = mapping.filterQuery(predicates)
+      if plan.matchesNothing || plan.limit.contains(0) then Async[F].pure(List.empty)
+      else if plan.hasQueryOptions then
+        useSession { session =>
+          val applied = mapping.filterQuery(plan)
           session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
         }
-          .map(_.flatten.distinctBy(mapping.keyOf))
-      }
+      else if plan.clauses.isEmpty then all
+      else
+        val predicateCombinations =
+          plan.clauses.foldLeft(List(List.empty[skunk.AppliedFragment])) { (combinations, clause) =>
+            for
+              combination <- combinations
+              alternative <- clause.alternatives
+            yield combination :+ alternative
+          }
+
+        useSession { session =>
+          predicateCombinations.traverse { predicates =>
+            val applied = mapping.filterQuery(predicates)
+            session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
+          }
+            .map(_.flatten.distinctBy(mapping.keyOf))
+        }
+    }
 
   /** The derived row codec, for additional typed Skunk queries in concrete repositories. */
   final protected val rowCodec: Codec[S] = mapping.row.codec
