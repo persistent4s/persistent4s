@@ -20,6 +20,35 @@ import scala.quoted.*
 
 private object DerivedPostgresRepositoryMacros:
 
+  def set[F[_]: Type, K: Type, S <: Product: Type, A: Type](
+    update: Expr[PostgresUpdate[F, K, S]],
+    selector: Expr[S => A],
+    value: Expr[A],
+    field: Expr[PostgresField[A]],
+  )(using Quotes): Expr[PostgresUpdate[F, K, S]] =
+    val name = selectedField(selector, "A PostgreSQL assignment")
+    '{ $update.setField(${ Expr(name) }, $value, $field) }
+
+  def setWhenDefined[F[_]: Type, K: Type, S <: Product: Type, A: Type](
+    update: Expr[PostgresUpdate[F, K, S]],
+    selector: Expr[S => A],
+    value: Expr[Option[A]],
+    field: Expr[PostgresField[A]],
+  )(using Quotes): Expr[PostgresUpdate[F, K, S]] =
+    val name = selectedField(selector, "A PostgreSQL assignment")
+    '{ $update.setFieldWhenDefined(${ Expr(name) }, $value, $field) }
+
+  def updateCondition[F[_]: Type, K: Type, S <: Product: Type, A: Type](
+    update: Expr[PostgresUpdate[F, K, S]],
+    selector: Expr[S => A],
+    value: Expr[A],
+    field: Expr[PostgresField[A]],
+    lessThan: Boolean,
+  )(using Quotes): Expr[PostgresUpdate[F, K, S]] =
+    val name = selectedField(selector, "A PostgreSQL update condition")
+    if lessThan then '{ $update.whereFieldLessThan(${ Expr(name) }, $value, $field) }
+    else '{ $update.whereFieldEqual(${ Expr(name) }, $value, $field) }
+
   def filterBy[F[_]: Type, K: Type, S <: Product: Type, A: Type](
     repository: Expr[DerivedPostgresRepository[F, K, S]],
     selector: Expr[S => A],
