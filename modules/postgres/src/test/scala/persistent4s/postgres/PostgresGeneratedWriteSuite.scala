@@ -45,8 +45,7 @@ object PostgresGeneratedWriteSuite extends IOSuite:
     active: Boolean,
   ) derives PostgresRow
 
-  final case class CompositeState(tenantId: UUID, itemId: UUID, displayName: String, revision: Int)
-      derives PostgresRow
+  final case class CompositeState(tenantId: UUID, itemId: UUID, displayName: String, revision: Int) derives PostgresRow
 
   final case class Resources(
     pool: Resource[IO, Session[IO]],
@@ -66,9 +65,13 @@ object PostgresGeneratedWriteSuite extends IOSuite:
         .withDatabase(container.getDatabaseName)
         .pooled(4)
         .evalTap(pool =>
-          pool.use(session => List(createStateTable, createCompositeTable, createReceiptsTable).traverse_(session.execute)),
+          pool.use(session =>
+            List(createStateTable, createCompositeTable, createReceiptsTable).traverse_(session.execute),
+          ),
         )
-        .map(pool => Resources(pool, DerivedPostgresRepository(pool, stateTable), DerivedPostgresRepository(pool, compositeTable)))
+        .map(pool =>
+          Resources(pool, DerivedPostgresRepository(pool, stateTable), DerivedPostgresRepository(pool, compositeTable)),
+        )
     }
 
   test("insert reports primary-key conflicts without replacing saved values") { resources =>
@@ -76,9 +79,9 @@ object PostgresGeneratedWriteSuite extends IOSuite:
     val conflicting = initial.copy(displayName = s"replacement-${initial.rowId}", note = None, revision = 99)
 
     for
-      inserted <- resources.pool.use(resources.repository.insert(_, initial))
+      inserted  <- resources.pool.use(resources.repository.insert(_, initial))
       duplicate <- resources.pool.use(resources.repository.insert(_, conflicting))
-      saved <- resources.repository.find(initial.rowId)
+      saved     <- resources.repository.find(initial.rowId)
     yield expect.all(inserted, !duplicate, saved.contains(initial))
   }
 
@@ -87,8 +90,8 @@ object PostgresGeneratedWriteSuite extends IOSuite:
     val conflicting = initial.copy(rowId = UUID.randomUUID())
 
     for
-      _ <- resources.pool.use(resources.repository.insert(_, initial))
-      result <- resources.pool.use(resources.repository.insert(_, conflicting)).attempt
+      _        <- resources.pool.use(resources.repository.insert(_, initial))
+      result   <- resources.pool.use(resources.repository.insert(_, conflicting)).attempt
       existing <- resources.repository.find(initial.rowId)
       rejected <- resources.repository.find(conflicting.rowId)
     yield expect.all(
@@ -103,50 +106,55 @@ object PostgresGeneratedWriteSuite extends IOSuite:
     val repository = resources.repository
 
     for
-      _ <- resources.pool.use(repository.insert(_, initial))
-      missing <- resources.pool.use(repository.update(UUID.randomUUID()).set(_.revision)(8).run)
-      stale <- resources.pool.use(repository.update(initial.rowId).set(_.revision)(7).whereLessThan(_.revision)(7).run)
+      _        <- resources.pool.use(repository.insert(_, initial))
+      missing  <- resources.pool.use(repository.update(UUID.randomUUID()).set(_.revision)(8).run)
+      stale    <- resources.pool.use(repository.update(initial.rowId).set(_.revision)(7).whereLessThan(_.revision)(7).run)
       mismatch <- resources.pool.use(repository.update(initial.rowId).set(_.revision)(8).whereEqual(_.revision)(6).run)
-      updated <- resources.pool.use(
-        repository.update(initial.rowId).set(_.revision)(8).whereLessThan(_.revision)(8).whereEqual(_.active)(true).run,
-      )
+      updated  <-
+        resources.pool.use(
+          repository.update(initial.rowId).set(_.revision)(8).whereLessThan(_.revision)(8).whereEqual(_.active)(true).run,
+        )
       saved <- repository.find(initial.rowId)
     yield expect.all(!missing, !stale, !mismatch, updated, saved.contains(initial.copy(revision = 8)))
   }
 
-  test("partial updates preserve omitted fields and distinguish keeping, clearing, and setting a nullable field") { resources =>
-    val initial = freshState()
-    val repository = resources.repository
+  test("partial updates preserve omitted fields and distinguish keeping, clearing, and setting a nullable field") {
+    resources =>
+      val initial = freshState()
+      val repository = resources.repository
 
-    for
-      _ <- resources.pool.use(repository.insert(_, initial))
-      kept <- resources.pool.use(
-        repository.update(initial.rowId)
-          .setWhenDefined(_.displayName)(Option.empty[String])
-          .setWhenDefined(_.note)(Option.empty[Option[String]])
-          .set(_.revision)(1)
-          .run,
+      for
+        _    <- resources.pool.use(repository.insert(_, initial))
+        kept <- resources.pool.use(
+                  repository
+                    .update(initial.rowId)
+                    .setWhenDefined(_.displayName)(Option.empty[String])
+                    .setWhenDefined(_.note)(Option.empty[Option[String]])
+                    .set(_.revision)(1)
+                    .run,
+                )
+        afterKeep <- repository.find(initial.rowId)
+        cleared   <-
+          resources.pool.use(
+            repository.update(initial.rowId).setWhenDefined(_.note)(Some(None)).whereEqual(_.note)(initial.note).run,
+          )
+        afterClear <- repository.find(initial.rowId)
+        set        <-
+          resources.pool.use(
+            repository.update(initial.rowId).setWhenDefined(_.note)(Some(Some("new note"))).whereEqual(_.note)(None).run,
+          )
+        afterSet         <- repository.find(initial.rowId)
+        _                <- resources.pool.use(repository.update(initial.rowId).set(_.note)(None).run)
+        afterDirectClear <- repository.find(initial.rowId)
+      yield expect.all(
+        kept,
+        cleared,
+        set,
+        afterKeep.contains(initial.copy(revision = 1)),
+        afterClear.contains(initial.copy(revision = 1, note = None)),
+        afterSet.contains(initial.copy(revision = 1, note = Some("new note"))),
+        afterDirectClear == afterClear,
       )
-      afterKeep <- repository.find(initial.rowId)
-      cleared <- resources.pool.use(
-        repository.update(initial.rowId).setWhenDefined(_.note)(Some(None)).whereEqual(_.note)(initial.note).run,
-      )
-      afterClear <- repository.find(initial.rowId)
-      set <- resources.pool.use(
-        repository.update(initial.rowId).setWhenDefined(_.note)(Some(Some("new note"))).whereEqual(_.note)(None).run,
-      )
-      afterSet <- repository.find(initial.rowId)
-      _ <- resources.pool.use(repository.update(initial.rowId).set(_.note)(None).run)
-      afterDirectClear <- repository.find(initial.rowId)
-    yield expect.all(
-      kept,
-      cleared,
-      set,
-      afterKeep.contains(initial.copy(revision = 1)),
-      afterClear.contains(initial.copy(revision = 1, note = None)),
-      afterSet.contains(initial.copy(revision = 1, note = Some("new note"))),
-      afterDirectClear == afterClear,
-    )
   }
 
   test("generated writes honor renamed columns and every part of a composite key") { resources =>
@@ -158,17 +166,19 @@ object PostgresGeneratedWriteSuite extends IOSuite:
     val repository = resources.composite
 
     for
-      inserted <- resources.pool.use(session => List(initial, sameTenant, sameItem).traverse(repository.insert(session, _)))
+      inserted <-
+        resources.pool.use(session => List(initial, sameTenant, sameItem).traverse(repository.insert(session, _)))
       changed <- resources.pool.use(
-        repository.update((tenant, item))
-          .set(_.displayName)("renamed")
-          .set(_.revision)(4)
-          .whereLessThan(_.revision)(4)
-          .run,
-      )
-      saved <- repository.find((tenant, item))
+                   repository
+                     .update((tenant, item))
+                     .set(_.displayName)("renamed")
+                     .set(_.revision)(4)
+                     .whereLessThan(_.revision)(4)
+                     .run,
+                 )
+      saved         <- repository.find((tenant, item))
       siblingTenant <- repository.find((sameTenant.tenantId, sameTenant.itemId))
-      siblingItem <- repository.find((sameItem.tenantId, sameItem.itemId))
+      siblingItem   <- repository.find((sameItem.tenantId, sameItem.itemId))
     yield expect.all(
       inserted.forall(identity),
       changed,
@@ -185,12 +195,13 @@ object PostgresGeneratedWriteSuite extends IOSuite:
 
     for
       inserted <- resources.pool.use(repository.insert(_, initial))
-      changed <- resources.pool.use(
-        repository.update(initial.rowId)
-          .set(_.displayName)(replacement)
-          .whereEqual(_.displayName)(initial.displayName)
-          .run,
-      )
+      changed  <- resources.pool.use(
+                   repository
+                     .update(initial.rowId)
+                     .set(_.displayName)(replacement)
+                     .whereEqual(_.displayName)(initial.displayName)
+                     .run,
+                 )
       saved <- repository.find(initial.rowId)
     yield expect.all(inserted, changed, saved.contains(initial.copy(displayName = replacement)))
   }
@@ -201,14 +212,15 @@ object PostgresGeneratedWriteSuite extends IOSuite:
 
     for
       inserted <- repository.insert(initial)
-      results <- List("first writer", "second writer").parTraverse { note =>
-        repository.update(initial.rowId)
-          .whereEqual(_.revision)(0)
-          .set(_.revision)(1)
-          .set(_.note)(Some(note))
-          .run
-          .map(note -> _)
-      }
+      results  <- List("first writer", "second writer").parTraverse { note =>
+                   repository
+                     .update(initial.rowId)
+                     .whereEqual(_.revision)(0)
+                     .set(_.revision)(1)
+                     .set(_.note)(Some(note))
+                     .run
+                     .map(note -> _)
+                 }
       saved <- repository.find(initial.rowId)
     yield
       val winners = results.collect { case (note, true) => note }
@@ -221,21 +233,23 @@ object PostgresGeneratedWriteSuite extends IOSuite:
 
   test("session-bound writes see uncommitted rows and never acquire a repository connection") { resources =>
     val initial = freshState()
-    val unavailablePool = Resource.eval(IO.raiseError[Session[IO]](new AssertionError("Unexpected repository connection")))
+    val unavailablePool =
+      Resource.eval(IO.raiseError[Session[IO]](new AssertionError("Unexpected repository connection")))
     val repository = DerivedPostgresRepository(unavailablePool, stateTable)
 
     for
       result <- resources.pool.use { session =>
-        session.transaction.use { _ =>
-          for
-            inserted <- repository.insert(session, initial)
-            changed <- repository.update(initial.rowId).set(_.revision)(1).whereEqual(_.revision)(0).run(session)
-            visible <- session.unique(stateTable.findManyQuery(1))(List(initial.rowId))
-            _ <- session.execute(insertReceipt)(initial.rowId)
-          yield (inserted, changed, visible)
-        }
-      }
-      saved <- resources.repository.find(initial.rowId)
+                  session.transaction.use { _ =>
+                    for
+                      inserted <- repository.insert(session, initial)
+                      changed  <-
+                        repository.update(initial.rowId).set(_.revision)(1).whereEqual(_.revision)(0).run(session)
+                      visible <- session.unique(stateTable.findManyQuery(1))(List(initial.rowId))
+                      _       <- session.execute(insertReceipt)(initial.rowId)
+                    yield (inserted, changed, visible)
+                  }
+                }
+      saved   <- resources.repository.find(initial.rowId)
       receipt <- resources.pool.use(_.unique(receiptExists)(initial.rowId))
     yield expect.all(result._1, result._2, result._3 == initial.copy(revision = 1), saved.contains(result._3), receipt)
   }
@@ -247,18 +261,18 @@ object PostgresGeneratedWriteSuite extends IOSuite:
     val repository = resources.repository
 
     for
-      _ <- resources.pool.use(repository.insert(_, initial))
+      _      <- resources.pool.use(repository.insert(_, initial))
       result <- resources.pool.use { session =>
-        session.transaction.use { _ =>
-          repository.insert(session, inserted) *>
-            repository.update(initial.rowId).set(_.revision)(1).run(session) *>
-            session.execute(insertReceipt)(inserted.rowId) *>
-            IO.raiseError[Unit](failure)
-        }
-      }.attempt
+                  session.transaction.use { _ =>
+                    repository.insert(session, inserted) *>
+                      repository.update(initial.rowId).set(_.revision)(1).run(session) *>
+                      session.execute(insertReceipt)(inserted.rowId) *>
+                      IO.raiseError[Unit](failure)
+                  }
+                }.attempt
       existing <- repository.find(initial.rowId)
-      absent <- repository.find(inserted.rowId)
-      receipt <- resources.pool.use(_.unique(receiptExists)(inserted.rowId))
+      absent   <- repository.find(inserted.rowId)
+      receipt  <- resources.pool.use(_.unique(receiptExists)(inserted.rowId))
     yield expect.all(result == Left(failure), existing.contains(initial), absent.isEmpty, !receipt)
   }
 
@@ -267,12 +281,12 @@ object PostgresGeneratedWriteSuite extends IOSuite:
     val repository = resources.repository
 
     for
-      _ <- resources.pool.use(repository.insert(_, initial))
-      empty <- resources.pool.use(repository.update(initial.rowId).run).attempt
-      omitted <- resources.pool.use(repository.update(initial.rowId).setWhenDefined(_.note)(None).run).attempt
-      key <- IO(repository.update(initial.rowId).set(_.rowId)(UUID.randomUUID())).attempt
+      _         <- resources.pool.use(repository.insert(_, initial))
+      empty     <- resources.pool.use(repository.update(initial.rowId).run).attempt
+      omitted   <- resources.pool.use(repository.update(initial.rowId).setWhenDefined(_.note)(None).run).attempt
+      key       <- IO(repository.update(initial.rowId).set(_.rowId)(UUID.randomUUID())).attempt
       duplicate <- IO(repository.update(initial.rowId).set(_.revision)(1).set(_.revision)(2)).attempt
-      saved <- repository.find(initial.rowId)
+      saved     <- repository.find(initial.rowId)
     yield expect.all(
       empty.left.exists(_.isInstanceOf[IllegalArgumentException]),
       omitted.left.exists(_.isInstanceOf[IllegalArgumentException]),
