@@ -19,16 +19,16 @@ package persistent4s.postgres
 import cats.MonadThrow
 import cats.syntax.all.*
 
-import skunk.codec.all.{int4, int8}
+import skunk.codec.all.{bool, int4, int8}
 import skunk.util.Origin
 import skunk.{AppliedFragment, Codec, Command, Fragment, Query, Void}
 
 /** Convention-based PostgreSQL persistence for one projection-state table.
   *
   * A table keeps its durable SQL name explicit while deriving columns and row encoding from [[PostgresRow]]. The key
-  * selector must reference one state field directly or return a tuple of direct state fields. Generated persistence
-  * uses full-row upserts and can be converted to the session-bound [[PostgresRepositoryTable]] used by
-  * [[PostgresAtomicRepository]].
+  * selector must reference one state field directly or return a tuple of direct state fields. Projection persistence
+  * uses full-row upserts through the session-bound [[PostgresRepositoryTable]]. [[DerivedPostgresRepository]] also
+  * provides insert-only writes and conditional partial updates.
   */
 final class PostgresTable[K, S <: Product] private (
   val name: String,
@@ -125,6 +125,50 @@ final class PostgresTable[K, S <: Product] private (
       Void.codec,
       row.codec,
     )
+
+  private[postgres] def insertQuery: Query[S, Boolean] =
+    val placeholders = row.codec.sql.runA(1).value
+    Query(
+      s"INSERT INTO $quotedTable (${quotedColumns.mkString(", ")}) VALUES ($placeholders) " +
+        s"ON CONFLICT (${quotedKeyColumns.mkString(", ")}) DO NOTHING RETURNING TRUE",
+      Origin.unknown,
+      row.codec,
+      bool,
+    )
+
+  private[postgres] def updateAssignment[A](name: String, codec: Codec[A], value: A): AppliedFragment =
+    require(!keyFieldNames.contains(name), s"A PostgreSQL update cannot assign key field [$name]")
+    filterValuePredicate(name, codec, value)
+
+  private[postgres] def updateEquality[A](name: String, codec: Codec[A], value: A): AppliedFragment =
+    val column = filterColumn(name, codec)
+    if value == None then sqlFragment(s"$column IS NULL")
+    else filterValuePredicate(name, codec, value)
+
+  private[postgres] def updateLessThan[A](name: String, codec: Codec[A], value: A): AppliedFragment =
+    val column = filterColumn(name, codec)
+    Fragment[A](List(Left(s"$column < "), Right(codec.sql)), codec, Origin.unknown)(value)
+
+  private[postgres] def updateQuery(
+    key: K,
+    assignments: List[AppliedFragment],
+    conditions: List[AppliedFragment],
+  ): AppliedFragment =
+    require(assignments.nonEmpty, "A PostgreSQL update requires at least one assignment")
+    val byKey = Fragment[K](
+      List(Left(s"(${quotedKeyColumns.mkString(", ")}) = ("), Right(keyCodec.sql), Left(")")),
+      keyCodec,
+      Origin.unknown,
+    )(key)
+    val changes = assignments.tail.foldLeft(assignments.head)((all, next) => all |+| sqlFragment(", ") |+| next)
+    val predicate = conditions.foldLeft(byKey)((all, next) => all |+| sqlFragment(" AND ") |+| next)
+    val statement = sqlFragment(s"UPDATE $quotedTable SET ") |+| changes |+|
+      sqlFragment(" WHERE ") |+| predicate |+| sqlFragment(" RETURNING TRUE")
+    require(
+      statement.fragment.encoder.types.size <= Short.MaxValue.toInt,
+      "PostgreSQL update exceeds the protocol parameter limit",
+    )
+    statement
 
   private[postgres] def filterValueQuery[A](
     scalaFieldName: String,

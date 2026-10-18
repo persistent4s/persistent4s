@@ -182,6 +182,27 @@ remain explicit. SQL identifiers are validated and double-quoted exactly as decl
 replace generated callbacks with `DerivedPostgresRepository.customized`. Concrete repositories can continue to use
 `useSession` and the derived `rowCodec` for specialized Skunk queries; `all` may also be overridden.
 
+Generated inserts and partial updates can also use an existing connection and transaction:
+
+```scala
+repository.insert(session, book) // false if this key already exists; existing rows stay unchanged
+
+repository.update(bookId)
+  .setWhenDefined(_.title)(newTitle)
+  .set(_.availableCopies)(remainingCopies)
+  .whereEqual(_.availableCopies)(previousCopies)
+  .run(session)
+```
+
+The update returns `true` when a row changed, or `false` when the key is missing or a condition does not match.
+`whereEqual` and `whereLessThan` add SQL conditions to the same update statement. `setWhenDefined` skips `None`;
+for nullable fields, `Some(None)` clears the field and `Some(Some(value))` sets it. `set` always assigns the supplied value.
+Key assignments, repeated assignments to one field, and empty updates are rejected. Other database constraint errors
+remain errors. Composite keys and column overrides work for these writes too.
+
+`insert(session, row)` and `run(session)` leave transaction ownership with the caller, so an incoming event's receipt
+and table changes can commit or roll back together. `insert(row)` and `run` use a pooled connection for a single write.
+
 ## PostgreSQL telemetry
 
 `PostgresModule.make` and `makeWithConfig` use Skunk 2.0.0-RC3. Supply `TracerProvider[F]` and

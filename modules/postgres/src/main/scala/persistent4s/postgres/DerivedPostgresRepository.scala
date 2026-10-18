@@ -19,7 +19,8 @@ package persistent4s.postgres
 import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 
-import skunk.{Codec, Session}
+import skunk.{AppliedFragment, Codec, Session}
+import skunk.codec.all.bool
 
 /** An atomic PostgreSQL projection repository whose standard persistence operations come from a [[PostgresTable]].
   *
@@ -39,6 +40,67 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
   /** Load every row. No ordering is implied. */
   def all: F[List[S]] =
     useSession(_.execute(mapping.allQuery))
+
+  /** Insert one row using a pooled connection. An existing key is left unchanged.
+    *
+    * @param state
+    *   row to insert
+    * @return
+    *   true when inserted, or false when its key already exists
+    */
+  final def insert(state: S): F[Boolean] = useSession(insert(_, state))
+
+  /** Insert one row using the caller's connection and transaction. Other unique or constraint violations fail normally.
+    *
+    * @param session
+    *   caller's database connection
+    * @param state
+    *   row to insert
+    * @return
+    *   true when inserted, or false when its key already exists
+    */
+  final def insert(session: Session[F], state: S): F[Boolean] =
+    Async[F].defer(session.option(mapping.insertQuery)(state).map(_.nonEmpty))
+
+  /** Start an update for one key. Only explicitly assigned fields change.
+    *
+    * @param key
+    *   row to update
+    * @return
+    *   an update builder with optional conditions
+    */
+  final def update(key: K): PostgresUpdate[F, K, S] =
+    new PostgresUpdate(this, key, Nil, Nil)
+
+  private[postgres] def updateAssignment[A](name: String, value: A, field: PostgresField[A]): AppliedFragment =
+    mapping.updateAssignment(name, field.codec, value)
+
+  private[postgres] def updateEquality[A](name: String, value: A, field: PostgresField[A]): AppliedFragment =
+    mapping.updateEquality(name, field.codec, value)
+
+  private[postgres] def updateLessThan[A](name: String, value: A, field: PostgresField[A]): AppliedFragment =
+    mapping.updateLessThan(name, field.codec, value)
+
+  private[postgres] def runUpdate(
+    key: K,
+    assignments: List[AppliedFragment],
+    conditions: List[AppliedFragment],
+  ): F[Boolean] =
+    Async[F].defer {
+      val statement = mapping.updateQuery(key, assignments, conditions)
+      useSession(session => session.option(statement.fragment.query(bool))(statement.argument).map(_.nonEmpty))
+    }
+
+  private[postgres] def runUpdate(
+    session: Session[F],
+    key: K,
+    assignments: List[AppliedFragment],
+    conditions: List[AppliedFragment],
+  ): F[Boolean] =
+    Async[F].defer {
+      val statement = mapping.updateQuery(key, assignments, conditions)
+      session.option(statement.fragment.query(bool))(statement.argument).map(_.nonEmpty)
+    }
 
   /** Start a query without filters. Add ordering and a limit before loading a large table.
     *
