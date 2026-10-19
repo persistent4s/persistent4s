@@ -158,15 +158,17 @@ repository.query.orderBy(_.bookId).withLimit(100).withOffset(200).run
 
 repository.filterBy(_.author).is(author)
   .orderBy(_.bookId)
-  .withLimit(50)
+  .withLimit(50, maxLimit = 300)
   .withOffset(200)
   .run
 ```
 
 `query` starts without filters. `orderBy` sorts ascending; `orderByDescending` sorts descending. Repeated ordering
-calls add tie breakers. Include a unique field for stable pages. `withLimit` bounds the number of rows returned, while
-`withOffset` skips rows in SQL. Both are checked when `run` executes: a negative value fails with `IllegalArgumentException`
-before opening a database connection. A zero limit returns no rows. `limit` and `offset` remain aliases.
+calls add tie breakers. Include a unique field for stable pages. `withLimit` caps the requested count at 200 by default;
+`withLimit(5000, maxLimit = 300)` returns at most 300 rows. `withOffset` skips rows in SQL. Negative counts and offsets
+fail with `PaginationError.NegativeLimit` and `PaginationError.NegativeOffset` when `run` executes, before opening a
+database connection. Both extend `IllegalArgumentException`. A negative maximum is a configuration error and fails
+with `IllegalArgumentException`. A zero limit or maximum returns no rows. `limit` and `offset` remain aliases.
 
 For deep pages, `filterBy(_.bookId).greaterThan(lastBookId)` can continue from an indexed unique value instead of
 counting skipped rows. A missing optional `greaterThan` input omits that condition, which selects the first page.
