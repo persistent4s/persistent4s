@@ -78,7 +78,7 @@ val Http4sV = "0.23.36"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 
-val PureconfigV = "0.17.10"
+val PureconfigV = "0.17.11"
 
 lazy val root = (project in file("."))
   .enablePlugins(NoPublishPlugin)
