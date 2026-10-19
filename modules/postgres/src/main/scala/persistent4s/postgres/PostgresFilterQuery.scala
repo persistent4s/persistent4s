@@ -75,7 +75,7 @@ final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
     *   the query with the smaller of the requested count and maximum
     */
   def withLimit(count: Int, maxLimit: Int): PostgresFilterQuery[F, K, S] =
-    copy(plan = plan.copy(limit = Some(count.min(maxLimit)), maxLimit = maxLimit))
+    copy(plan = plan.copy(limit = Some(PostgresPagination.cap(count, maxLimit)), maxLimit = maxLimit))
 
   /** Skip rows in PostgreSQL. [[run]] rejects a negative count. For deep pages, prefer a filter on the last returned
     * key.

@@ -177,6 +177,20 @@ Ordered or paged `IN` filters use one SQL statement, so the order and limit appl
 the PostgreSQL parameter limit are rejected. Unordered, unbounded `IN` filters retain batched execution. Calling `run`
 without `withLimit` still loads all matches; sorting or taking rows from its returned list happens in application memory.
 
+Custom SQL can use the same pagination checks with `PostgresQuery.paginated`:
+
+```scala
+PostgresQuery.paginated[IO, List[UUID]] { (limit, offset) =>
+  pool.use(_.execute(
+    sql"SELECT book_id FROM books ORDER BY book_id LIMIT $int4 OFFSET $int8".query(uuid)
+  )((limit, offset)))
+}.withLimit(100, maxLimit = 200).withOffset(20).run
+```
+
+Bind the supplied limit and offset in SQL and acquire connections inside the callback. Invalid pagination fails
+before the callback runs. A zero limit still runs the callback, allowing custom queries to return a total and an
+empty page together. Use `.validate` to check pagination without executing a page query, such as for count-only requests.
+
 The generated repository uses the existing `PostgresAtomicRepository`, so projection-state writes and checkpoint
 updates run on the same Skunk session and transaction. Schema migrations, constraints, indexes, and application queries
 remain explicit. SQL identifiers are validated and double-quoted exactly as declared. Use
