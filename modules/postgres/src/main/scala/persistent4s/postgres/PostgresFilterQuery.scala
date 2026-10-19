@@ -54,7 +54,7 @@ final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
   final inline def orderByDescending[A](inline field: S => A): PostgresFilterQuery[F, K, S] =
     ${ DerivedPostgresRepositoryMacros.orderBy[F, K, S, A]('this, 'field, '{ true }) }
 
-  /** Limit the rows returned by PostgreSQL. [[run]] rejects a negative count.
+  /** Limit the rows returned by PostgreSQL to at most 200. [[run]] rejects a negative count.
     *
     * @param count
     *   maximum row count; zero returns no rows
@@ -62,7 +62,20 @@ final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
     *   the query with this limit
     */
   def withLimit(count: Int): PostgresFilterQuery[F, K, S] =
-    copy(plan = plan.copy(limit = Some(count)))
+    withLimit(count, maxLimit = 200)
+
+  /** Limit the rows returned by PostgreSQL, capped at the supplied maximum. [[run]] rejects a negative count or
+    * maximum.
+    *
+    * @param count
+    *   requested row count; zero returns no rows
+    * @param maxLimit
+    *   maximum permitted row count; zero returns no rows
+    * @return
+    *   the query with the smaller of the requested count and maximum
+    */
+  def withLimit(count: Int, maxLimit: Int): PostgresFilterQuery[F, K, S] =
+    copy(plan = plan.copy(limit = Some(count.min(maxLimit)), maxLimit = maxLimit))
 
   /** Skip rows in PostgreSQL. [[run]] rejects a negative count. For deep pages, prefer a filter on the last returned
     * key.
@@ -84,6 +97,17 @@ final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
     */
   def limit(count: Int): PostgresFilterQuery[F, K, S] = withLimit(count)
 
+  /** Alias for [[withLimit]] with a configurable maximum.
+    *
+    * @param count
+    *   requested row count; zero returns no rows
+    * @param maxLimit
+    *   maximum permitted row count; zero returns no rows
+    * @return
+    *   the query with the smaller of the requested count and maximum
+    */
+  def limit(count: Int, maxLimit: Int): PostgresFilterQuery[F, K, S] = withLimit(count, maxLimit)
+
   /** Alias for [[withOffset]].
     *
     * @param count
@@ -95,7 +119,8 @@ final class PostgresFilterQuery[F[_], K, S <: Product] private[postgres] (
 
   /** Execute this query and load its results. No ordering is implied unless explicitly supplied. Ordered or paged
     * queries use one SQL statement and must fit PostgreSQL's parameter limit. Negative limits and offsets fail with
-    * [[IllegalArgumentException]] before opening a database connection.
+    * [[PaginationError]] before opening a database connection. A negative maximum fails with
+    * [[IllegalArgumentException]].
     *
     * @return
     *   matching rows, ordered and bounded as requested
@@ -152,6 +177,7 @@ final private[postgres] case class PostgresFilterPlan(
   ordering: List[PostgresOrdering] = Nil,
   limit: Option[Int] = None,
   offset: Option[Long] = None,
+  maxLimit: Int = 200,
 ):
 
   def hasQueryOptions: Boolean = ordering.nonEmpty || limit.nonEmpty || offset.nonEmpty

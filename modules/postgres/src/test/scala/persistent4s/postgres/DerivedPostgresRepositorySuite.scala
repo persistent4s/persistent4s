@@ -406,19 +406,43 @@ object DerivedPostgresRepositorySuite extends IOSuite:
     }
   }
 
+  test("PostgreSQL applies default and custom limit caps after ordering and offset") { resources =>
+    isolatedScalar(resources).use { repository =>
+      val states = paginationStates(350)
+      val base = repository.filterBy(_.revision).greaterThan(4).orderBy(_.revision)
+
+      for
+        _           <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
+        defaultPage <- base.withLimit(5000).withOffset(10L).run
+        customPage  <- base.withLimit(5000, maxLimit = 300).withOffset(20L).run
+        smallerPage <- base.withLimit(50, maxLimit = 300).withOffset(30L).run
+        aliasPage   <- base.limit(Int.MaxValue, maxLimit = 300).offset(20L).run
+        empty       <- base.withLimit(5000, maxLimit = 0).run
+      yield expect.all(
+        defaultPage == states.slice(15, 215),
+        customPage == states.slice(25, 325),
+        smallerPage == states.slice(35, 85),
+        aliasPage == customPage,
+        empty.isEmpty,
+      )
+    }
+  }
+
   test("run rejects negative bounds before opening a connection or returning an empty page") { _ =>
     val pool = Resource.eval(IO.raiseError[Session[IO]](new AssertionError("Database connection must not be opened")))
     val repository = DerivedPostgresRepository(pool, scalarTable)
     val queries = List(
-      repository.query.withLimit(-1),
-      repository.query.withOffset(-1L),
-      repository.query.withLimit(0).withOffset(-1L),
-      repository.filterBy(_.rowId).in(List.empty[UUID]).withLimit(-1),
-      repository.filterBy(_.rowId).in(List.empty[UUID]).withOffset(-1L),
+      repository.query.withLimit(-1)                                    -> PaginationError.NegativeLimit(-1),
+      repository.query.withLimit(Int.MinValue, maxLimit = 0)            -> PaginationError.NegativeLimit(Int.MinValue),
+      repository.query.withOffset(-1L)                                  -> PaginationError.NegativeOffset(-1L),
+      repository.query.withOffset(Long.MinValue)                        -> PaginationError.NegativeOffset(Long.MinValue),
+      repository.query.withLimit(0).withOffset(-1L)                     -> PaginationError.NegativeOffset(-1L),
+      repository.filterBy(_.rowId).in(List.empty[UUID]).withLimit(-1)   -> PaginationError.NegativeLimit(-1),
+      repository.filterBy(_.rowId).in(List.empty[UUID]).withOffset(-1L) -> PaginationError.NegativeOffset(-1L),
     )
-    val results = queries.map(_.run.attempt)
-
-    results.sequence.map(replies => expect(replies.forall(_.left.exists(_.isInstanceOf[IllegalArgumentException]))))
+    queries.traverse { case (query, expected) =>
+      query.run.attempt.map(_.left.exists(_ == expected))
+    }.map(results => expect(results.forall(identity)))
   }
 
   test("derived state and checkpoint commit together and a stale checkpoint rolls both back") { resources =>

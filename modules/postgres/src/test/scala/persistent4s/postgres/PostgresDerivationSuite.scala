@@ -21,6 +21,7 @@ import java.util.UUID
 import scala.compiletime.testing.{Error, typeCheckErrors}
 
 import cats.effect.{IO, Resource}
+import cats.syntax.all.*
 
 import skunk.codec.all.{int4, text, uuid}
 import skunk.implicits.*
@@ -289,10 +290,38 @@ object PostgresDerivationSuite extends SimpleIOSuite:
         base.plan.offset.isEmpty,
         base.withLimit(1).withLimit(2).plan.limit.contains(2),
         base.withOffset(1).withOffset(2).plan.offset.contains(2L),
-        base.withLimit(Int.MaxValue).plan.limit.contains(Int.MaxValue),
+        base.withLimit(Int.MaxValue).plan.limit.contains(200),
         base.limit(2).offset(4).plan == base.withLimit(2).withOffset(4).plan,
       ),
     )
+  }
+
+  test("limits bind the capped count in SQL and retain long offsets") {
+    val table = PostgresTable.derived[BookState]("books").key(_.bookId)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val base = repository.query.orderBy(_.bookId).withOffset(Long.MaxValue)
+    val cases = List(
+      base.withLimit(0)                                     -> 0,
+      base.withLimit(199)                                   -> 199,
+      base.withLimit(200)                                   -> 200,
+      base.withLimit(201)                                   -> 200,
+      base.withLimit(5000)                                  -> 200,
+      base.withLimit(Int.MaxValue)                          -> 200,
+      base.withLimit(5000, maxLimit = 300)                  -> 300,
+      base.withLimit(50, maxLimit = 300)                    -> 50,
+      base.withLimit(5000, maxLimit = 0)                    -> 0,
+      base.withLimit(Int.MaxValue, maxLimit = Int.MaxValue) -> Int.MaxValue,
+      base.limit(5000)                                      -> 200,
+      base.limit(5000, maxLimit = 300)                      -> 300,
+      base.withLimit(5000, maxLimit = 300).withLimit(5000)  -> 200,
+    )
+
+    IO.pure(expect(cases.forall { case (query, expected) =>
+      val applied = table.filterQuery(query.plan)
+      applied.fragment.sql.endsWith("ORDER BY \"book_id\" ASC LIMIT $1 OFFSET $2") &&
+      applied.fragment.encoder.encode(applied.argument).map(_.map(_.value)) ==
+        List(Some(expected.toString), Some(Long.MaxValue.toString))
+    }))
   }
 
   test("paged IN queries combine every chunk before applying a single SQL limit") {
@@ -351,18 +380,43 @@ object PostgresDerivationSuite extends SimpleIOSuite:
       emptyFailure  <- invalidEmptyFilter.attempt
       aliasFailure  <- repository.query.limit(-1).offset(0).run.attempt
       empty         <- repository.query.withLimit(0).run
+      cappedEmpty   <- repository.query.withLimit(Int.MaxValue, maxLimit = 0).run
       corrected     <- repository.query.withLimit(-1).withLimit(0).run
     yield expect.all(
-      limitFailure.left.exists(error =>
-        error.isInstanceOf[IllegalArgumentException] && error.getMessage.contains("limit must not be negative"),
-      ),
-      offsetFailure.left.exists(error =>
-        error.isInstanceOf[IllegalArgumentException] && error.getMessage.contains("offset must not be negative"),
-      ),
-      zeroFailure.left.exists(_.isInstanceOf[IllegalArgumentException]),
-      emptyFailure.left.exists(_.isInstanceOf[IllegalArgumentException]),
-      aliasFailure.left.exists(_.isInstanceOf[IllegalArgumentException]),
+      limitFailure.left.exists(_ == PaginationError.NegativeLimit(-1)),
+      offsetFailure.left.exists(_ == PaginationError.NegativeOffset(-1)),
+      zeroFailure.left.exists(_ == PaginationError.NegativeOffset(-1)),
+      emptyFailure.left.exists(_ == PaginationError.NegativeLimit(-1)),
+      aliasFailure.left.exists(_ == PaginationError.NegativeLimit(-1)),
       empty.isEmpty,
+      cappedEmpty.isEmpty,
+      corrected.isEmpty,
+    )
+  }
+
+  test("invalid maximums fail before opening a connection, including zero limits and empty queries") {
+    val table = PostgresTable.derived[BookState]("books").key(_.bookId)
+    val pool =
+      Resource.eval(IO.raiseError[skunk.Session[IO]](new AssertionError("Invalid maximum accessed PostgreSQL")))
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](pool, table)
+    val queries = List(
+      repository.query.withLimit(50, maxLimit = -1),
+      repository.query.withLimit(0, maxLimit = -1),
+      repository.query.withLimit(Int.MaxValue, maxLimit = Int.MinValue),
+      repository.filterBy(_.bookId).in(List.empty[UUID]).withLimit(50, maxLimit = -1),
+      repository.query.limit(50, maxLimit = -1),
+    )
+
+    for
+      results   <- queries.traverse(_.run.attempt)
+      corrected <- repository.query.withLimit(50, maxLimit = -1).withLimit(0).run
+    yield expect.all(
+      results.forall(
+        _.left.exists(error =>
+          error.isInstanceOf[IllegalArgumentException] && !error.isInstanceOf[PaginationError] &&
+            error.getMessage.contains("maximum limit must not be negative"),
+        ),
+      ),
       corrected.isEmpty,
     )
   }
