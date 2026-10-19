@@ -194,13 +194,7 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
 
   private[postgres] def runFilter(plan: PostgresFilterPlan): F[List[S]] =
     Async[F].defer {
-      require(plan.maxLimit >= 0, "PostgreSQL query maximum limit must not be negative")
-      plan.limit.foreach { count =>
-        if count < 0 then throw PaginationError.NegativeLimit(count)
-      }
-      plan.offset.foreach { count =>
-        if count < 0 then throw PaginationError.NegativeOffset(count)
-      }
+      PostgresPagination.validate(plan.limit, plan.offset, plan.maxLimit)
 
       if plan.matchesNothing || plan.limit.contains(0) then Async[F].pure(List.empty)
       else if plan.hasQueryOptions then
