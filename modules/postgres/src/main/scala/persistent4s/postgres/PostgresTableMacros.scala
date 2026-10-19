@@ -105,6 +105,9 @@ private object PostgresTableMacros:
           strip(term) match
             case selected @ Select(receiver, name) if strip(receiver).symbol == parameter.symbol =>
               Some(name -> selected)
+            case selected @ Select(receiver, name)
+                if receiver.tpe.widen.dealias.typeSymbol.caseFields.contains(selected.symbol) =>
+              directField(receiver).map((parent, _) => s"$parent.$name" -> selected)
             case _ => None
 
         def loop(term: Term): List[(String, Term)] =

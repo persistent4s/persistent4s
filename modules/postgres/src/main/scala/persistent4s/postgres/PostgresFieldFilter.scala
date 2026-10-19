@@ -53,6 +53,38 @@ final class PostgresFieldFilter[F[_], K, S <: Product, A] private[postgres] (
   /** More explicit alias for [[is]]. */
   def equalTo(value: A): PostgresFilterQuery[F, K, S] = is(value)
 
+  /** Match a different non-null value with SQL `<>`. `None` matches SQL `IS NOT NULL`.
+    *
+    * @param value
+    *   value to exclude
+    * @return
+    *   the query with this condition
+    */
+  def notEqualTo(value: A): PostgresFilterQuery[F, K, S] =
+    query.notEqualTo(scalaFieldName, value, postgresField)
+
+  /** Match both bounds inclusively with SQL `BETWEEN`.
+    *
+    * @param from
+    *   inclusive lower bound
+    * @param to
+    *   inclusive upper bound
+    * @return
+    *   the query with this range
+    */
+  def between(from: A, to: A): PostgresFilterQuery[F, K, S] =
+    query.between(scalaFieldName, from, to, postgresField)
+
+  /** Omit a range when its input is absent.
+    *
+    * @param bounds
+    *   inclusive lower and upper bounds, or `None` to omit the condition
+    * @return
+    *   the query with the supplied range
+    */
+  def between(bounds: Option[(A, A)]): PostgresFilterQuery[F, K, S] =
+    bounds.fold(query)((from, to) => between(from, to))
+
   /** Match values greater than the supplied value using SQL `>`.
     *
     * @param value
@@ -77,6 +109,26 @@ final class PostgresFieldFilter[F[_], K, S <: Product, A] private[postgres] (
   /** Match any supplied value with SQL `IN`. An empty collection makes the complete query match no rows. */
   def in(values: IterableOnce[A]): PostgresFilterQuery[F, K, S] =
     query.within(scalaFieldName, values, postgresField, optionalField)
+
+  /** Match values selected by another query. The subquery executes in the same PostgreSQL statement.
+    *
+    * @param selection
+    *   one column selected from a filtered query in the same database
+    * @return
+    *   the query with an SQL `IN` subquery
+    */
+  def in(selection: PostgresSelection[F, A]): PostgresFilterQuery[F, K, S] =
+    query.withinSelection(scalaFieldName, selection)
+
+  /** Filter a nullable field by present values. `None` omits the condition and an empty collection matches nothing.
+    *
+    * @param values
+    *   optional collection of non-null values to match
+    * @return
+    *   the query with this condition, or unchanged when absent
+    */
+  def inValues[B](values: Option[IterableOnce[B]])(using evidence: A =:= Option[B]): PostgresFilterQuery[F, K, S] =
+    values.fold(query)(items => in(items.iterator.map(value => evidence.flip(Some(value)))))
 
   /** Conditionally add an `IN` condition. `None` omits it; `Some(values)` retains the ordinary [[in]] semantics. */
   @targetName("inOptionalInput")

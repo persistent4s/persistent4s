@@ -78,6 +78,22 @@ private object DerivedPostgresRepositoryMacros:
 
     '{ $query.orderField(${ Expr(fieldName) }, $descending) }
 
+  def select[F[_]: Type, K: Type, S <: Product: Type, A: Type](
+    query: Expr[PostgresFilterQuery[F, K, S]],
+    selector: Expr[S => A],
+    field: Expr[PostgresField[A]],
+  )(using Quotes): Expr[PostgresSelection[F, A]] =
+    val name = selectedField(selector, "A PostgreSQL selection")
+    '{ $query.selectField(${ Expr(name) }, $field) }
+
+  def countBy[F[_]: Type, K: Type, S <: Product: Type, A: Type](
+    query: Expr[PostgresFilterQuery[F, K, S]],
+    selector: Expr[S => A],
+    field: Expr[PostgresField[A]],
+  )(using Quotes): Expr[F[Map[A, Long]]] =
+    val name = selectedField(selector, "A PostgreSQL grouping")
+    '{ $query.countField(${ Expr(name) }, $field) }
+
   private def isOptional[A: Type](using quotes: Quotes): Boolean =
     import quotes.reflect.*
     TypeRepr.of[A].dealias <:< TypeRepr.of[Option[Any]]
@@ -94,11 +110,31 @@ private object DerivedPostgresRepositoryMacros:
 
     strip(selector.asTerm) match
       case Lambda(List(parameter), body) =>
-        strip(body) match
-          case Select(receiver, name) if strip(receiver).symbol == parameter.symbol => name
-          case other                                                                =>
+        def path(term: Term, root: Symbol): List[String] = strip(term) match
+          case value if value.symbol == root => Nil
+          case selected @ Select(receiver, name)
+              if receiver.tpe.widen.dealias.typeSymbol.caseFields.contains(selected.symbol) =>
+            path(receiver, root) :+ name
+          case Apply(TypeApply(Select(receiver, method), _), List(function))
+              if Set("map", "flatMap").contains(method) && receiver.tpe.widen.dealias <:< TypeRepr.of[Option[Any]] =>
+            optionalPath(receiver, function, root)
+          case Apply(Select(receiver, method), List(function))
+              if Set("map", "flatMap").contains(method) && receiver.tpe.widen.dealias <:< TypeRepr.of[Option[Any]] =>
+            optionalPath(receiver, function, root)
+          case other =>
             report.errorAndAbort(
               s"$description must select exactly one state field directly; unsupported expression: ${other.show}",
             )
+
+        def optionalPath(receiver: Term, function: Term, root: Symbol): List[String] = strip(function) match
+          case Lambda(List(nested), value) => path(receiver, root) ++ path(value, nested.symbol)
+          case other                       =>
+            report.errorAndAbort(
+              s"$description requires an inline field selector inside Option.map or Option.flatMap: ${other.show}",
+            )
+
+        val parts = path(body, parameter.symbol)
+        if parts.isEmpty then report.errorAndAbort(s"$description must select a state field")
+        parts.mkString(".")
       case other =>
         report.errorAndAbort(s"$description must be an inline lambda, but found: ${other.show}")

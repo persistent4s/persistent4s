@@ -141,6 +141,26 @@ PostgresTable
 borrowingRepository.filterBy(_.returnedAt).isNull.run
 ```
 
+Use an explicit flattened row for nested products stored in existing columns:
+
+```scala
+final case class Address(city: Option[String], state: Option[String])
+final case class Person(id: Long, address: Option[Address], language: String)
+
+given PostgresRow[Person] = PostgresRow.flattened[Person](
+  path => path.replace(".", "").toLowerCase(java.util.Locale.ROOT),
+  PostgresRow.columnCodec[Person](_.language)(skunk.codec.all.varchar(10)),
+  PostgresRow.columnCodec[Person](_.address.flatMap(_.state))(skunk.codec.all.varchar(5).opt),
+)
+val people = PostgresTable.derived[Person]("people").key(_.id)
+```
+
+The naming function receives paths such as `address.city`; this example preserves legacy `addresscity` names.
+Optional products decode as `None` when every column is null. A supplied `PostgresField` takes precedence and keeps
+its value in one column. Typed overrides handle differences such as `varchar` and `text` without changing the model.
+Nested selectors also work in filters and ordering; use `Option.map` or `flatMap` for optional products.
+Composite keys can select required fields inside nested products.
+
 Filters are immutable query builders, so conditions can be composed before executing them once:
 
 ```scala
@@ -150,6 +170,22 @@ repository.filterBy(_.author).in(authors).and(_.availableCopies).is(Some(copies)
 Optional filter inputs make frontend parameters straightforward: `None` omits that condition, while `Some(value)` or
 `Some(values)` adds it. Passing an empty collection directly to `in` matches no rows. If every optional condition is
 omitted, `run` loads all rows unless a limit is supplied.
+
+Ranges, counts, and related-table conditions also run in SQL:
+
+```scala
+val borrowed = borrowingRepository.filterBy(_.memberId).is(memberId)
+  .and(_.returnedAt).isNull.select(_.bookId)
+val matching = repository.filterBy(_.availableCopies).between(1, 5).and(_.bookId).in(borrowed)
+
+matching.count                         // Total matching books
+matching.countBy(_.availableCopies)     // Counts grouped by available copies
+matching.orderBy(_.bookId).withLimit(50, maxLimit = 200).withOffset(100).run
+```
+
+`between` includes both bounds. `select` builds a SQL subquery; it does not load identifiers into memory.
+Its conditions apply to the same related row, and repeated child matches do not duplicate parents.
+`count` and `countBy` ignore ordering and pagination while still rejecting invalid pagination arguments.
 
 Apply ordering and pagination before `run` so PostgreSQL does the work:
 
@@ -197,6 +233,21 @@ remain explicit. SQL identifiers are validated and double-quoted exactly as decl
 `.column(_.scalaField, "database_column")` for legacy names, define a `PostgresField[A]` for a custom scalar codec, or
 replace generated callbacks with `DerivedPostgresRepository.customized`. Concrete repositories can continue to use
 `useSession` and the derived `rowCodec` for specialized Skunk queries; `all` may also be overridden.
+
+Override `enrich(session, rows)` to attach related data after `find`, `findMany`, `all`, or a filtered query.
+Preserve the rows' keys and order, and load related rows in a batch with the supplied session. Generated table
+operations and filtered deletes can compose parent and child writes inside the same transaction:
+
+```scala
+session.transaction.use { _ =>
+  parentTable.upsert(session, parents) *>
+    children.filterBy(_.parentId).in(parentIds).delete(session) *>
+    childTable.upsert(session, replacementChildren)
+}
+```
+
+`table.fetch`, `upsert`, and `delete` handle empty inputs and batching. Inside projection callbacks, use the session
+already supplied by `PostgresRepositoryTable`; it shares the transaction with the projection checkpoint.
 
 Generated inserts and partial updates can also use an existing connection and transaction:
 

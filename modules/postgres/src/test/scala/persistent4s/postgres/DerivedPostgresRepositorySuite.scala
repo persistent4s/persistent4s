@@ -50,6 +50,8 @@ object DerivedPostgresRepositorySuite extends IOSuite:
     note: Option[String],
   ) derives PostgresRow
 
+  final case class VarcharState(id: Long, value: String)
+
   final case class Resources(
     pool: Resource[IO, Session[IO]],
     scalar: DerivedPostgresRepository[IO, UUID, ScalarState],
@@ -469,6 +471,157 @@ object DerivedPostgresRepositorySuite extends IOSuite:
       finalState.contains(initial),
       finalCheckpoint.contains(committed),
     )
+  }
+
+  test("ranges, optional nullable inputs, and counts execute over the complete matching set") { resources =>
+    isolatedScalar(resources).use { repository =>
+      val states = paginationStates(5).zipWithIndex.map { (state, index) =>
+        state.copy(note = Option.when(index > 0)(s"note-$index"), active = index % 2 == 0)
+      }
+      val ranged = repository.filterBy(_.revision).between(1, 3).and(_.revision).notEqualTo(2)
+      for
+        _       <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
+        rows    <- ranged.orderBy(_.revision).run
+        total   <- ranged.withLimit(0).withOffset(100).count
+        grouped <- repository.query.withLimit(1).withOffset(100).countBy(_.active)
+        omitted <- repository.filterBy(_.note).inValues(None: Option[List[String]]).count
+        empty   <- repository.filterBy(_.note).inValues(Some(List.empty[String])).count
+        present <- repository.filterBy(_.note).inValues(Some(List("note-1", "note-3"))).orderBy(_.revision).run
+        nulls   <- repository.filterBy(_.note).is(None).count
+        others  <- repository.filterBy(_.note).notEqualTo(None).count
+      yield expect.all(
+        rows.map(_.revision) == List(1, 3),
+        total == 2L,
+        grouped == Map(true -> 3L, false -> 2L),
+        omitted == 5L,
+        empty == 0L,
+        present.map(_.revision) == List(1, 3),
+        nulls == 1L,
+        others == 4L,
+      )
+    }
+  }
+
+  test("SQL subqueries require every child condition on the same row without duplicating parents") { resources =>
+    isolatedScalar(resources).use { repository =>
+      val states = paginationStates(3)
+      val children = List(
+        CompositeState(UUID.randomUUID(), states(0).rowId, "wanted", Some("other")),
+        CompositeState(UUID.randomUUID(), states(0).rowId, "other", Some("wanted")),
+        CompositeState(UUID.randomUUID(), states(1).rowId, "wanted", Some("wanted")),
+        CompositeState(UUID.randomUUID(), states(1).rowId, "wanted", Some("wanted")),
+      )
+      val childQuery = resources.composite.filterBy(_.payload).is("wanted").and(_.note).is(Some("wanted"))
+      val matches = repository.filterBy(_.rowId).in(childQuery.select(_.itemId))
+      val emptyChildren = resources.composite.filterBy(_.itemId).in(List.empty[UUID]).select(_.itemId)
+      for
+        _     <- repository.persist(states.map(state => state.rowId -> state).toMap, Nil)
+        _     <- resources.composite.persist(children.map(state => (state.tenantId, state.itemId) -> state).toMap, Nil)
+        found <- matches.orderBy(_.revision).withLimit(200).run
+        count <- matches.withLimit(0).count
+        empty <- repository.filterBy(_.rowId).in(emptyChildren).count
+      yield expect.all(found == List(states(1)), count == 1L, empty == 0L)
+    }
+  }
+
+  test("counts and nested selections validate pagination before acquiring a connection") { _ =>
+    val unavailable =
+      Resource.eval[IO, Session[IO]](IO.raiseError(new AssertionError("Unexpected database connection")))
+    val repository = DerivedPostgresRepository(unavailable, scalarTable)
+    val inner = repository.query.withOffset(-7L).select(_.rowId)
+    for
+      count  <- repository.query.withLimit(-1).count.attempt
+      group  <- repository.query.withOffset(-2L).countBy(_.active).attempt
+      nested <- repository.filterBy(_.rowId).in(inner).run.attempt
+    yield expect.all(
+      count == Left(PaginationError.NegativeLimit(-1)),
+      group == Left(PaginationError.NegativeOffset(-2L)),
+      nested == Left(PaginationError.NegativeOffset(-7L)),
+    )
+  }
+
+  test("generated table operations and filtered deletes share the caller's transaction") { resources =>
+    val state = paginationStates(1).head
+    val child = CompositeState(UUID.randomUUID(), state.rowId, "transaction", None)
+    val failure = new AssertionError("Roll back both generated writes")
+    for
+      rolledBack <- resources.pool.use { session =>
+                      session.transaction.use { _ =>
+                        scalarTable.upsert(session, List(state)) *>
+                          compositeTable.upsert(session, List(child)) *>
+                          IO.raiseError[Unit](failure)
+                      }
+                    }.attempt
+      absent      <- resources.scalar.find(state.rowId)
+      childAbsent <- resources.composite.find((child.tenantId, child.itemId))
+      read        <- resources.pool.use { session =>
+                session.transaction.use { _ =>
+                  for
+                    _       <- scalarTable.upsert(session, List(state))
+                    _       <- compositeTable.upsert(session, List(child))
+                    rows    <- resources.scalar.filterBy(_.rowId).is(state.rowId).run(session)
+                    fetched <- scalarTable.fetch(session, List(state.rowId, UUID.randomUUID()))
+                    _       <- resources.composite.filterBy(_.itemId).is(state.rowId).delete(session)
+                    _       <- scalarTable.delete(session, List(state.rowId))
+                  yield rows -> fetched
+                }
+              }
+      deleted      <- resources.scalar.find(state.rowId)
+      childDeleted <- resources.composite.find((child.tenantId, child.itemId))
+    yield expect.all(
+      rolledBack == Left(failure),
+      absent.isEmpty,
+      childAbsent.isEmpty,
+      read == (List(state) -> List(state)),
+      deleted.isEmpty,
+      childDeleted.isEmpty,
+    )
+  }
+
+  test("related-row enrichment applies to find, all, and generated filters") { resources =>
+    val state = paginationStates(1).head
+    val repository = new DerivedPostgresRepository[IO, UUID, ScalarState](resources.pool, scalarTable):
+      override protected def enrich(
+        @scala.annotation.unused session: Session[IO],
+        rows: List[ScalarState],
+      ): IO[List[ScalarState]] =
+        IO.pure(rows.map(row => row.copy(displayName = s"enriched-${row.displayName}")))
+    val expected = state.copy(displayName = s"enriched-${state.displayName}")
+    for
+      _        <- repository.persist(Map(state.rowId -> state), Nil)
+      found    <- repository.find(state.rowId)
+      all      <- repository.all
+      filtered <- repository.filterBy(_.rowId).is(state.rowId).run
+      paged    <- repository.filterBy(_.rowId).is(state.rowId).withLimit(1).run
+    yield expect.all(
+      found.contains(expected),
+      all.contains(expected),
+      filtered == List(expected),
+      paged == List(expected),
+    )
+  }
+
+  test("text field filters and grouping respect varchar column overrides") { resources =>
+    given PostgresRow[VarcharState] = PostgresRow
+      .flattened[VarcharState](identity, PostgresRow.columnCodec[VarcharState](_.value)(skunk.codec.all.varchar(10)))
+    val table = PostgresTable.derived[VarcharState]("derived_varchar_state").key(_.id)
+    val repository = DerivedPostgresRepository(resources.pool, table)
+    val setup = resources.pool
+      .use(
+        _.execute(sql"CREATE TABLE derived_varchar_state (id BIGINT PRIMARY KEY, value VARCHAR(10) NOT NULL)".command),
+      )
+      .void
+    Resource.make(setup)(_ => resources.pool.use(_.execute(sql"DROP TABLE derived_varchar_state".command)).void).use {
+      _ =>
+        for
+          _ <- repository.persist(
+                 Map(1L -> VarcharState(1L, "FR"), 2L -> VarcharState(2L, "FR"), 3L -> VarcharState(3L, "DE")),
+                 Nil,
+               )
+          rows   <- repository.filterBy(_.value).is("FR").orderBy(_.id).run
+          counts <- repository.query.countBy(_.value)
+        yield expect.all(rows.map(_.id) == List(1L, 2L), counts == Map("FR" -> 2L, "DE" -> 1L))
+    }
   }
 
   private val scalarTable: PostgresTable[UUID, ScalarState] =
