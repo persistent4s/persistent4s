@@ -20,7 +20,7 @@ import cats.effect.{Async, Resource}
 import cats.syntax.all.*
 
 import skunk.{AppliedFragment, Codec, Session}
-import skunk.codec.all.bool
+import skunk.codec.all.{bool, int8}
 
 /** An atomic PostgreSQL projection repository whose standard persistence operations come from a [[PostgresTable]].
   *
@@ -35,11 +35,28 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
 ) extends PostgresAtomicRepository[F, K, S](pool):
 
   final override protected val table: PostgresRepositoryTable[F, K, S] =
-    customize(mapping.repositoryTable[F])
+    val base = customize(mapping.repositoryTable[F])
+    base.withFetch { (session, keys) =>
+      base
+        .fetchRows(session, keys)
+        .flatMap(rows => enrich(session, rows.map(_._2)))
+        .map(_.map(state => mapping.keyOf(state) -> state))
+    }
+
+  /** Load related rows using the same connection. Override when a state includes data from other tables.
+    *
+    * @param session
+    *   connection that loaded the rows; use it for related queries
+    * @param rows
+    *   decoded rows, already filtered, ordered, and paged
+    * @return
+    *   enriched rows in the same order, keeping their keys
+    */
+  protected def enrich(@scala.annotation.unused session: Session[F], rows: List[S]): F[List[S]] = Async[F].pure(rows)
 
   /** Load every row. No ordering is implied. */
   def all: F[List[S]] =
-    useSession(_.execute(mapping.allQuery))
+    useSession(session => session.execute(mapping.allQuery).flatMap(enrich(session, _)))
 
   /** Insert one row using a pooled connection. An existing key is left unchanged.
     *
@@ -110,7 +127,8 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
   final def query: PostgresFilterQuery[F, K, S] =
     new PostgresFilterQuery(this, PostgresFilterPlan())
 
-  /** Select one state field to filter. The selector must reference the field directly.
+  /** Select one scalar state field to filter. Flattened nested fields may use direct selection or
+    * `Option.map`/`flatMap`, such as `_.address.flatMap(_.city)`.
     *
     * Example: `repository.filterBy(_.active).is(true).run`, or
     * `repository.filterBy(_.author).in(authors).and(_.availableCopies).is(Some(1)).run`.
@@ -150,6 +168,32 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
     plan.append(
       PostgresFilterClause(mapping.filterGreaterThanPredicate(scalaFieldName, postgresField.codec, value) :: Nil),
     )
+
+  private[postgres] def addNotEqualFilter[A](
+    plan: PostgresFilterPlan,
+    name: String,
+    value: A,
+    field: PostgresField[A],
+  ): PostgresFilterPlan =
+    plan.append(PostgresFilterClause(mapping.filterNotEqualPredicate(name, field.codec, value) :: Nil))
+
+  private[postgres] def addBetweenFilter[A](
+    plan: PostgresFilterPlan,
+    name: String,
+    from: A,
+    to: A,
+    field: PostgresField[A],
+  ): PostgresFilterPlan =
+    plan.append(PostgresFilterClause(mapping.filterBetweenPredicate(name, field.codec, from, to) :: Nil))
+
+  private[postgres] def addSelectionFilter[A](
+    plan: PostgresFilterPlan,
+    name: String,
+    selection: PostgresSelection[F, A],
+  ): PostgresFilterPlan =
+    plan
+      .append(PostgresFilterClause(mapping.filterSelectionPredicate(name, selection) :: Nil))
+      .copy(validations = plan.validations :+ selection.validate)
 
   private[postgres] def addValuesFilter[A](
     plan: PostgresFilterPlan,
@@ -192,17 +236,60 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
   private[postgres] def addNotNullFilter(plan: PostgresFilterPlan, scalaFieldName: String): PostgresFilterPlan =
     plan.append(PostgresFilterClause(mapping.filterNotNullPredicate(scalaFieldName) :: Nil))
 
-  private[postgres] def runFilter(plan: PostgresFilterPlan): F[List[S]] =
-    Async[F].defer {
-      PostgresPagination.validate(plan.limit, plan.offset, plan.maxLimit)
+  private[postgres] def validateFilter(plan: PostgresFilterPlan): F[Unit] = Async[F].delay(plan.validate())
 
+  private[postgres] def selectFilter[A](
+    plan: PostgresFilterPlan,
+    name: String,
+    field: PostgresField[A],
+  ): PostgresSelection[F, A] =
+    new PostgresSelection(field.codec, mapping.selectionQuery(name, field.codec, plan), () => plan.validate())
+
+  private[postgres] def countFilter(plan: PostgresFilterPlan): F[Long] =
+    validateFilter(plan) *> Async[F].defer {
+      if plan.matchesNothing then Async[F].pure(0L)
+      else
+        useSession { session =>
+          val applied = mapping.countQuery(plan)
+          session.unique(applied.fragment.query(int8))(applied.argument)
+        }
+    }
+
+  private[postgres] def countFilterBy[A](
+    plan: PostgresFilterPlan,
+    name: String,
+    field: PostgresField[A],
+  ): F[Map[A, Long]] =
+    validateFilter(plan) *> Async[F].defer {
+      if plan.matchesNothing then Async[F].pure(Map.empty)
+      else
+        useSession { session =>
+          val applied = mapping.countByQuery(name, field.codec, plan)
+          session
+            .execute(applied.fragment.query(mapping.mappedFieldCodec(name, field.codec) *: int8))(applied.argument)
+            .map(_.toMap)
+        }
+    }
+
+  private[postgres] def deleteFilter(session: Session[F], plan: PostgresFilterPlan): F[Unit] =
+    validateFilter(plan) *> Async[F].defer {
+      val applied = mapping.deleteQuery(plan)
+      session.execute(applied.fragment.command)(applied.argument).void
+    }
+
+  private[postgres] def runFilter(plan: PostgresFilterPlan): F[List[S]] =
+    validateFilter(plan) *> Async[F].defer {
+      if plan.matchesNothing || plan.limit.contains(0) then Async[F].pure(List.empty)
+      else useSession(session => runFilter(session, plan))
+    }
+
+  private[postgres] def runFilter(session: Session[F], plan: PostgresFilterPlan): F[List[S]] =
+    validateFilter(plan) *> Async[F].defer {
       if plan.matchesNothing || plan.limit.contains(0) then Async[F].pure(List.empty)
       else if plan.hasQueryOptions then
-        useSession { session =>
-          val applied = mapping.filterQuery(plan)
-          session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
-        }
-      else if plan.clauses.isEmpty then all
+        val applied = mapping.filterQuery(plan)
+        session.execute(applied.fragment.query(mapping.row.codec))(applied.argument).flatMap(enrich(session, _))
+      else if plan.clauses.isEmpty then session.execute(mapping.allQuery).flatMap(enrich(session, _))
       else
         val predicateCombinations =
           plan.clauses.foldLeft(List(List.empty[skunk.AppliedFragment])) { (combinations, clause) =>
@@ -212,13 +299,12 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
             yield combination :+ alternative
           }
 
-        useSession { session =>
-          predicateCombinations.traverse { predicates =>
-            val applied = mapping.filterQuery(predicates)
-            session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
-          }
-            .map(_.flatten.distinctBy(mapping.keyOf))
+        predicateCombinations.traverse { predicates =>
+          val applied = mapping.filterQuery(predicates)
+          session.execute(applied.fragment.query(mapping.row.codec))(applied.argument)
         }
+          .map(_.flatten.distinctBy(mapping.keyOf))
+          .flatMap(enrich(session, _))
     }
 
   /** The derived row codec, for additional typed Skunk queries in concrete repositories. */

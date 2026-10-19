@@ -24,12 +24,12 @@ import cats.syntax.all.*
 import skunk.data.{Encoded, Type}
 import skunk.{Codec, Decoder}
 
-/** Skunk row metadata for a flat projection state product.
+/** Skunk row metadata for a projection state product.
   *
   * [[PostgresTable.derived]] automatically uses constructor-field order, converts Scala field names to `snake_case`,
   * and summons a [[PostgresField]] for every field. `derives PostgresRow` is also available when an instance is useful
-  * independently. Use [[PostgresRow.apply]] when a row needs an entirely custom codec or stable column names that
-  * differ from the convention.
+  * independently. Use [[PostgresRow.flattened]] for nested products stored in separate columns, or
+  * [[PostgresRow.apply]] for an entirely custom codec and column mapping.
   */
 trait PostgresRow[S]:
 
@@ -49,6 +49,62 @@ object PostgresRow:
 
   inline given derived[S <: Product](using mirror: Mirror.ProductOf[S]): PostgresRow[S] =
     ${ PostgresRowMacros.derived[S]('mirror) }
+
+  /** Derive a row whose nested products occupy separate columns. A supplied [[PostgresField]] keeps its value in one
+    * column. An optional product is absent when all of its columns are null.
+    *
+    * @param columnName
+    *   SQL column name for each Scala field path, such as `address.city`
+    * @param overrides
+    *   codecs for individual scalar fields whose database type differs from their default
+    * @return
+    *   ordered column metadata and a codec for the complete product
+    */
+  inline def flattened[S <: Product](
+    columnName: String => String,
+    overrides: ColumnCodec[S]*,
+  )(using mirror: Mirror.ProductOf[S]): PostgresRow[S] =
+    ${ PostgresFlattenedRowMacros.derived[S]('columnName, 'overrides, 'mirror) }
+
+  /** A codec override for one scalar field of a flattened row. Use [[columnCodec]] to select the field safely. */
+  final class ColumnCodec[S] private[postgres] (val path: String, val codec: Codec[Any])
+
+  /** Select a scalar field whose PostgreSQL codec differs from its default. For example,
+    * `columnCodec[Person](_.name)(varchar)` stores that field as `varchar`.
+    *
+    * @return
+    *   a typed selector for an override passed to [[flattened]]
+    */
+  def columnCodec[S]: ColumnCodecBuilder[S] = new ColumnCodecBuilder[S]
+
+  /** Selects a declared scalar field and supplies its single-column codec. */
+  final class ColumnCodecBuilder[S]:
+
+    /** Override one field's codec without changing its Scala type. Nested optional fields can use `flatMap`, provided
+      * the selector's result retains the leaf field's declared type.
+      *
+      * @param field
+      *   direct or nested scalar field; computed values are rejected
+      * @param value
+      *   codec that encodes and decodes the selected field in one PostgreSQL column
+      * @return
+      *   the override for [[flattened]]; unknown paths and duplicate overrides fail when the row is built
+      */
+    inline def apply[A](inline field: S => A)(value: Codec[A]): ColumnCodec[S] =
+      ${ PostgresFlattenedRowMacros.columnCodec[S, A]('field, 'value) }
+
+  /** Low-level constructor used by the typed codec selector. Prefer [[columnCodec]] for compile-time field checks.
+    *
+    * @param path
+    *   Scala field path in the flattened row, such as `address.city`
+    * @param value
+    *   single-column codec for that field's declared type
+    * @return
+    *   the override for [[flattened]]
+    */
+  def columnCodecAt[S, A](path: String, value: Codec[A]): ColumnCodec[S] =
+    require(value.types.size == 1, "A flattened PostgreSQL column codec must represent exactly one column")
+    new ColumnCodec(path, value.asInstanceOf[Codec[Any]])
 
   /** Low-level constructor used by derivation and available for custom mapping tools. */
   def fromFields[S](valueFields: List[Field], valueCodec: Codec[S]): PostgresRow[S] =
