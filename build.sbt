@@ -66,7 +66,7 @@ val Otel4sV = "1.1.0"
 
 val OtelInstrumentationV = "2.31.1-alpha"
 
-val LogbackV = "1.6.3"
+val LogbackV = "1.6.5"
 
 val TestcontainersV = "1.21.4"
 
