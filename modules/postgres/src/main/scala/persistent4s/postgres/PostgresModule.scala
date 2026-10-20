@@ -16,10 +16,16 @@
 
 package persistent4s.postgres
 
+import java.util.UUID
+import java.util.concurrent.TimeoutException
+
+import scala.concurrent.duration.FiniteDuration
+
 import cats.effect.*
 import cats.effect.std.{Console, SecureRandom}
 import cats.syntax.all.*
 
+import fs2.concurrent.Topic
 import fs2.io.net.Network
 import io.opentelemetry.instrumentation.api.incubator.semconv.db.{SqlDialect, SqlQueryAnalyzer}
 import org.typelevel.otel4s.metrics.Histogram
@@ -43,8 +49,10 @@ import persistent4s.{
   InstrumentedEventStore,
   InstrumentedProjectionCheckpoint,
   LeaderElectedProjector,
+  Projection,
   ProjectionCheckpoint,
   ProjectionRuntime,
+  SyncCommandRuntime,
 }
 
 sealed trait PostgresModuleError extends Throwable
@@ -138,6 +146,32 @@ object PostgresModule:
       */
     def leaderElectedProjectionRuntime(using Async[F], Logger[F], Tracer[F], Meter[F]): ProjectionRuntime[F, A] =
       ProjectionRuntime(LeaderElectedProjector(DefaultProjector(eventStore, checkpoint), leaderElection))
+
+    /** Starts a projection and configures direct `handler.runSync` calls for it.
+      *
+      * Provide the returned runtime to services with `using`. Commands subscribe before saving and wait for their
+      * events to reach this projection. Notifications stay within this process, so use one application instance.
+      * Releasing the resource stops the projection.
+      *
+      * @param projection
+      *   read model that commands wait for
+      * @param timeout
+      *   maximum wait after a command saves its events
+      * @param timeoutError
+      *   error raised when the projection wait expires; command and projection errors remain unchanged
+      * @return
+      *   shared runtime for synchronous commands, with managed projection shutdown
+      */
+    def startSync[K, S](
+      projection: Projection[F, A, K, S],
+      timeout: FiniteDuration,
+      timeoutError: => Throwable = new TimeoutException("Projection did not catch up in time"),
+    )(using Async[F], Logger[F], Tracer[F], Meter[F]): Resource[F, SyncCommandRuntime[F, A]] =
+      for
+        updates <- Resource.eval(Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])])
+        _       <- leaderElectedProjectionRuntime.startAll(_.run(projection, Some(updates)))
+      yield SyncCommandRuntime.fromTopic(commandRuntime, updates, projection.filter, timeout,
+        timeoutError = timeoutError)
 
     /** Build an atomic projection repository from derived PostgreSQL table metadata using this module's shared session
       * pool.

@@ -273,3 +273,13 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
       result <- sync.runSync(CreateMany(List("a")))
     yield expect(result == Map("a" -> Some(1)))
   }
+
+  test("an empty projection filter waits for all event types") {
+    for
+      events <- Ref.of[IO, Vector[EventEnvelope[TestEvent]]](Vector.empty)
+      topic  <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      store   = new InstantPublishingStore(events, topic)
+      sync    = syncFor(store, topic).copy(filter = Set.empty)
+      result <- sync.runSync(CreateMany(List("a", "b")))
+    yield expect(result == Map("a" -> Some(1), "b" -> Some(1)))
+  }
