@@ -101,6 +101,38 @@ Applications use a published version through sbt; no private repository or local
 publication is required. Library changes must be released before applications
 can depend on them.
 
+## Waiting for a projection
+
+Call `runSync` directly on a command handler when its response needs the updated read model:
+
+```scala
+AddBook.Handler.runSync[IO](command)
+```
+
+It returns the same `Either[AddBook.Error, List[EventEnvelope[LibraryEvent]]]` as `run`, after the selected projection
+has saved the command's events. Typed rejections stay `Left`; command and projection errors remain unchanged.
+
+Configure the shared runtime once at startup and pass it as a given to the service:
+
+```scala
+val service = for
+  database <- PostgresModule.make[IO, LibraryEvent](LibraryEvent.eventCodec)
+  books = BookRepository.make(database.sessions)
+  commands <- database.startSync(BookProjection(books), timeout = 5.seconds)
+yield BookServiceImpl(books)(using commands)
+
+class BookServiceImpl(repository: BookRepository)(using SyncCommandRuntime[IO, LibraryEvent]):
+  def add(command: AddBook) = AddBook.Handler.runSync[IO](command)
+```
+
+`startSync` starts and stops that projection with the resource. Use `timeoutError = ...` to customize only the
+projection wait timeout. Saved events are kept when waiting fails. Commands that emit nothing return immediately;
+read the repository if their response still needs the current state.
+
+Notifications stay within one application instance, so run a single instance for this setup. If projections are
+already started together, use `SyncCommandRuntime.fromTopic(...)` with the topic passed to the selected projection.
+The library example keeps this shared startup so its server can monitor all projection workers.
+
 ## Derived PostgreSQL projection repositories
 
 Projection states can use generated Skunk persistence without database annotations or handwritten CRUD:

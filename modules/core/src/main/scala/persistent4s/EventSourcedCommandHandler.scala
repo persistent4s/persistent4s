@@ -544,6 +544,18 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   ): F[Either[R, List[EventEnvelope[A]]]] =
     suspend(behavior.selection(command)).flatMap(selection => runWithRetry(command, selection, maxRetries))
 
+  /** Runs a command and waits for its saved events to reach the configured projection.
+    *
+    * @param command
+    *   requested change
+    * @return
+    *   the rejection or saved events, after the projection catches up
+    */
+  final def runSync[F[_]: Concurrent](command: C)(using
+    runtime: SyncCommandRuntime[F, A],
+  ): F[Either[R, List[EventEnvelope[A]]]] =
+    runtime.execute(this, command)
+
   /** Execute a command and translate only its typed domain rejection into an application error. Existing failed effects
     * (storage, decoding and concurrency failures) pass through unchanged.
     */
