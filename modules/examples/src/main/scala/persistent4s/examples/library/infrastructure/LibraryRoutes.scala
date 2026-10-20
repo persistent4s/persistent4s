@@ -19,7 +19,7 @@ package persistent4s.examples.library.infrastructure
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 
-import persistent4s.CommandRuntime
+import persistent4s.{CommandRuntime, SyncCommandRuntime}
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.application.*
 import persistent4s.examples.library.domain.LibraryEvent
@@ -32,10 +32,11 @@ object LibraryRoutes:
 
   def make(module: LibraryModule): Resource[IO, HttpRoutes[IO]] =
     given CommandRuntime[IO, LibraryEvent] = module.commands
+    given SyncCommandRuntime[IO, LibraryEvent] = module.syncCommands
 
     for
       bookRoutes <- SimpleRestJsonBuilder
-                      .routes(BookServiceImpl(module.bookRepository, module.addBookSyncHandler))
+                      .routes(BookServiceImpl(module.bookRepository))
                       .resource
 
       memberRoutes <- SimpleRestJsonBuilder
