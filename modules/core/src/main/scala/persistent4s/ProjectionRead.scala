@@ -26,9 +26,9 @@ import fs2.Stream
   * @param events
   *   the next events in delivery order; none of them can later be preceded by an event that is not yet visible
   * @param heldBack
-  *   `true` when visible events exist that the store withheld because an earlier write may still commit before them.
-  *   No notification announces when that write resolves (a rollback announces nothing), so a projector seeing this
-  *   must re-read on its own until it clears.
+  *   `true` when visible events exist that the store withheld because an earlier write may still commit before them. No
+  *   notification announces when that write resolves (a rollback announces nothing), so a projector seeing this must
+  *   re-read on its own until it clears.
   */
 final case class ProjectionRead[A <: Event](events: List[EventEnvelope[A]], heldBack: Boolean)
 
