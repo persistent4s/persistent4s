@@ -24,7 +24,7 @@ they touch instead of loading an aggregate root.
 | Module | Artifact | Description |
 |---|---|---|
 | core | `persistent4s-core` | Pure abstractions — `EventStore[F]`, command handling, projections, domain types |
-| postgres | `persistent4s-postgres` | PostgreSQL implementation via [Skunk](https://github.com/tpolecat/skunk) |
+| postgres | `persistent4s-postgres` | PostgreSQL implementation via [Skunk](https://github.com/tpolecat/skunk) — requires PostgreSQL 13 or newer |
 | circe | `persistent4s-circe` | JSON serialization via [Circe](https://github.com/circe/circe) |
 | kafka | `persistent4s-kafka` | Event and message relaying via [fs2-kafka](https://github.com/fd4s/fs2-kafka) |
 | monitoring | `persistent4s-monitoring` | Developer-facing HTTP page for projection checkpoints — pause, resume, reindex |
