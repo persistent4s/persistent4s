@@ -29,7 +29,9 @@ enum EventStoreNotification:
   /** Emitted when a projection is resumed */
   case ResumeProjection(name: String)
 
-  /** Emitted when a projection's checkpoint is changed */
+  /** Emitted when an operator moves a projection's checkpoint: the projection resumes right after the event at position
+    * `index`, as resolved by [[EventStore.cursorAt]].
+    */
   case UpdateCheckpointIndex(name: String, index: Long)
 
   case UnknownNotification

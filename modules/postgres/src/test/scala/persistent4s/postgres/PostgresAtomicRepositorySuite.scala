@@ -21,6 +21,7 @@ import java.util.UUID
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 
+import persistent4s.ReadCursor
 import persistent4s.{ProjectionCheckpointConflict, ProjectionCheckpointState, ProjectionCommit}
 
 import org.testcontainers.containers.PostgreSQLContainer
@@ -212,9 +213,9 @@ object PostgresAtomicRepositorySuite extends IOSuite:
 
     for
       name      <- fresh("projection")
-      checkpoint = ProjectionCheckpointState(name, 1L, true, None)
+      checkpoint = ProjectionCheckpointState(name, ReadCursor(0L, 1L), true, None)
       result    <- repository
-                  .persistAtomically(ProjectionCommit(Map("map-key" -> state), Nil, -1L, checkpoint))
+                  .persistAtomically(ProjectionCommit(Map("map-key" -> state), Nil, ReadCursor.Start, checkpoint))
                   .attempt
       saved <- resources.checkpoint.load(name)
     yield expect.all(
@@ -251,8 +252,8 @@ object PostgresAtomicRepositorySuite extends IOSuite:
     for
       key   <- fresh("state")
       name  <- fresh("projection")
-      next   = ProjectionCheckpointState(name, 7L, true, None)
-      _     <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, -1L, next))
+      next   = ProjectionCheckpointState(name, ReadCursor(0L, 7L), true, None)
+      _     <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, ReadCursor.Start, next))
       state <- repository.findMany(key :: Nil)
       saved <- resources.checkpoint.load(name)
     yield expect.all(
@@ -266,10 +267,10 @@ object PostgresAtomicRepositorySuite extends IOSuite:
     for
       key       <- fresh("state")
       name      <- fresh("projection")
-      current    = ProjectionCheckpointState(name, 5L, true, None)
-      next       = current.copy(globalPosition = 6L)
+      current    = ProjectionCheckpointState(name, ReadCursor(0L, 5L), true, None)
+      next       = current.copy(cursor = ReadCursor(0L, 6L))
       _         <- resources.checkpoint.save(current)
-      result    <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, 4L, next)).attempt
+      result    <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, ReadCursor(0L, 4L), next)).attempt
       state     <- repository.findMany(key :: Nil)
       persisted <- resources.checkpoint.load(name)
     yield expect.all(
@@ -279,13 +280,49 @@ object PostgresAtomicRepositorySuite extends IOSuite:
     )
   }
 
+  test("a checkpoint at the expected position but in another commit group is a conflict") { resources =>
+    val repository = TestRepository(resources.pool)
+    for
+      key       <- fresh("state")
+      name      <- fresh("projection")
+      current    = ProjectionCheckpointState(name, ReadCursor(5L, 10L), true, None)
+      next       = current.copy(cursor = ReadCursor(5L, 11L))
+      _         <- resources.checkpoint.save(current)
+      result    <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, ReadCursor(4L, 10L), next)).attempt
+      state     <- repository.findMany(key :: Nil)
+      persisted <- resources.checkpoint.load(name)
+    yield expect.all(
+      result.left.exists(_.isInstanceOf[ProjectionCheckpointConflict]),
+      state.get(key).flatten.isEmpty,
+      persisted.contains(current),
+    )
+  }
+
+  test("an atomic commit moves the checkpoint to a later commit group even at a lower position") { resources =>
+    val repository = TestRepository(resources.pool)
+    for
+      key    <- fresh("state")
+      name   <- fresh("projection")
+      current = ProjectionCheckpointState(name, ReadCursor(5L, 10L), true, None)
+      // Delivery order is by commit group first, so the next event can sit at a lower position.
+      next       = current.copy(cursor = ReadCursor(9L, 3L))
+      _         <- resources.checkpoint.save(current)
+      _         <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, current.cursor, next))
+      state     <- repository.findMany(key :: Nil)
+      persisted <- resources.checkpoint.load(name)
+    yield expect.all(
+      state.get(key).flatten.contains(42),
+      persisted.contains(next),
+    )
+  }
+
   test("a non-initial expected position cannot create a missing checkpoint") { resources =>
     val repository = TestRepository(resources.pool)
     for
       key        <- fresh("state")
       name       <- fresh("projection")
-      next        = ProjectionCheckpointState(name, 6L, true, None)
-      result     <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, 5L, next)).attempt
+      next        = ProjectionCheckpointState(name, ReadCursor(0L, 6L), true, None)
+      result     <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, ReadCursor(0L, 5L), next)).attempt
       state      <- repository.findMany(key :: Nil)
       checkpoint <- resources.checkpoint.load(name)
     yield expect.all(
@@ -300,8 +337,8 @@ object PostgresAtomicRepositorySuite extends IOSuite:
     for
       key        <- fresh("state")
       name       <- fresh("projection")
-      next        = ProjectionCheckpointState(name, 1L, true, None)
-      result     <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, -1L, next)).attempt
+      next        = ProjectionCheckpointState(name, ReadCursor(0L, 1L), true, None)
+      result     <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, ReadCursor.Start, next)).attempt
       state      <- repository.findMany(key :: Nil)
       checkpoint <- resources.checkpoint.load(name)
     yield expect.all(

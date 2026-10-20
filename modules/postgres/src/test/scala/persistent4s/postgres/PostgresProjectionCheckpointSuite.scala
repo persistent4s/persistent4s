@@ -22,6 +22,7 @@ import cats.effect.{IO, Resource}
 
 import org.typelevel.log4cats.Logger
 
+import persistent4s.ReadCursor
 import persistent4s.ProjectionCheckpointState
 
 import org.testcontainers.containers.PostgreSQLContainer
@@ -88,7 +89,7 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
   test("save and load round-trip: running=true, no error") { checkpoint =>
     for
       name   <- freshName("proj")
-      state   = ProjectionCheckpointState(name, 42L, true, None)
+      state   = ProjectionCheckpointState(name, ReadCursor(0L, 42L), true, None)
       _      <- checkpoint.save(state)
       loaded <- checkpoint.load(name)
     yield expect(loaded == Some(state))
@@ -97,7 +98,7 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
   test("save and load round-trip: running=false with error message") { checkpoint =>
     for
       name   <- freshName("proj")
-      state   = ProjectionCheckpointState(name, 7L, false, Some("RuntimeException: something went wrong"))
+      state   = ProjectionCheckpointState(name, ReadCursor(0L, 7L), false, Some("RuntimeException: something went wrong"))
       _      <- checkpoint.save(state)
       loaded <- checkpoint.load(name)
     yield expect(loaded == Some(state))
@@ -106,7 +107,7 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
   test("save and load round-trip: globalPosition zero") { checkpoint =>
     for
       name   <- freshName("proj")
-      state   = ProjectionCheckpointState(name, 0L, true, None)
+      state   = ProjectionCheckpointState(name, ReadCursor(0L, 0L), true, None)
       _      <- checkpoint.save(state)
       loaded <- checkpoint.load(name)
     yield expect(loaded == Some(state))
@@ -115,17 +116,30 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
   test("save and load round-trip: negative globalPosition (initial sentinel -1)") { checkpoint =>
     for
       name   <- freshName("proj")
-      state   = ProjectionCheckpointState(name, -1L, true, None)
+      state   = ProjectionCheckpointState(name, ReadCursor(0L, -1L), true, None)
       _      <- checkpoint.save(state)
       loaded <- checkpoint.load(name)
     yield expect(loaded == Some(state))
   }
 
+  test("save and load round-trip keeps a non-zero commit group, and loadAll returns it too") { checkpoint =>
+    for
+      name   <- freshName("proj")
+      state   = ProjectionCheckpointState(name, ReadCursor(987_654L, 12L), true, None)
+      _      <- checkpoint.save(state)
+      loaded <- checkpoint.load(name)
+      all    <- checkpoint.loadAll()
+    yield expect.all(
+      loaded == Some(state),
+      all.find(_.projectionName == name) == Some(state),
+    )
+  }
+
   test("second save overwrites the first (upsert semantics)") { checkpoint =>
     for
       name   <- freshName("proj")
-      first   = ProjectionCheckpointState(name, 1L, true, None)
-      second  = ProjectionCheckpointState(name, 99L, false, Some("error"))
+      first   = ProjectionCheckpointState(name, ReadCursor(0L, 1L), true, None)
+      second  = ProjectionCheckpointState(name, ReadCursor(0L, 99L), false, Some("error"))
       _      <- checkpoint.save(first)
       _      <- checkpoint.save(second)
       loaded <- checkpoint.load(name)
@@ -135,8 +149,8 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
   test("error field can be cleared by saving a new state with error=None") { checkpoint =>
     for
       name     <- freshName("proj")
-      withError = ProjectionCheckpointState(name, 5L, false, Some("something failed"))
-      cleared   = ProjectionCheckpointState(name, 5L, true, None)
+      withError = ProjectionCheckpointState(name, ReadCursor(0L, 5L), false, Some("something failed"))
+      cleared   = ProjectionCheckpointState(name, ReadCursor(0L, 5L), true, None)
       _        <- checkpoint.save(withError)
       _        <- checkpoint.save(cleared)
       loaded   <- checkpoint.load(name)
@@ -147,8 +161,8 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
     for
       nameA   <- freshName("projA")
       nameB   <- freshName("projB")
-      stateA   = ProjectionCheckpointState(nameA, 10L, true, None)
-      stateB   = ProjectionCheckpointState(nameB, 20L, false, Some("err"))
+      stateA   = ProjectionCheckpointState(nameA, ReadCursor(0L, 10L), true, None)
+      stateB   = ProjectionCheckpointState(nameB, ReadCursor(0L, 20L), false, Some("err"))
       _       <- checkpoint.save(stateA)
       _       <- checkpoint.save(stateB)
       loadedA <- checkpoint.load(nameA)
@@ -163,8 +177,8 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
     for
       nameA <- freshName("projA")
       nameB <- freshName("projB")
-      stateA = ProjectionCheckpointState(nameA, 10L, true, None)
-      stateB = ProjectionCheckpointState(nameB, 20L, false, Some("err"))
+      stateA = ProjectionCheckpointState(nameA, ReadCursor(0L, 10L), true, None)
+      stateB = ProjectionCheckpointState(nameB, ReadCursor(0L, 20L), false, Some("err"))
       _     <- checkpoint.save(stateA)
       _     <- checkpoint.save(stateB)
       all   <- checkpoint.loadAll()

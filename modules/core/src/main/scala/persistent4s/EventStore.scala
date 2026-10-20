@@ -68,8 +68,9 @@ trait EventStore[F[_], A <: Event]:
     * The source has already serialized those events under its own concurrency model, so re-checking on the receiving
     * side is meaningless.
     *
-    * The events are still assigned fresh `globalPosition` values in commit order and emit the same notification on
-    * commit, so projections wake up normally.
+    * The events are still assigned fresh `globalPosition` values and emit the same notification on commit, so
+    * projections wake up normally. Positions are allocated when written, not when committed, so concurrent writes may
+    * become visible out of position order; projections are protected from this by [[readForProjection]].
     *
     * The `events` parameter is variadic with the same semantics as [[append]]: multiple lists are flattened into a
     * single ordered sequence, and an empty call is a no-op (no writes, no notification).
@@ -102,3 +103,33 @@ trait EventStore[F[_], A <: Event]:
     *   cap on the number of events returned; `None` means no cap
     */
   def readFrom(fromPosition: Long, eventFilter: EventFilter, maxEvents: Option[Int] = None): Stream[F, EventEnvelope[A]]
+
+  /** Read the next events a projection should handle: those strictly after `after` in delivery order (see
+    * [[ReadCursor]]), at most `maxEvents` of them.
+    *
+    * Unlike [[readFrom]], every event returned is final in delivery order: no event that is not visible yet can later
+    * turn up before the last one returned. A projection can therefore checkpoint any returned event's
+    * [[EventMetadata.cursor]] without risking to skip an event that commits late. Events the store has to withhold for
+    * that reason are reported through [[ProjectionRead.heldBack]].
+    *
+    * There is deliberately no default implementation: a decorator that forgot to forward this method would silently
+    * lose the guarantee. A store whose positions only become visible in order can use [[ProjectionRead.byPosition]].
+    *
+    * @param after
+    *   the cursor of the last event already handled; [[ReadCursor.Start]] to read from the beginning
+    * @param eventFilter
+    *   filter to apply; see [[EventFilter]] for matching semantics
+    * @param maxEvents
+    *   cap on the number of events returned
+    */
+  def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): F[ProjectionRead[A]]
+
+  /** The cursor to give a projection so that it resumes right after the event at `globalPosition` in delivery order.
+    * This is how an operator moves a checkpoint by position (see [[EventStoreNotification.UpdateCheckpointIndex]]).
+    *
+    * When no event exists at `globalPosition` (a gap, or past the last event), the nearest event before it is used. A
+    * position of 0 or less, or one before every event, gives [[ReadCursor.Start]]. Because delivery order is not
+    * exactly position order, events whose writes overlapped the one at `globalPosition` may fall on either side of the
+    * returned cursor regardless of their position.
+    */
+  def cursorAt(globalPosition: Long): F[ReadCursor]
