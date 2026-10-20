@@ -101,6 +101,12 @@ object ParallelProjectorSuite extends SimpleIOSuite:
     def appendUnchecked(events: List[PendingEvent[A]]*): IO[List[EventEnvelope[A]]] =
       IO.pure(List.empty) // not needed for these tests
 
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[A]] =
+      ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+    def cursorAt(globalPosition: Long): IO[ReadCursor] =
+      IO.pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -143,6 +149,38 @@ object ParallelProjectorSuite extends SimpleIOSuite:
 
     def make: IO[InMemoryCheckpoint] =
       Ref.of[IO, Map[String, ProjectionCheckpointState]](Map.empty).map(InMemoryCheckpoint(_))
+
+  /** Wraps a store so that every read reports its visible events as held back until `release`, as when an earlier write
+    * is still open. Releasing sends no notification, as when that write rolls back. Records the cursor of every read,
+    * and stamps `cursorAtGroup` on the cursors `cursorAt` resolves so a test can tell where a cursor came from.
+    */
+  final class ScriptedStore private (
+    inner: InMemoryStore[TestEvent],
+    released: Ref[IO, Boolean],
+    val reads: Ref[IO, List[ReadCursor]],
+    cursorAtGroup: Long,
+  ) extends EventStore[IO, TestEvent]
+      with EventNotification[IO]:
+
+    export inner.{append, appendUnchecked, currentRevision, notification, readFrom}
+
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[TestEvent]] =
+      reads.update(_ :+ after) *> inner.readForProjection(after, eventFilter, maxEvents).flatMap { read =>
+        released.get.map(if _ then read else ProjectionRead(Nil, heldBack = read.events.nonEmpty))
+      }
+
+    def cursorAt(globalPosition: Long): IO[ReadCursor] =
+      inner
+        .cursorAt(globalPosition)
+        .map(cursor => if cursor == ReadCursor.Start then cursor else cursor.copy(commitGroup = cursorAtGroup))
+
+    def release: IO[Unit] = released.set(true)
+
+  object ScriptedStore:
+
+    def make(inner: InMemoryStore[TestEvent], heldBack: Boolean, cursorAtGroup: Long = 0L): IO[ScriptedStore] =
+      (Ref.of[IO, Boolean](!heldBack), Ref.of[IO, List[ReadCursor]](Nil))
+        .mapN(new ScriptedStore(inner, _, _, cursorAtGroup))
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -204,6 +242,94 @@ object ParallelProjectorSuite extends SimpleIOSuite:
   // Basic behaviour tests (same guarantees as DefaultProjector)
   // ---------------------------------------------------------------------------
 
+  test("re-reads on its own while events are held back, so a write that rolls back silently cannot stall it") {
+    for
+      inner      <- InMemoryStore.make[TestEvent]
+      store      <- ScriptedStore.make(inner, heldBack = true)
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      _          <- seed(inner, (Set(entityTag("a")), TestEvent.Created("a")), (Set(entityTag("b")), TestEvent.Created("b")))
+      result     <- ParallelProjector(store, checkpoint, heldBackRecheck = 20.millis)
+                  .run(trackingProjection(handled, states))
+                  .compile
+                  .drain
+                  .background
+                  .use { _ =>
+                    for
+                      _      <- IO.sleep(200.millis)
+                      before <- handled.get
+                      _      <- store.release
+                      _      <- waitUntil(handled.get.map(_.size >= 2)).timeoutTo(2.seconds, IO.unit)
+                      after  <- handled.get
+                    yield (before, after)
+                  }
+      (before, after) = result
+    yield expect.all(
+      before.isEmpty,
+      // Distinct keys are handled concurrently, so only the set of handled events is deterministic.
+      clue(after.map(_.payload)).toSet == Set(TestEvent.Created("a"), TestEvent.Created("b")),
+    )
+  }
+
+  test("does not re-read on its own while nothing is held back") {
+    for
+      inner      <- InMemoryStore.make[TestEvent]
+      store      <- ScriptedStore.make(inner, heldBack = false)
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      _          <- seed(inner, (Set(entityTag("a")), TestEvent.Created("a")))
+      counts     <- ParallelProjector(store, checkpoint, heldBackRecheck = 20.millis)
+                  .run(trackingProjection(handled, states))
+                  .compile
+                  .drain
+                  .background
+                  .use { _ =>
+                    for
+                      _      <- waitUntil(handled.get.map(_.nonEmpty))
+                      _      <- IO.sleep(100.millis) // let the notification from seeding settle
+                      before <- store.reads.get.map(_.size)
+                      _      <- IO.sleep(300.millis) // fifteen recheck intervals
+                      after  <- store.reads.get.map(_.size)
+                    yield (before, after)
+                  }
+    yield expect(clue(counts._2) == counts._1)
+  }
+
+  test("UpdateCheckpointIndex resumes from the cursor the store resolves for that position") {
+    for
+      inner      <- InMemoryStore.make[TestEvent]
+      store      <- ScriptedStore.make(inner, heldBack = false, cursorAtGroup = 7L)
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      _          <- seed(
+             inner,
+             (Set(entityTag("a")), TestEvent.Created("a")),
+             (Set(entityTag("b")), TestEvent.Created("b")),
+             (Set(entityTag("c")), TestEvent.Created("c")),
+           )
+      _ <- ParallelProjector(store, checkpoint)
+             .run(trackingProjection(handled, states))
+             .compile
+             .drain
+             .background
+             .use { _ =>
+               waitUntil(handled.get.map(_.size >= 3)) *>
+                 inner.sendNotification(UpdateCheckpointIndex("tracking", 1L)) *>
+                 waitUntil(handled.get.map(_.size >= 5)).timeoutTo(2.seconds, IO.unit)
+             }
+      reads  <- store.reads.get
+      events <- handled.get
+    yield expect.all(
+      clue(reads).contains(ReadCursor(7L, 1L)),
+      // Distinct keys are handled concurrently, so only the set of replayed events is deterministic.
+      clue(events.map(_.payload)).drop(3).toSet == Set(TestEvent.Created("b"), TestEvent.Created("c")),
+      events.size == 5,
+    )
+  }
+
   test("processes all pre-seeded events in order") {
     for
       store      <- InMemoryStore.make[TestEvent]
@@ -242,7 +368,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
              (Set(entityTag("b")), TestEvent.Created("b")),
              (Set(entityTag("c")), TestEvent.Created("c")),
            )
-      _      <- checkpoint.save(ProjectionCheckpointState("tracking", 1L, true, None))
+      _      <- checkpoint.save(ProjectionCheckpointState("tracking", ReadCursor(0L, 1L), true, None))
       _      <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       events <- handled.get
     yield expect.all(
@@ -283,7 +409,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
            )
       _     <- ParallelProjector(store, checkpoint).run(projection).take(1).compile.drain
       saved <- checkpoint.getAll
-    yield expect(saved.get("tracking").map(_.globalPosition) == Some(3L))
+    yield expect(saved.get("tracking").map(_.cursor.globalPosition) == Some(3L))
   }
 
   test("fetches states once per unique key regardless of how many events reference it") {
@@ -543,7 +669,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       persisted.contains("a"),                                               // state for pos 1 saved
       !persisted.contains("b"),                                              // state for pos 2 not saved (failed)
       !persisted.contains("c"),                                              // pos 3 never processed
-      saved.get("tracking").map(_.globalPosition) == Some(1L),               // checkpoint at pos 1
+      saved.get("tracking").map(_.cursor.globalPosition) == Some(1L),        // checkpoint at pos 1
       saved.get("tracking").exists(!_.running),                              // projector is paused
       saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")), // error recorded
     )
@@ -568,7 +694,7 @@ object ParallelProjectorSuite extends SimpleIOSuite:
       (persisted, saved) = result
     yield expect.all(
       persisted.isEmpty,
-      saved.get("tracking").map(_.globalPosition) == Some(-1L),
+      saved.get("tracking").map(_.cursor.globalPosition) == Some(-1L),
       saved.get("tracking").exists(!_.running), // projector is paused
       saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")),
     )

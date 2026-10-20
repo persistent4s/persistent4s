@@ -34,7 +34,7 @@ import persistent4s.*
 import skunk.*
 import skunk.circe.codec.all.jsonb
 import skunk.codec.all.*
-import skunk.data.{Arr, Identifier}
+import skunk.data.{Arr, Identifier, TransactionAccessMode, TransactionIsolationLevel}
 import skunk.implicits.*
 
 /** A pending event's storage form: the schema the codec owns plus its payload parsed as JSON. */
@@ -57,6 +57,8 @@ final private case class EncodedStorageRow(
   *   - is_external: BOOLEAN NOT NULL
   *   - headers: JSONB NOT NULL
   *   - recorded_at: TIMESTAMPTZ NOT NULL
+  *   - commit_group: BIGINT NOT NULL (id of the writing transaction; drives projection delivery order, see
+  *     [[readForProjection]])
   *
   * [[readFrom]] streams events lazily using a PostgreSQL server-side cursor (fetching 256 rows per round-trip), so it
   * is safe to use on stores with millions of events without loading them all into memory. A read-only transaction is
@@ -212,22 +214,58 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
                   _.stream(fromPosition *: eventTypesList *: tagsList *: max *: EmptyTuple, FetchSize),
                 )
 
-        rowStream.evalMap {
-          case (seqNum, eventId, eventType, eventVersion, tags, payload, isExternal, headers, recordedAt) =>
-            val eventTypeName = EventTypeName.fromString(eventType)
-            parsePayload(seqNum, eventTypeName, eventVersion, payload).map { event =>
-              EventEnvelope(
-                EventMetadata(
-                  globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName,
-                  isExternal = isExternal, timestamp = recordedAt.toInstant, headers = headers,
-                  eventVersion = eventVersion,
-                ),
-                event,
-              )
-            }
-        }
+        rowStream.evalMap(toEnvelope)
       }
     }
+
+  /** Delivers events in (commit_group, sequence_number) order, and only from commit groups below the snapshot's xmin:
+    * every transaction with an id below xmin has committed or rolled back, so no row can ever appear behind the
+    * returned cursor. Both statements share one REPEATABLE READ snapshot, so `heldBack` describes exactly the rows the
+    * read had to leave out.
+    */
+  override def readForProjection(
+    after: ReadCursor,
+    eventFilter: EventFilter,
+    maxEvents: Int,
+  ): F[ProjectionRead[A]] =
+    val read = projectionReadFragment(
+      after,
+      eventFilter.eventTypes.toList.map(_.value),
+      eventFilter.tags.toList.map(_.value),
+      maxEvents,
+    )
+    pool.use { session =>
+      session.transaction(TransactionIsolationLevel.RepeatableRead, TransactionAccessMode.ReadOnly).use { _ =>
+        for
+          rows     <- session.execute(read.fragment.query(eventDecoder))(read.argument)
+          heldBack <- session.unique(heldBackQuery)
+          events   <- rows.traverse(toEnvelope)
+        yield ProjectionRead(events, heldBack)
+      }
+    }
+
+  override def cursorAt(globalPosition: Long): F[ReadCursor] =
+    if globalPosition <= 0L then Async[F].pure(ReadCursor.Start)
+    else
+      pool.use(_.option(cursorAtQuery)(globalPosition)).map {
+        case Some(commitGroup *: position *: EmptyTuple) => ReadCursor(commitGroup, position)
+        case None                                        => ReadCursor.Start
+      }
+
+  private def toEnvelope(row: EventRow): F[EventEnvelope[A]] =
+    row match
+      case (seqNum, eventId, eventType, eventVersion, tags, payload, isExternal, headers, recordedAt, commitGroup) =>
+        val eventTypeName = EventTypeName.fromString(eventType)
+        parsePayload(seqNum, eventTypeName, eventVersion, payload).map { event =>
+          EventEnvelope(
+            EventMetadata(
+              globalPosition = seqNum, id = eventId, tags = tags, eventType = eventTypeName, isExternal = isExternal,
+              timestamp = recordedAt.toInstant, headers = headers, eventVersion = eventVersion,
+              commitGroup = commitGroup,
+            ),
+            event,
+          )
+        }
 
   /** Returns a stream of notifications for new events appended to the store. Notifications are sent via PostgreSQL's
     * NOTIFY/LISTEN mechanism. Each notification payload is decoded into a EventStoreNotification.
@@ -313,8 +351,8 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
              }
       idToRow <- chunked(rows, paramsPerRow = 7)
                    .flatTraverse(chunk => session.execute(insertEventsQuery(chunk.size))(chunk))
-                   .map(_.map { case id *: seq *: recordedAt *: inserted *: EmptyTuple =>
-                     id -> (seq, recordedAt, inserted)
+                   .map(_.map { case id *: seq *: recordedAt *: inserted *: commitGroup *: EmptyTuple =>
+                     id -> (seq, recordedAt, inserted, commitGroup)
                    }.toMap)
       tagPairs = uniqueByEventId.flatMap { case (id, pending, _) =>
                    pending.tags.toList.map(tag => tag.value *: idToRow(id)._1 *: EmptyTuple)
@@ -330,12 +368,12 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
              },
            )
     yield resolved.map { case (id, pending, enc) =>
-      val (sequenceNumber, recordedAt, _) = idToRow(id)
+      val (sequenceNumber, recordedAt, _, commitGroup) = idToRow(id)
       EventEnvelope(
         EventMetadata(
           globalPosition = sequenceNumber, id = id, tags = pending.tags, eventType = enc.eventType,
           isExternal = pending.isExternal, timestamp = recordedAt.toInstant, headers = pending.headers,
-          eventVersion = enc.version,
+          eventVersion = enc.version, commitGroup = commitGroup,
         ),
         pending.payload,
       )
@@ -448,7 +486,7 @@ object PostgresEventStore:
   }(headers => Json.obj(headers.view.mapValues(Json.fromString).toSeq*))
 
   private[postgres] val eventDecoder: Decoder[EventRow] =
-    int8 *: uuid *: text *: int4 *: tagsCodec *: jsonb *: bool *: headersCodec *: timestamptz
+    int8 *: uuid *: text *: int4 *: tagsCodec *: jsonb *: bool *: headersCodec *: timestamptz *: int8
 
   private val acquireTagLocksQuery: Query[Arr[String], String] =
     sql"""
@@ -465,15 +503,15 @@ object PostgresEventStore:
     n: Int,
   ): Query[
     List[UUID *: String *: Int *: Json *: Json *: Boolean *: Json *: EmptyTuple],
-    UUID *: Long *: OffsetDateTime *: Boolean *: EmptyTuple,
+    UUID *: Long *: OffsetDateTime *: Boolean *: Long *: EmptyTuple,
   ] =
     val rows = (uuid *: text *: int4 *: jsonb *: jsonb *: bool *: jsonb).values.list(n)
     sql"""
       INSERT INTO events (event_id, event_type, event_version, tags, payload, is_external, headers)
       VALUES $rows
       ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
-      RETURNING event_id, sequence_number, recorded_at, (xmax = 0) AS inserted
-    """.query(uuid *: int8 *: timestamptz *: bool)
+      RETURNING event_id, sequence_number, recorded_at, (xmax = 0) AS inserted, commit_group
+    """.query(uuid *: int8 *: timestamptz *: bool *: int8)
 
   private def insertEventTagsCommand(
     n: Int,
@@ -526,11 +564,62 @@ object PostgresEventStore:
   // Widened so PostgresOutbox can reuse the same row shape and decoder for its join against `events`; keeping one
   // definition is what stops the two SELECT column lists from drifting apart.
   private[postgres] type EventRow =
-    Long *: UUID *: String *: Int *: Set[Tag] *: Json *: Boolean *: Map[String, String] *: OffsetDateTime *: EmptyTuple
+    Long *: UUID *: String *: Int *: Set[Tag] *: Json *: Boolean *: Map[String, String] *: OffsetDateTime *: Long *:
+      EmptyTuple
+
+  // A scalar subquery so the horizon is computed once per statement, not once per row.
+  private val horizon: Fragment[Void] =
+    sql"(SELECT pg_snapshot_xmin(pg_current_snapshot())::text::bigint)"
+
+  private def projectionReadFragment(
+    after: ReadCursor,
+    eventTypes: List[String],
+    tags: List[String],
+    maxEvents: Int,
+  ): AppliedFragment =
+    val base =
+      sql"""
+        SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+               e.headers, e.recorded_at, e.commit_group
+        FROM events e
+        WHERE e.commit_group < $horizon
+          AND (e.commit_group, e.sequence_number) > ($int8, $int8)
+      """.apply(after.commitGroup *: after.globalPosition *: EmptyTuple)
+    val byEventType =
+      if eventTypes.isEmpty then AppliedFragment.empty
+      else sql"AND e.event_type = ANY(ARRAY[${text.list(eventTypes.size)}])".apply(eventTypes)
+    val byTag =
+      if tags.isEmpty then AppliedFragment.empty
+      else sql"""
+          AND EXISTS (
+            SELECT 1
+            FROM event_tags et
+            WHERE et.sequence_number = e.sequence_number
+              AND et.tag = ANY(ARRAY[${text.list(tags.size)}])
+          )
+        """.apply(tags)
+    val page = sql"ORDER BY e.commit_group, e.sequence_number LIMIT $int4".apply(maxEvents)
+    base |+| byEventType |+| byTag |+| page
+
+  /** Visible rows at or past the horizon are exactly those a projection read leaves out to wait for an earlier write. */
+  private val heldBackQuery: Query[Void, Boolean] =
+    sql"""
+      SELECT EXISTS (SELECT 1 FROM events WHERE commit_group >= $horizon)
+    """.query(bool)
+
+  private val cursorAtQuery: Query[Long, Long *: Long *: EmptyTuple] =
+    sql"""
+      SELECT commit_group, sequence_number
+      FROM events
+      WHERE sequence_number <= $int8
+      ORDER BY sequence_number DESC
+      LIMIT 1
+    """.query(int8 *: int8)
 
   private val readAllQuery: Query[Long, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at
+      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
+             commit_group
       FROM events
       WHERE sequence_number > $int8
       ORDER BY sequence_number ASC
@@ -538,7 +627,8 @@ object PostgresEventStore:
 
   private val readAllLimitedQuery: Query[Long *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at
+      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
+             commit_group
       FROM events
       WHERE sequence_number > $int8
       ORDER BY sequence_number ASC
@@ -549,7 +639,8 @@ object PostgresEventStore:
     numEventTypes: Int,
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at
+      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
+             commit_group
       FROM events
       WHERE sequence_number > $int8
         AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -560,7 +651,8 @@ object PostgresEventStore:
     numEventTypes: Int,
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
-      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at
+      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
+             commit_group
       FROM events
       WHERE sequence_number > $int8 
         AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -573,7 +665,7 @@ object PostgresEventStore:
   ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
     sql"""
       SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
-             e.headers, e.recorded_at
+             e.headers, e.recorded_at, e.commit_group
       FROM events e
       WHERE e.sequence_number > $int8
         AND EXISTS (
@@ -590,7 +682,7 @@ object PostgresEventStore:
   ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
       SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
-             e.headers, e.recorded_at
+             e.headers, e.recorded_at, e.commit_group
       FROM events e
       WHERE e.sequence_number > $int8
         AND EXISTS (
@@ -609,7 +701,7 @@ object PostgresEventStore:
   ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
     sql"""
       SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
-             e.headers, e.recorded_at
+             e.headers, e.recorded_at, e.commit_group
       FROM events e
       WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
@@ -628,7 +720,7 @@ object PostgresEventStore:
   ): Query[Long *: List[String] *: List[String] *: Int *: EmptyTuple, EventRow] =
     sql"""
       SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
-             e.headers, e.recorded_at
+             e.headers, e.recorded_at, e.commit_group
       FROM events e
       WHERE e.sequence_number > $int8
         AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])

@@ -112,6 +112,12 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       readFrom(0L, eventFilter, None).compile.toList
         .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): F[ProjectionRead[A]] =
+      ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+    def cursorAt(globalPosition: Long): F[ReadCursor] =
+      Async[F].pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
+
     override def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -222,6 +228,12 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       def currentRevision(eventFilter: EventFilter): IO[Long] =
         readFrom(0L, eventFilter, None).compile.toList
           .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
+      def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[A]] =
+        ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+      def cursorAt(globalPosition: Long): IO[ReadCursor] =
+        IO.pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
 
       def readFrom(
         fromPosition: Long,

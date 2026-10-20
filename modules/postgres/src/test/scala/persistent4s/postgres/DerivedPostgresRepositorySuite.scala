@@ -21,6 +21,7 @@ import java.util.UUID
 import cats.effect.{IO, Resource}
 import cats.syntax.all.*
 
+import persistent4s.ReadCursor
 import persistent4s.{ProjectionCheckpointConflict, ProjectionCheckpointState, ProjectionCommit}
 
 import org.testcontainers.containers.PostgreSQLContainer
@@ -452,15 +453,15 @@ object DerivedPostgresRepositorySuite extends IOSuite:
     val name = s"derived-${UUID.randomUUID()}"
     val initial = ScalarState(id, "committed", Some("initial"), 1, active = true)
     val rolledBack = initial.copy(displayName = "must-not-persist", revision = 2)
-    val committed = ProjectionCheckpointState(name, 7L, running = true, None)
-    val staleNext = committed.copy(globalPosition = 8L)
+    val committed = ProjectionCheckpointState(name, ReadCursor(0L, 7L), running = true, None)
+    val staleNext = committed.copy(cursor = ReadCursor(0L, 8L))
 
     for
-      _          <- resources.scalar.persistAtomically(ProjectionCommit(Map(id -> initial), Nil, -1L, committed))
+      _          <- resources.scalar.persistAtomically(ProjectionCommit(Map(id -> initial), Nil, ReadCursor.Start, committed))
       state      <- resources.scalar.find(id)
       checkpoint <- resources.checkpoint.load(name)
       stale      <- resources.scalar
-                 .persistAtomically(ProjectionCommit(Map(id -> rolledBack), Nil, 6L, staleNext))
+                 .persistAtomically(ProjectionCommit(Map(id -> rolledBack), Nil, ReadCursor(0L, 6L), staleNext))
                  .attempt
       finalState      <- resources.scalar.find(id)
       finalCheckpoint <- resources.checkpoint.load(name)

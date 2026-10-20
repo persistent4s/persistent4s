@@ -67,6 +67,6 @@ abstract class PostgresAtomicRepository[F[_]: Async, K, S](
     pool.use { session =>
       session.transaction.use { _ =>
         table.write(session, commit.upserts, commit.deletes) *>
-          PostgresProjectionCheckpoint.compareAndSet(session, commit.expectedPosition, commit.checkpoint)
+          PostgresProjectionCheckpoint.compareAndSet(session, commit.expected, commit.checkpoint)
       }
     }

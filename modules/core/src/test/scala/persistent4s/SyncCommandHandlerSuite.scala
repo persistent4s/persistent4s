@@ -97,6 +97,12 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
       readFrom(0L, eventFilter, None).compile.toList
         .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[TestEvent]] =
+      ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+    def cursorAt(globalPosition: Long): IO[ReadCursor] =
+      IO.pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -154,6 +160,12 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
     def currentRevision(eventFilter: EventFilter): IO[Long] =
       readFrom(0L, eventFilter, None).compile.toList
         .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
+
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[TestEvent]] =
+      ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+    def cursorAt(globalPosition: Long): IO[ReadCursor] =
+      IO.pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
 
     def readFrom(
       fromPosition: Long,

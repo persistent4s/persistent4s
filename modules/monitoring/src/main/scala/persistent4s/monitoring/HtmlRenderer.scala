@@ -28,7 +28,7 @@ object HtmlRenderer:
       val errorJson = s.error.fold("null")(e => s"\"${escapeJson(e)}\"")
       s"""{"name":"${escapeJson(
           s.projectionName,
-        )}","position":${s.globalPosition},"running":${s.running},"error":$errorJson}"""
+        )}","position":${s.cursor.globalPosition},"commitGroup":${s.cursor.commitGroup},"running":${s.running},"error":$errorJson}"""
     }
     s"[${items.mkString(",")}]"
 
@@ -124,7 +124,7 @@ object HtmlRenderer:
     val id = s.projectionName.replaceAll("[^a-zA-Z0-9]", "-")
     s"""<tr>
        |        <td>${escape(s.projectionName)}</td>
-       |        <td id="pos-$id">${s.globalPosition}</td>
+       |        <td id="pos-$id">${s.cursor.globalPosition}</td>
        |        <td id="status-$id" class="$statusClass">$statusText</td>
        |        <td id="error-$id">$errorCell</td>
        |        <td>
@@ -135,7 +135,7 @@ object HtmlRenderer:
        |            <button type="submit">Resume</button>
        |          </form>
        |          <form method="post" action="/checkpoints/$enc/index" style="display:inline">
-       |            <input type="number" name="index" value="${s.globalPosition}" style="width:6rem">
+       |            <input type="number" name="index" value="${s.cursor.globalPosition}" style="width:6rem">
        |            <button type="submit">Set index</button>
        |          </form>
        |        </td>

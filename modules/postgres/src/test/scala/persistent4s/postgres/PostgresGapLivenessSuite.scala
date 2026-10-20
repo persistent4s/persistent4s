@@ -100,6 +100,7 @@ object PostgresGapLivenessSuite extends IOSuite:
   final case class Ledger(account: String, entry: String) extends LivenessEvent derives Encoder.AsObject, Decoder
 
   object Ledger:
+
     given EventSchema[Ledger] = EventSchema[Ledger]("liveness.ledger").scopedBy(AccountScope)(_.account)
 
   private val AccountScope = Scope[String]("liveness.account")
@@ -198,7 +199,6 @@ object PostgresGapLivenessSuite extends IOSuite:
     yield handled
 
   ProjectorKinds.foreach { kind =>
-
     test(s"$kind reaches a matching event that sits behind more than one pass of non-matching events") { components =>
       for
         _       <- truncate(components.sessions)
@@ -231,20 +231,26 @@ object PostgresGapLivenessSuite extends IOSuite:
 
   /** Accepts a withdrawal only once the account history contains a "funded" entry. */
   private object Withdrawals extends CommandHandler[Withdraw, List[String], LivenessEvent]:
+
     def tags(command: Withdraw): Set[Tag] = Set(AccountScope(command.account).toTag)
+
     def initial: List[String] = Nil
+
     def evolve(command: Withdraw, state: List[String], event: LivenessEvent): List[String] =
       event match
         case Ledger(_, entry) => state :+ entry
         case _                => state
+
     def validate(state: List[String], command: Withdraw): Either[Throwable, Unit] =
       Either.cond(state.contains("funded"), (), NotFunded)
+
     def decide(state: List[String], command: Withdraw): List[(Set[Tag], LivenessEvent)] =
       List(tags(command) -> Ledger(command.account, "withdrawn"))
 
   /** The same rules as [[Withdrawals]], declared through the scope-based handler DSL. */
   private object EventSourcedWithdrawals
       extends EventSourcedCommandHandler[Withdraw, List[String], LivenessEvent, NotFunded.type]:
+
     protected val behavior = handler(List.empty[String]):
       scope(AccountScope)(_.account)
       on[Ledger].evolve((state, event) => state :+ event.entry)
@@ -255,7 +261,9 @@ object PostgresGapLivenessSuite extends IOSuite:
   private val WithdrawalSnapshot = SnapshotId("liveness-withdrawals")
 
   private given SnapshotCodec[List[String]] with
+
     def encode(state: List[String]): String = state.asJson.noSpaces
+
     def decode(payload: String): Either[Throwable, List[String]] = parseJson(payload).flatMap(_.as[List[String]])
 
   /** [[EventSourcedWithdrawals]] with a snapshot cached after every replayed event, keyed by account so a test can
@@ -263,6 +271,7 @@ object PostgresGapLivenessSuite extends IOSuite:
     */
   private object SnapshottedWithdrawals
       extends EventSourcedCommandHandler[Withdraw, List[String], LivenessEvent, NotFunded.type]:
+
     protected val behavior = handler(List.empty[String]):
       scope(AccountScope)(_.account)
       on[Ledger].evolve((state, event) => state :+ event.entry)
@@ -297,7 +306,6 @@ object PostgresGapLivenessSuite extends IOSuite:
     )
 
   CommandRunners.foreach { (label, withdraw) =>
-
     test(s"$label can still write to an aggregate whose latest event follows a long stretch of other events") {
       components =>
         val account = UUID.randomUUID().toString

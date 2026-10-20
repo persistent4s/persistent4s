@@ -37,6 +37,8 @@ import java.util.UUID
   *   arbitrary author-supplied key-value metadata
   * @param eventVersion
   *   the persisted schema version of the event payload
+  * @param commitGroup
+  *   the delivery group of the write that stored the event; 0 for stores without commit groups (see [[ReadCursor]])
   */
 final case class EventMetadata(
   globalPosition: Long,
@@ -47,4 +49,8 @@ final case class EventMetadata(
   timestamp: Instant,
   headers: Map[String, String],
   eventVersion: Int = 1,
-)
+  commitGroup: Long = 0L,
+):
+
+  /** Where this event sits in projection delivery order. */
+  def cursor: ReadCursor = ReadCursor(commitGroup, globalPosition)

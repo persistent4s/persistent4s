@@ -41,19 +41,26 @@ import java.util.UUID
   * many events.
   *
   * On handler failure mid-batch, the successfully computed states up to the failing event are persisted and the
-  * checkpoint is advanced to the last fully processed position before the error is re-raised. The stream then
-  * terminates; the caller is responsible for restarting it (e.g. via `Stream.retry` or a supervisor).
+  * checkpoint is advanced to the last fully processed event before the error is re-raised. The stream then terminates;
+  * the caller is responsible for restarting it (e.g. via `Stream.retry` or a supervisor).
   *
   * New events are detected via [[EventNotification]]. Notifications are coalesced: if multiple events arrive while a
   * batch is being processed, only one additional pass is triggered rather than one per notification.
   *
+  * Events are read with [[EventStore.readForProjection]], so a write that commits late is never skipped. While the
+  * store reports events held back behind such a write, the projector re-reads every `heldBackRecheck` on its own: when
+  * that write rolls back, no notification announces it.
+  *
   * @param eventStore
   *   the event store to read from, which must also implement [[EventNotification]]
   * @param checkpoint
-  *   durable storage for the last processed position per projection
+  *   durable storage for the last processed event per projection
   * @param batchSize
   *   maximum number of events processed in a single batch (default: 100). A larger value reduces checkpoint overhead
   *   but increases memory usage and the reprocessing window after a failure.
+  * @param heldBackRecheck
+  *   how often to re-read while the store holds events back behind a write that has not resolved yet (default: 500
+  *   milliseconds)
   */
 final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
@@ -61,6 +68,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
   batchSize: Int = 100,
   maxBatchPerPass: Int = 10,
   publishTimeout: FiniteDuration = 1.second,
+  heldBackRecheck: FiniteDuration = 500.millis,
 ) extends Projector[F, A]:
 
   final private case class Work(
@@ -77,7 +85,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
   final private case class BatchProgress[K, S](
     stateCache: Map[K, Option[S]],
     dirtyKeys: Set[K],
-    lastProcessedPosition: Option[Long],
+    lastProcessed: Option[ReadCursor],
     processedEvents: List[EventEnvelope[A]] = Nil,
   )
 
@@ -102,11 +110,11 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
           for {
             current <- projectionState.get
             next     = current.copy(
-                     globalPosition = progress.lastProcessedPosition.getOrElse(current.globalPosition),
+                     cursor = progress.lastProcessed.getOrElse(current.cursor),
                      running = if (error.isEmpty) current.running else false,
                      error = error.map(e => formatError(e)),
                    )
-            atomicCommit = projection.persistStatesAtomically(statesToPersist, current.globalPosition, next)
+            atomicCommit = projection.persistStatesAtomically(statesToPersist, current.cursor, next)
             _           <- atomicCommit.getOrElse(projection.persistStates(statesToPersist) *> checkpoint.save(next))
             _           <- projectionState.set(next)
             _           <- publishResults(progress)
@@ -138,7 +146,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
               progress.copy(
                 stateCache = stateCacheN,
                 dirtyKeys = progress.dirtyKeys ++ eventKeys,
-                lastProcessedPosition = Some(event.metadata.globalPosition),
+                lastProcessed = Some(event.metadata.cursor),
                 processedEvents = progress.processedEvents :+ event,
               )
             }
@@ -156,7 +164,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
                 progress0 = BatchProgress[K, S](
                               stateCache = initialStates,
                               dirtyKeys = Set.empty,
-                              lastProcessedPosition = None,
+                              lastProcessed = None,
                             )
 
                 finalProgress <-
@@ -191,21 +199,18 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
               )
           }
 
-        def processEvents(projectionState: Ref[F, ProjectionCheckpointState]): F[Int] =
+        def processEvents(projectionState: Ref[F, ProjectionCheckpointState]): F[ProjectionRead[A]] =
           val passLimit = batchSize * maxBatchPerPass
 
           for {
-            state  <- projectionState.get
-            events <- eventStore
-                        .readFrom(
-                          state.globalPosition,
-                          EventFilter(projection.filter, Set.empty),
-                          Some(passLimit),
-                        )
-                        .compile
-                        .toList
-            _ <- events.grouped(batchSize).toList.traverse_(batch => processBatch(batch, projectionState))
-          } yield events.size
+            state <- projectionState.get
+            read  <- eventStore.readForProjection(
+                      state.cursor,
+                      EventFilter(projection.filter, Set.empty),
+                      passLimit,
+                    )
+            _ <- read.events.grouped(batchSize).toList.traverse_(batch => processBatch(batch, projectionState))
+          } yield read
 
         def notificationHandler(wakeupState: Ref[F, WakeupState], notification: EventStoreNotification): F[Unit] =
           notification match {
@@ -278,8 +283,14 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
               Logger[F].info(s"Resuming projection ${projection.name}") *>
                 saveState(_.copy(running = true, error = None)) *> markPending(wakeupState)
             case UpdateCheckpointIndex(_, index) =>
-              Logger[F].info(s"Updating checkpoint for projection ${projection.name} to index $index") *>
-                saveState(_.copy(globalPosition = index, error = None)) *> markPending(wakeupState)
+              for {
+                cursor <- eventStore.cursorAt(index)
+                _      <- Logger[F].info(
+                       s"Updating checkpoint for projection ${projection.name} to index $index (resolved to $cursor)",
+                     )
+                _ <- saveState(_.copy(cursor = cursor, error = None))
+                _ <- markPending(wakeupState)
+              } yield ()
             case _ => Applicative[F].unit
           }
 
@@ -299,7 +310,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
             current <- projectionState.get
             _       <-
               Logger[F].error(error)(
-                s"Error processing projection ${projection.name} on index ${current.globalPosition}",
+                s"Error processing projection ${projection.name} at position ${current.cursor.globalPosition}",
               )
             next = current.copy(running = false, error = Some(formatError(error)))
             _   <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
@@ -313,7 +324,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
         ): F[Unit] =
           checkpoint
             .load(projection.name)
-            .map(_.getOrElse(ProjectionCheckpointState(projection.name, -1L, true, None)))
+            .map(_.getOrElse(ProjectionCheckpointState(projection.name, ReadCursor.Start, true, None)))
             .flatMap(projectionState.set) *> markPending(wakeupState)
 
         Stream.eval {
@@ -325,12 +336,15 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
                    case Some(state) if !state.running =>
                      Logger[F].warn(s"Projection ${projection.name} is currently paused without error")
                    case Some(state) =>
-                     Logger[F].info(s"Resuming projection ${projection.name} from position ${state.globalPosition}")
+                     Logger[F].info(
+                       s"Resuming projection ${projection.name} from position ${state.cursor.globalPosition}",
+                     )
                    case None =>
                      Logger[F].info(
                        s"No checkpoint found for projection ${projection.name}, starting from the beginning",
                      )
-            initialState     = maybeState.getOrElse(ProjectionCheckpointState(projection.name, -1L, true, None))
+            initialState =
+              maybeState.getOrElse(ProjectionCheckpointState(projection.name, ReadCursor.Start, true, None))
             projectionState <- Ref.of[F, ProjectionCheckpointState](initialState)
             initialSignal   <- Deferred[F, Unit]
             wakeupState     <- Ref.of[F, WakeupState](
@@ -340,12 +354,20 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
                                signal = initialSignal,
                              ),
                            )
-          } yield (projectionState, wakeupState)
-        }.flatMap { case (projectionState, wakeupState) =>
+            heldBack <- Ref.of[F, Boolean](false)
+          } yield (projectionState, wakeupState, heldBack)
+        }.flatMap { case (projectionState, wakeupState, heldBack) =>
           val notifications =
             eventStore
               .notification(projection.name)
               .evalMap(notification => notificationHandler(wakeupState, notification))
+              .drain
+
+          // A rollback behind held-back events sends no notification, so poll for as long as the store holds any back.
+          val heldBackRechecks =
+            Stream
+              .awakeEvery[F](heldBackRecheck)
+              .evalMap(_ => heldBack.get.flatMap(held => markPending(wakeupState).whenA(held)))
               .drain
 
           val passLimit = batchSize * maxBatchPerPass
@@ -355,14 +377,15 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
               .repeatEval(awaitWork(wakeupState))
               .evalMap { work =>
                 (for {
-                  _         <- work.notif.traverse_(notif => processNotification(notif, projectionState, wakeupState))
-                  state     <- projectionState.get
-                  processed <- if (state.running && work.pendingEvents)
-                                 processEvents(projectionState)
-                               else
-                                 Applicative[F].pure(0)
+                  _     <- work.notif.traverse_(notif => processNotification(notif, projectionState, wakeupState))
+                  state <- projectionState.get
+                  read  <- if (state.running && work.pendingEvents)
+                            processEvents(projectionState).map(Some(_))
+                          else
+                            Applicative[F].pure(None)
+                  _ <- read.traverse_(r => heldBack.set(r.heldBack))
                   _ <-
-                    if processed == passLimit then markPending(wakeupState)
+                    if read.exists(_.events.size == passLimit) then markPending(wakeupState)
                     else Applicative[F].unit
                 } yield ()).handleErrorWith {
                   case _: ProjectionCheckpointConflict => retryAfterConflict(projectionState, wakeupState)
@@ -370,7 +393,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
                 }
               }
 
-          projector.concurrently(notifications)
+          projector.concurrently(notifications).concurrently(heldBackRechecks)
         }
       }
   }

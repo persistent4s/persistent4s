@@ -772,7 +772,7 @@ object SagaRunnerSuite extends IOSuite:
       record <- instanceOf(fixture, "skip")
       state  <- fixture.checkpoint.load(SagaRunner.loopName(TestSaga.name))
       rows   <- outboxRows(fixture)
-    yield expect.all(record.isEmpty, rows.isEmpty, state.exists(_.globalPosition > 0L))
+    yield expect.all(record.isEmpty, rows.isEmpty, state.exists(_.cursor.globalPosition > 0L))
   }
 
   test("events outside the saga's triggers are never offered to it") { fixture =>
@@ -791,7 +791,9 @@ object SagaRunnerSuite extends IOSuite:
       _ <- append(fixture, OrderPlaced("o1"))
       _ <- runTrigger(fixture)
       // Rewind the checkpoint so the same event is offered again, as it would be after a restore or a reset.
-      _    <- fixture.checkpoint.save(ProjectionCheckpointState(SagaRunner.loopName(TestSaga.name), -1L, true, None))
+      _ <- fixture.checkpoint.save(
+             ProjectionCheckpointState(SagaRunner.loopName(TestSaga.name), ReadCursor.Start, true, None),
+           )
       _    <- runTrigger(fixture)
       rows <- outboxRows(fixture)
     yield expect(rows.size == 1)

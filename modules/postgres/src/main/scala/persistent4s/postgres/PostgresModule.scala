@@ -396,12 +396,17 @@ object PostgresModule:
     session.execute(createTableCommand) *>
       session.execute(addEventVersionCommand) *>
       session.execute(addHeadersCommand) *>
+      session.execute(addCommitGroupCommand) *>
+      session.execute(setCommitGroupDefaultCommand) *>
       session.execute(createEventTypeIndexCommand) *>
+      session.execute(createCommitOrderIndexCommand) *>
+      session.execute(createEventTypeCommitOrderIndexCommand) *>
       session.execute(createEventTagsTableCommand) *>
       session.execute(createEventTagsSequenceIndexCommand) *>
       outboxDdl *>
       outboxMessageDdl *>
       session.execute(PostgresProjectionCheckpoint.createTableCommand) *>
+      session.execute(PostgresProjectionCheckpoint.addCommitGroupCommand) *>
       session.execute(PostgresLeaderElection.createTableCommand) *>
       session.execute(PostgresCommandSnapshotStore.createTableCommand) *>
       sagaDdl
@@ -426,6 +431,7 @@ object PostgresModule:
         is_external     BOOLEAN     NOT NULL,
         headers         JSONB       NOT NULL DEFAULT '{}',
         recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        commit_group    BIGINT      NOT NULL DEFAULT (pg_current_xact_id()::text::bigint),
 
         CONSTRAINT unique_event_id UNIQUE (event_id)
       )
@@ -444,6 +450,34 @@ object PostgresModule:
     sql"""
       ALTER TABLE events
       ADD COLUMN IF NOT EXISTS headers JSONB NOT NULL DEFAULT '{}'
+    """.command
+
+  /** An events table created before commit groups existed gains the column with 0 for every existing row, which keeps
+    * those rows in position order ahead of every later write. The default is set separately so it only applies to new
+    * rows: each write is then grouped under the id of the transaction that stored it (see [[persistent4s.ReadCursor]]).
+    */
+  private val addCommitGroupCommand: Command[Void] =
+    sql"""
+      ALTER TABLE events
+      ADD COLUMN IF NOT EXISTS commit_group BIGINT NOT NULL DEFAULT 0
+    """.command
+
+  private val setCommitGroupDefaultCommand: Command[Void] =
+    sql"""
+      ALTER TABLE events
+      ALTER COLUMN commit_group SET DEFAULT (pg_current_xact_id()::text::bigint)
+    """.command
+
+  /** Serves projection reads, which walk the log in (commit_group, sequence_number) order, and the held-back check. */
+  private val createCommitOrderIndexCommand: Command[Void] =
+    sql"""
+      CREATE INDEX IF NOT EXISTS idx_events_commit_order ON events (commit_group, sequence_number)
+    """.command
+
+  /** Serves projection reads filtered by event type, the filter every projection applies. */
+  private val createEventTypeCommitOrderIndexCommand: Command[Void] =
+    sql"""
+      CREATE INDEX IF NOT EXISTS idx_events_event_type_commit_order ON events (event_type, commit_group, sequence_number)
     """.command
 
   private val createEventTagsTableCommand: Command[Void] =
