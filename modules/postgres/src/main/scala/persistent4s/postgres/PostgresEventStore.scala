@@ -267,23 +267,22 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
           )
         }
 
-  /** Returns a stream of notifications for new events appended to the store. Notifications are sent via PostgreSQL's
-    * NOTIFY/LISTEN mechanism. Each notification payload is decoded into a EventStoreNotification.
+  /** Returns a stream of notifications for new events appended to the store. Once LISTEN is registered, an initial
+    * wake-up makes projectors catch up on events committed before registration. Later PostgreSQL notifications are
+    * decoded into an EventStoreNotification.
     */
   override def notification(projectionName: String): Stream[F, EventStoreNotification] =
     Stream.resource(pool).flatMap { session =>
-      session
-        .channel(channelId)
-        .listen(1024)
-        .map { notif =>
+      Stream.resource(session.channel(channelId).listenR(1024)).flatMap { notifications =>
+        Stream.emit(EventStoreNotification.EventsAppended) ++ notifications.map { notif =>
           PostgresNotification.decode(notif.value)
-        }
-        .collect {
+        }.collect {
           case p @ EventStoreNotification.EventsAppended                                               => p
           case p @ EventStoreNotification.PauseProjection(proj) if proj == projectionName              => p
           case p @ EventStoreNotification.ResumeProjection(proj) if proj == projectionName             => p
           case p @ EventStoreNotification.UpdateCheckpointIndex(proj, index) if proj == projectionName => p
         }
+      }
     }
 
   /** Sends a notification to all listeners on the PostgreSQL channel.
