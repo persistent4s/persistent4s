@@ -18,9 +18,12 @@ package persistent4s.postgres
 
 import java.util.UUID
 
-import cats.effect.{IO, Resource}
+import scala.concurrent.duration.*
+
+import cats.effect.{Deferred, IO, Resource}
 import cats.syntax.all.*
 
+import fs2.Stream
 import io.circe.syntax.*
 import io.circe.{Decoder, Encoder}
 
@@ -36,6 +39,7 @@ import persistent4s.EventTypeName
 import persistent4s.Event
 import persistent4s.EventStore
 import persistent4s.PendingEvent
+import persistent4s.{DefaultProjector, EventEnvelope, EventNotification, StatelessProjection}
 
 given Tracer[IO] = Tracer.Implicits.noop
 
@@ -117,6 +121,65 @@ object PostgresEventStoreSuite extends IOSuite:
 
   private def freshId(prefix: String): IO[String] =
     IO(s"$prefix-${UUID.randomUUID().toString}")
+
+  test("the initial notification is emitted only after LISTEN can receive a new commit") { components =>
+    for
+      id            <- freshId("notification-ready")
+      notifications <- components.eventStore
+                         .notification(id)
+                         .zipWithIndex
+                         .evalTap { case (_, index) =>
+                           appendUncheckedOne(components.eventStore, Set(Tag("ready", id)), id).whenA(index == 0L)
+                         }
+                         .map(_._1)
+                         .take(2)
+                         .compile
+                         .toList
+                         .timeout(5.seconds)
+    yield expect(notifications == List.fill(2)(EventStoreNotification.EventsAppended))
+  }
+
+  test("a projection catches an event committed between its initial read and LISTEN registration") { components =>
+    for
+      id          <- freshId("notification-startup")
+      initialRead <- Deferred[IO, Unit]
+      allowListen <- Deferred[IO, Unit]
+      projected   <- Deferred[IO, TestEvent]
+      delayed      = new EventStore[IO, TestEvent] with EventNotification[IO]:
+                  export components.eventStore.{append, appendUnchecked, currentRevision}
+
+                  def readFrom(
+                    after: Long,
+                    filter: EventFilter,
+                    limit: Option[Int] = None,
+                  ): Stream[IO, EventEnvelope[TestEvent]] =
+                    components.eventStore
+                      .readFrom(after, filter, limit)
+                      .onFinalize(initialRead.complete(()).void)
+
+                  def notification(name: String): Stream[IO, EventStoreNotification] =
+                    Stream.eval(allowListen.get) >> components.eventStore.notification(name)
+      projection = new StatelessProjection[IO, TestEvent]:
+                     def name: String = id
+                     def filter: Set[EventTypeName] = Set(EventTypeName.of[TestEvent])
+                     def handle(event: EventEnvelope[TestEvent]): IO[Unit] =
+                       projected.complete(event.payload).void.whenA(event.payload.value == id)
+      found <- DefaultProjector(delayed, components.checkpoint)
+                 .run(projection)
+                 .compile
+                 .drain
+                 .background
+                 .use { _ =>
+                   for
+                     _     <- initialRead.get
+                     _     <- appendUncheckedOne(components.eventStore, Set(Tag("startup", id)), id)
+                     _     <- allowListen.complete(())
+                     event <- projected.get
+                   yield event
+                 }
+                 .timeout(5.seconds)
+    yield expect(found == TestEvent(id))
+  }
 
   test("append stores event with correct payload, tags, and event type") {
     case PostgresModule.Components(store, _, _, _, _, _, _, _, _, _) =>

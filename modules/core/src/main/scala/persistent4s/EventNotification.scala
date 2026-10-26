@@ -20,7 +20,7 @@ import fs2.Stream
 
 enum EventStoreNotification:
 
-  /** Emitted when new events are appended to the store. */
+  /** Signals that new events may be available, including catch-up after subscription. */
   case EventsAppended
 
   /** Emitted when a projection is paused */
@@ -46,7 +46,9 @@ trait EventNotification[F[_]]:
     * Implementations are only required to emit at least one signal per [[EventStore.append]] call, not necessarily one
     * per individual event. Consumers must therefore treat each emission as "there may be new events" and re-read from
     * their last checkpoint, rather than assuming exactly one emission per event. The [[DefaultProjector]] already
-    * handles this correctly by coalescing multiple signals into a single catch-up pass.
+    * handles this correctly by coalescing multiple signals into a single catch-up pass. Implementations may emit a
+    * catch-up signal once subscription is established, so events committed before then are not missed during projector
+    * startup.
     *
     * @return
     *   an infinite stream of wake-up signals
