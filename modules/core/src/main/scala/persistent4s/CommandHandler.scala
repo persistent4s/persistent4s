@@ -69,11 +69,13 @@ trait CommandHandler[C, S, E <: Event]:
   /** Additional metadata to attach to every event produced by this command. Override to add. Defaults to none. */
   def headers(@unused command: C): Map[String, String] = Map.empty
 
-  /** Messages to enqueue in the same transaction that appends this command's events, so an event and the message it
-    * causes become visible together or not at all. Only [[runWithMessages]] consults this; [[run]] ignores it.
+  /** Messages caused by an accepted command, enqueued in the same transaction that appends its events, so an event and
+    * the message it causes become visible together or not at all. Only [[runWithMessages]] consults this; [[run]]
+    * ignores it.
     *
-    * `outcome` is `Left` when [[validate]] rejected the command. A handler answering another service has to be able to
-    * reply precisely when it writes nothing.
+    * Never consulted for a rejected command: a message that announces a change must not leave when the change did not
+    * happen. `events` is empty when the command was accepted but decided that nothing changes, as for a redelivered
+    * request that was already honoured. Answering a rejection is [[SagaCommandHandler]]'s job, through its reply.
     *
     * Returning `Left` aborts everything: no events are appended and no messages are enqueued. It is there because these
     * messages have to be serialized, and a pure function with no error channel could only throw.
@@ -81,8 +83,18 @@ trait CommandHandler[C, S, E <: Event]:
   def messages(
     @unused state: S,
     @unused command: C,
-    @unused outcome: Either[Throwable, List[E]],
+    @unused events: List[E],
   ): Either[Throwable, List[OutgoingMessage]] = Right(Nil)
+
+  /** Everything [[runWithMessages]] enqueues for an outcome: [[messages]] for an acceptance, nothing for a rejection.
+    * [[SagaCommandHandler]] adds its reply, which is the only message a rejection may carry.
+    */
+  private[persistent4s] def outgoing(
+    state: S,
+    command: C,
+    outcome: Either[Throwable, List[E]],
+  ): Either[Throwable, List[OutgoingMessage]] =
+    outcome.fold(_ => Right(Nil), events => messages(state, command, events))
 
   /** Maximum number of retry attempts on optimistic concurrency conflicts. Override to customize. Default is 3. */
   def maxRetries: Int = 3
@@ -104,9 +116,9 @@ trait CommandHandler[C, S, E <: Event]:
 
   /** [[run]] plus [[messages]], appended and enqueued atomically.
     *
-    * A rejection comes back as a `Left` rather than raised, unlike in [[run]]: the rejection may have emitted a message
-    * of its own, and that message is committed, so the caller has to be able to tell "rejected, and answered" from
-    * "failed, redeliver me" without one exception standing for both.
+    * A rejection comes back as a `Left` rather than raised, unlike in [[run]]: a [[SagaCommandHandler]] commits its
+    * answer to a rejection, so the caller has to be able to tell "rejected, and answered" from "failed, redeliver me"
+    * without one exception standing for both.
     *
     * Traced and counted exactly like [[run]]. A partner answering someone else's saga is running the same command
     * against the same store; there is no reason for it to be the one path in the library nobody can see.
@@ -177,9 +189,9 @@ trait CommandHandler[C, S, E <: Event]:
   /** [[attempt]] with the handler's [[messages]] enqueued in the same transaction.
     *
     * Written in the same shape as [[attempt]] rather than sharing a helper with it, because it has to interleave: the
-    * messages are consulted on both the rejected and the accepted path, and on the rejected one they are all that gets
-    * written. Every piece of user code goes through [[suspend]] here too — a handler that throws while deciding what to
-    * answer must fail the command, not the fibre.
+    * outgoing messages are consulted on both the rejected and the accepted path, and on the rejected one a saga's
+    * answer is all that gets written. Every piece of user code goes through [[suspend]] here too — a handler that
+    * throws while deciding what to answer must fail the command, not the fibre.
     */
   private def attemptWithMessages[F[_]: Concurrent](
     command: C,
@@ -196,15 +208,15 @@ trait CommandHandler[C, S, E <: Event]:
       outcome   <- validated match
                    case Left(rejection) =>
                      // No events, so there is no local invariant to protect and `appendWithMessages` skips the
-                     // conflict check — the rejection's message is enqueued on its own.
+                     // conflict check — a saga's answer to the rejection is enqueued on its own.
                      for
-                       outgoing <- suspend(messages(state, command, Left(rejection))).rethrow
-                       _        <- eventStore.appendWithMessages(filter, index, outgoing)
+                       answer <- suspend(outgoing(state, command, Left(rejection))).rethrow
+                       _      <- Concurrent[F].whenA(answer.nonEmpty)(eventStore.appendWithMessages(filter, index, answer))
                      yield Left(rejection)
                    case Right(_) =>
                      for
                        decided      <- suspend(decide(state, command, tags))
-                       outgoing     <- suspend(messages(state, command, Right(decided.map(_._2)))).rethrow
+                       enqueued     <- suspend(outgoing(state, command, Right(decided.map(_._2)))).rethrow
                        eventHeaders <- suspend(headers(command))
                        events       <-
                          suspend(
@@ -213,7 +225,7 @@ trait CommandHandler[C, S, E <: Event]:
                                isExternal = false, id = None, headers = eventHeaders),
                            ),
                          )
-                       appended <- eventStore.appendWithMessages(filter, index, outgoing, events)
+                       appended <- eventStore.appendWithMessages(filter, index, enqueued, events)
                      yield Right(appended)
     yield outcome
 

@@ -362,6 +362,19 @@ object SagaHeaders:
         request.headers.get(IdempotencyKey).map(InReplyTo -> _),
     )
 
+  /** The messages that answer `request` with `pending`: none when there is nothing to answer or nowhere to send it, and
+    * a `Left` when the reply cannot be encoded. Shared by every handler that answers in the transaction that appends
+    * its events.
+    */
+  private[persistent4s] def answer(
+    request: RequestContext,
+    pending: Option[PendingReply],
+  ): Either[Throwable, List[OutgoingMessage]] =
+    pending match
+      case None        => Right(Nil)
+      case Some(reply) =>
+        reply.encoded.map(payload => SagaHeaders.reply(request.message, payload, headers = reply.headers).toList)
+
 /** Deterministic identifiers, so that replaying a trigger event or redelivering a reply produces the same ids and
   * results in a no-op.
   */
