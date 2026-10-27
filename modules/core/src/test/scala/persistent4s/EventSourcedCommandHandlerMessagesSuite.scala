@@ -139,18 +139,15 @@ object EventSourcedCommandHandlerMessagesSuite extends SimpleIOSuite:
         (current ++ written, written)
       }
 
-  private def store(conflicts: Int = 0): IO[MessagingStore] =
+  private def withStore[A](conflicts: Int = 0)(
+    use: MessagingStore => (CommandRuntime[IO, StockEvent], TransactionalMessages[IO, StockEvent]) ?=> IO[A],
+  ): IO[A] =
     (
       Ref.of[IO, Vector[EventEnvelope[StockEvent]]](Vector.empty),
       Ref.of[IO, Vector[OutgoingMessage]](Vector.empty),
       Ref.of[IO, Int](0),
       Ref.of[IO, Int](conflicts),
-    ).mapN(MessagingStore(_, _, _, _))
-
-  private def withStore[A](conflicts: Int = 0)(
-    use: MessagingStore => (CommandRuntime[IO, StockEvent], TransactionalMessages[IO, StockEvent]) ?=> IO[A],
-  ): IO[A] =
-    store(conflicts).flatMap { store =>
+    ).mapN(MessagingStore(_, _, _, _)).flatMap { store =>
       given CommandRuntime[IO, StockEvent] = CommandRuntime.eventStoreOnly(store)
       given TransactionalMessages[IO, StockEvent] = store
       use(store)
