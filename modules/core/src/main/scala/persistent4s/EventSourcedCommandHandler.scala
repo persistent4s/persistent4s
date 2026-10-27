@@ -542,7 +542,65 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   final def run[F[_]: Concurrent](command: C)(using
     runtime: CommandRuntime[F, A],
   ): F[Either[R, List[EventEnvelope[A]]]] =
-    suspend(behavior.selection(command)).flatMap(selection => runWithRetry(command, selection, maxRetries))
+    suspend(behavior.selection(command)).flatMap(selection => runWithRetry(command, selection, maxRetries, None))
+
+  /** [[run]] plus the messages an accepted command causes, appended and enqueued in one transaction, so an event and
+    * the message it causes become visible together or not at all.
+    *
+    * `messages` is consulted only when the command is accepted: a message that announces a change must not leave when
+    * the change did not happen, so a rejection enqueues nothing and comes back as a `Left`, exactly as with [[run]]. It
+    * receives the events about to be appended, which is an empty list when the command decided nothing changes — the
+    * case of a redelivered request that was already honoured. To answer a saga, including when refusing, use
+    * [[runAnswering]].
+    *
+    * Returning `Left` from `messages` aborts everything: no events are appended and no messages are enqueued, and the
+    * error is raised. It is there because messages have to be serialized, and a pure function has no other way to
+    * report that it could not.
+    *
+    * Reads, snapshots and the schema check use `runtime` exactly as [[run]] does; only the append goes through `store`,
+    * because the instrumented store an application usually provides as its runtime cannot enqueue messages.
+    *
+    * @param command
+    *   requested change
+    * @param messages
+    *   the messages to enqueue, from the state the command was decided on and the events it decided
+    * @return
+    *   the rejection, or the appended events
+    */
+  final def runWithMessages[F[_]: Concurrent](command: C)(
+    messages: (S, C, List[A]) => Either[Throwable, List[OutgoingMessage]],
+  )(using
+    runtime: CommandRuntime[F, A],
+    store: TransactionalMessages[F, A],
+  ): F[Either[R, List[EventEnvelope[A]]]] =
+    runEnqueuing(command)((state, command, outcome) =>
+      outcome.fold(_ => Right(Nil), events => messages(state, command, events)),
+    )
+
+  /** Runs a command that arrived as a saga request and answers it in the transaction that appends its events.
+    *
+    * Unlike [[runWithMessages]], `reply` is consulted on a rejection too, and its answer is committed on its own, with
+    * no events: a refusal the asking saga never hears about costs it its whole deadline to discover, and leaves it
+    * unable to tell a refusal from a partner that has died. The reply is addressed from `request`, so the handler never
+    * touches [[SagaHeaders]]. Nothing is sent when `reply` returns `None`, or when the request nominated nowhere to
+    * answer — a command sent by something that is not a saga, which [[SagaParticipant]] has already warned about.
+    *
+    * @param request
+    *   the request being answered, as [[SagaParticipant]] hands it to the route
+    * @param command
+    *   the command decoded from the request
+    * @param reply
+    *   what to answer, from the state the command was decided on and its outcome
+    * @return
+    *   the rejection, already answered, or the appended events
+    */
+  final def runAnswering[F[_]: Concurrent](request: RequestContext, command: C)(
+    reply: (S, C, Either[R, List[A]]) => Option[PendingReply],
+  )(using
+    runtime: CommandRuntime[F, A],
+    store: TransactionalMessages[F, A],
+  ): F[Either[R, List[EventEnvelope[A]]]] =
+    runEnqueuing(command)((state, command, outcome) => SagaHeaders.answer(request, reply(state, command, outcome)))
 
   /** Runs a command and waits for its saved events to reach the configured projection.
     *
@@ -570,14 +628,28 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     eventCount: Long,
   )
 
+  /** Where [[runWithMessages]] and [[runAnswering]] append, and what they enqueue for each outcome. */
+  final private case class Messaging[F[_]](
+    store: TransactionalMessages[F, A],
+    outgoing: (S, C, Either[R, List[A]]) => Either[Throwable, List[OutgoingMessage]],
+  )
+
+  private def runEnqueuing[F[_]: Concurrent](command: C)(
+    outgoing: (S, C, Either[R, List[A]]) => Either[Throwable, List[OutgoingMessage]],
+  )(using runtime: CommandRuntime[F, A], store: TransactionalMessages[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
+    suspend(behavior.selection(command)).flatMap(selection =>
+      runWithRetry(command, selection, maxRetries, Some(Messaging(store, outgoing))),
+    )
+
   private def runWithRetry[F[_]: Concurrent](
     command: C,
     selection: ResolvedCommandSelection,
     retriesLeft: Int,
+    messaging: Option[Messaging[F]],
   )(using runtime: CommandRuntime[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
-    attempt(command, selection).handleErrorWith {
+    attempt(command, selection, messaging).handleErrorWith {
       case RetryableCommandAppendConflict(_) if retriesLeft > 0 =>
-        runWithRetry(command, selection, retriesLeft - 1)
+        runWithRetry(command, selection, retriesLeft - 1, messaging)
       case RetryableCommandAppendConflict(conflict) =>
         Concurrent[F].raiseError(conflict)
       case error => Concurrent[F].raiseError(error)
@@ -586,6 +658,7 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
   private def attempt[F[_]: Concurrent](
     command: C,
     selection: ResolvedCommandSelection,
+    messaging: Option[Messaging[F]],
   )(using runtime: CommandRuntime[F, A]): F[Either[R, List[EventEnvelope[A]]]] =
     val readEventTypes =
       if selection.scopeBased || readAllEventTypes then Set.empty[EventTypeName]
@@ -602,8 +675,19 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
       _          <- saveSnapshotIfDue(command, selection, fingerprint, start.eventCount, state, index, eventCount)
       validation <- suspend(behavior.validate(state, command))
       result     <- validation match
-                  case Left(rejection) => Concurrent[F].pure(Left(rejection))
-                  case Right(_)        =>
+                  case Left(rejection) =>
+                    messaging match
+                      case None            => Concurrent[F].pure(Left(rejection))
+                      case Some(messaging) =>
+                        // Only a saga's answer to the refusal can be here. No events, so there is no local invariant
+                        // to protect: the store enqueues it on its own, without a conflict check.
+                        for
+                          answer <- suspend(messaging.outgoing(state, command, Left(rejection))).rethrow
+                          _      <- Concurrent[F].whenA(answer.nonEmpty)(
+                                 messaging.store.appendWithMessages(filter, index, answer),
+                               )
+                        yield Left(rejection)
+                  case Right(_) =>
                     for
                       decided <- suspend(behavior.decide(state, command, selection))
                       events  <- suspend(
@@ -618,11 +702,16 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
                                       isExternal = false, id = None, headers = Map.empty)
                                   },
                                 )
-                      appended <- runtime.eventStore
-                                    .append(filter, index, events)
-                                    .adaptError { case conflict: IndexConflictException =>
-                                      RetryableCommandAppendConflict(conflict)
-                                    }
+                      append = messaging match
+                                 case None            => runtime.eventStore.append(filter, index, events)
+                                 case Some(messaging) =>
+                                   suspend(messaging.outgoing(state, command, Right(decided.map(_._2)))).rethrow
+                                     .flatMap(outgoing =>
+                                       messaging.store.appendWithMessages(filter, index, outgoing, events),
+                                     )
+                      appended <- append.adaptError { case conflict: IndexConflictException =>
+                                    RetryableCommandAppendConflict(conflict)
+                                  }
                     yield Right(appended)
     yield result
 
