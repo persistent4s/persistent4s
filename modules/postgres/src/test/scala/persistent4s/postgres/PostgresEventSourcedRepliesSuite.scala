@@ -111,7 +111,11 @@ object PostgresEventSourcedRepliesSuite extends IOSuite:
 
   private def messageRows(pool: Resource[IO, Session[IO]]): IO[List[(String, Option[String], String)]] =
     pool
-      .use(_.execute(sql"SELECT topic, message_key, payload FROM message_outbox ORDER BY id".query(text *: text.opt *: text)))
+      .use(
+        _.execute(
+          sql"SELECT topic, message_key, payload FROM message_outbox ORDER BY id".query(text *: text.opt *: text),
+        ),
+      )
       .map(_.map { case topic *: key *: payload *: EmptyTuple => (topic, key, payload) })
 
   private def eventCount(pool: Resource[IO, Session[IO]]): IO[Long] =
@@ -127,23 +131,24 @@ object PostgresEventSourcedRepliesSuite extends IOSuite:
     Instant.EPOCH,
   )
 
-  test("the reply is committed with the events, and a rejection is answered without one") { case Fixture(components, pool) =>
-    given CommandRuntime[IO, Granted] = components.commandRuntime
-    given PostgresEventStore[IO, Granted] = components.transactionalStore
-    val answer = (_: Boolean, _: Grant, outcome: Either[String, List[Granted]]) =>
-      Some(PendingReply(outcome.fold(reason => s"refused: $reason", _ => "granted")))
-    for
-      first  <- GrantHandler.runAnswering[IO](request, Grant("MENU_ACTIVITY_1"))(answer)
-      second <- GrantHandler.runAnswering[IO](request, Grant("MENU_ACTIVITY_1"))(answer)
-      events <- eventCount(pool)
-      rows   <- messageRows(pool)
-    yield expect(first.map(_.map(_.payload)) == Right(List(Granted("MENU_ACTIVITY_1")))) and
-      expect(second == Left("MENU_ACTIVITY_1 is already granted")) and
-      expect(events == 1L) and
-      expect(
-        rows == List(
-          ("activity.replies", Some("instance-1"), "granted"),
-          ("activity.replies", Some("instance-1"), "refused: MENU_ACTIVITY_1 is already granted"),
-        ),
-      )
+  test("the reply is committed with the events, and a rejection is answered without one") {
+    case Fixture(components, pool) =>
+      given CommandRuntime[IO, Granted] = components.commandRuntime
+      given PostgresEventStore[IO, Granted] = components.transactionalStore
+      val answer = (_: Boolean, _: Grant, outcome: Either[String, List[Granted]]) =>
+        Some(PendingReply(outcome.fold(reason => s"refused: $reason", _ => "granted")))
+      for
+        first  <- GrantHandler.runAnswering[IO](request, Grant("MENU_ACTIVITY_1"))(answer)
+        second <- GrantHandler.runAnswering[IO](request, Grant("MENU_ACTIVITY_1"))(answer)
+        events <- eventCount(pool)
+        rows   <- messageRows(pool)
+      yield expect(first.map(_.map(_.payload)) == Right(List(Granted("MENU_ACTIVITY_1")))) and
+        expect(second == Left("MENU_ACTIVITY_1 is already granted")) and
+        expect(events == 1L) and
+        expect(
+          rows == List(
+            ("activity.replies", Some("instance-1"), "granted"),
+            ("activity.replies", Some("instance-1"), "refused: MENU_ACTIVITY_1 is already granted"),
+          ),
+        )
   }

@@ -56,7 +56,9 @@ object EventSourcedCommandHandlerMessagesSuite extends SimpleIOSuite:
         case (reserved, command) if reserved != command.amount && reserved + command.amount > 10 =>
           StockRejection.Exhausted
 
-      emitMany((reserved, command) => if reserved == command.amount then Nil else List(Reserved(command.id, command.amount)))
+      emitMany((reserved, command) =>
+        if reserved == command.amount then Nil else List(Reserved(command.id, command.amount)),
+      )
 
   /** Records what the plain append and the dual-write append receive, and can lose the first dual write to a conflict. */
   final private class MessagingStore(
@@ -91,7 +93,8 @@ object EventSourcedCommandHandlerMessagesSuite extends SimpleIOSuite:
     ): IO[List[EventEnvelope[StockEvent]]] =
       val flattened = pending.toList.flatten
       conflicts.modify(left => (left - 1, left)).flatMap { left =>
-        if flattened.nonEmpty && left > 0 then IO.raiseError(new IndexConflictException(expectedIndex, expectedIndex + 1))
+        if flattened.nonEmpty && left > 0 then
+          IO.raiseError(new IndexConflictException(expectedIndex, expectedIndex + 1))
         else write(flattened) <* messages.update(_ ++ outgoing)
       }
 
@@ -261,7 +264,8 @@ object EventSourcedCommandHandlerMessagesSuite extends SimpleIOSuite:
   test("runAnswering sends nothing for an unaddressed request or when there is nothing to answer") {
     withStore() { store =>
       for
-        first  <- ReserveHandler.runAnswering[IO](request(Map.empty), Reserve("a", 3))((_, _, _) => Some(PendingReply("ok")))
+        first <-
+          ReserveHandler.runAnswering[IO](request(Map.empty), Reserve("a", 3))((_, _, _) => Some(PendingReply("ok")))
         second <- ReserveHandler.runAnswering[IO](request(addressed), Reserve("b", 3))((_, _, _) => None)
         events <- store.history
         sent   <- store.enqueued
