@@ -252,6 +252,7 @@ object PostgresModule:
   /** Wire the raw PostgreSQL store, wrap it with otel4s instrumentation, and expose the shared pool alongside command
     * snapshots so one configuration serves events, snapshots and read models. The raw store is also exposed directly so
     * the dual-write entry points stay reachable, and `SecureRandom` is built here rather than demanded from the caller.
+    * The store and both outboxes share one [[PostgresNotificationHub]], so the module listens with a single session.
     */
   private def components[F[_]: Async: Logger: Tracer: Meter, A <: Event](
     pool: Resource[F, Session[F]],
@@ -262,7 +263,8 @@ object PostgresModule:
   ): Resource[F, Components[F, A]] =
     for
       given SecureRandom[F] <- Resource.eval(SecureRandom.javaSecuritySecureRandom[F])
-      raw                    = PostgresEventStore[F, A](pool, codec, outboxEnabled = enableOutbox)
+      notificationHub       <- PostgresNotificationHub.make[F](pool)
+      raw                    = PostgresEventStore[F, A](pool, codec, notificationHub, outboxEnabled = enableOutbox)
       store                 <- Resource.eval(InstrumentedEventStore.makeWithNotification[F, A](raw))
       checkpoint            <- Resource.eval(
                       InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)),
@@ -272,8 +274,8 @@ object PostgresModule:
       raw,
       checkpoint,
       PostgresCommandSnapshotStore.make[F](pool),
-      if enableOutbox then Some(PostgresOutbox[F, A](pool, codec)) else None,
-      if enableMessageOutbox || enableSaga then Some(PostgresMessageOutbox[F](pool)) else None,
+      if enableOutbox then Some(PostgresOutbox[F, A](pool, codec, notificationHub)) else None,
+      if enableMessageOutbox || enableSaga then Some(PostgresMessageOutbox[F](pool, notificationHub)) else None,
       PostgresLeaderElection.make[F](pool),
       if enableSaga then Some(PostgresSagaRepository[F](pool)) else None,
       pool,

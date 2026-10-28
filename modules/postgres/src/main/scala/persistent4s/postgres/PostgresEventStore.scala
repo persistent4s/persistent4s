@@ -66,18 +66,22 @@ final private case class EncodedStorageRow(
   * the connection back to the pool.
   *
   * Notifications are sent via PostgreSQL NOTIFY/LISTEN mechanism, enabling cross-process and cross-machine event
-  * notifications for horizontal scaling.
+  * notifications for horizontal scaling. They are received through a [[PostgresNotificationHub]], so every projection
+  * of the process shares one listening session.
   *
   * @param pool
   *   a resource for obtaining database sessions
   * @param codec
   *   the event codec for serializing/deserializing events; encoded payload strings must be valid JSON
+  * @param notificationHub
+  *   the shared listener [[notification]] subscribes to; it must listen on `channelId`
   * @param outboxEnabled
   *   when true, every newly-inserted non-external event also enqueues an outbox row in the same transaction
   */
 final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] private (
   pool: Resource[F, Session[F]],
   codec: EventCodec[A],
+  notificationHub: PostgresNotificationHub[F],
   channelId: Identifier,
   outboxEnabled: Boolean,
 ) extends EventStore[F, A]
@@ -267,21 +271,21 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
           )
         }
 
-  /** Returns a stream of notifications for new events appended to the store. Once LISTEN is registered, an initial
-    * wake-up makes projectors catch up on events committed before registration. Later PostgreSQL notifications are
-    * decoded into an EventStoreNotification.
+  /** Returns a stream of notifications for new events appended to the store, received through the shared
+    * [[PostgresNotificationHub]]. Once the subscription is registered, an initial wake-up makes projectors catch up on
+    * events committed before registration. Later PostgreSQL notifications are decoded into an EventStoreNotification,
+    * and each hub catch-up becomes a wake-up.
     */
   override def notification(projectionName: String): Stream[F, EventStoreNotification] =
-    Stream.resource(pool).flatMap { session =>
-      Stream.resource(session.channel(channelId).listenR(1024)).flatMap { notifications =>
-        Stream.emit(EventStoreNotification.EventsAppended) ++ notifications.map { notif =>
-          PostgresNotification.decode(notif.value)
-        }.collect {
-          case p @ EventStoreNotification.EventsAppended                                               => p
-          case p @ EventStoreNotification.PauseProjection(proj) if proj == projectionName              => p
-          case p @ EventStoreNotification.ResumeProjection(proj) if proj == projectionName             => p
-          case p @ EventStoreNotification.UpdateCheckpointIndex(proj, index) if proj == projectionName => p
-        }
+    Stream.resource(notificationHub.listenR(channelId)).flatMap { messages =>
+      Stream.emit(EventStoreNotification.EventsAppended) ++ messages.map {
+        case PostgresNotificationHub.Message.Payload(value) => PostgresNotification.decode(value)
+        case PostgresNotificationHub.Message.CatchUp        => EventStoreNotification.EventsAppended
+      }.collect {
+        case p @ EventStoreNotification.EventsAppended                                               => p
+        case p @ EventStoreNotification.PauseProjection(proj) if proj == projectionName              => p
+        case p @ EventStoreNotification.ResumeProjection(proj) if proj == projectionName             => p
+        case p @ EventStoreNotification.UpdateCheckpointIndex(proj, index) if proj == projectionName => p
       }
     }
 
@@ -459,6 +463,8 @@ object PostgresEventStore:
     *   a resource for obtaining database sessions
     * @param codec
     *   the event codec for serializing/deserializing events
+    * @param notificationHub
+    *   the shared listener projections subscribe to; it must listen on `channelId`
     * @param channelId
     *   the PostgreSQL channel identifier for NOTIFY/LISTEN (default: "persistent4s_events")
     * @return
@@ -467,10 +473,11 @@ object PostgresEventStore:
   def apply[F[_]: Async: Logger: SecureRandom, A <: Event](
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
+    notificationHub: PostgresNotificationHub[F],
     channelId: Identifier = NotificationChannel,
     outboxEnabled: Boolean = false,
   ): PostgresEventStore[F, A] =
-    new PostgresEventStore[F, A](pool, codec, channelId, outboxEnabled)
+    new PostgresEventStore[F, A](pool, codec, notificationHub, channelId, outboxEnabled)
 
   private val tagsCodec: Codec[Set[Tag]] = jsonb.imap { json =>
     json.asArray

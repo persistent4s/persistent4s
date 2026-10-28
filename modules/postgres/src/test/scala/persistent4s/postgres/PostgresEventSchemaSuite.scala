@@ -184,24 +184,26 @@ object PostgresEventSchemaSuite extends IOSuite:
       def decode(eventType: EventTypeName, payload: String): Either[Throwable, VersionedEvent] =
         Left(new UnsupportedOperationException)
 
-    val store = PostgresEventStore[IO, VersionedEvent](resources.sessions, malformedCodec)
+    PostgresNotificationHub.make[IO](resources.sessions).use { hub =>
+      val store = PostgresEventStore[IO, VersionedEvent](resources.sessions, malformedCodec, hub)
 
-    for
-      tag    <- IO(Tag("malformed-json", UUID.randomUUID().toString))
-      result <- store
-                  .appendUnchecked(
-                    List(
-                      PendingEvent(
-                        ValueChanged("invalid"): VersionedEvent,
-                        Set(tag),
-                        EventTypeName.of[ValueChanged],
-                        isExternal = false,
+      for
+        tag    <- IO(Tag("malformed-json", UUID.randomUUID().toString))
+        result <- store
+                    .appendUnchecked(
+                      List(
+                        PendingEvent(
+                          ValueChanged("invalid"): VersionedEvent,
+                          Set(tag),
+                          EventTypeName.of[ValueChanged],
+                          isExternal = false,
+                        ),
                       ),
-                    ),
-                  )
-                  .attempt
-      revision <- store.currentRevision(EventFilter(Set.empty, Set(tag)))
-    yield expect(result.isLeft) and expect(revision == 0L)
+                    )
+                    .attempt
+        revision <- store.currentRevision(EventFilter(Set.empty, Set(tag)))
+      yield expect(result.isLeft) and expect(revision == 0L)
+    }
   }
 
   test("module initialization upgrades a pre-versioning events table in place") { _ =>
