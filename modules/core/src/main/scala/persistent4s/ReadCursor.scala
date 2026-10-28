@@ -35,3 +35,9 @@ object ReadCursor:
 
   /** Before every event. The `-1` position is the "no checkpoint yet" sentinel checkpoint stores rely on. */
   val Start: ReadCursor = ReadCursor(0L, -1L)
+
+  /** Delivery order: by commit group, then by position. An event whose cursor is at or before a view's cursor is
+    * already reflected in that view; one after it is not. Compare with `Ordering[ReadCursor].lt(a, b)`, or `a < b`
+    * after `import scala.math.Ordering.Implicits.infixOrderingOps`.
+    */
+  given Ordering[ReadCursor] = Ordering.by(cursor => (cursor.commitGroup, cursor.globalPosition))

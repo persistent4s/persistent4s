@@ -28,7 +28,7 @@ import fs2.concurrent.Topic
 import org.typelevel.log4cats.Logger
 
 import skunk.Session
-import skunk.data.Identifier
+import skunk.data.{Identifier, Notification}
 
 import persistent4s.Backoff
 
@@ -91,16 +91,25 @@ final class PostgresNotificationHub[F[_]: Async: Logger] private (
   private def listenOnce: F[Unit] =
     pool.use { session =>
       topics.toList.traverse { case (channel, topic) =>
-        session
-          .channel(channel)
-          .listenR(maxQueued)
-          .map(_.evalMap(notification => topic.publish1(Message.Payload(notification.value))))
+        listen(session, channel).map(_.evalMap(notification => topic.publish1(Message.Payload(notification.value))))
       }.use { forwarders =>
         catchUp *>
           Stream.emits(forwarders).parJoinUnbounded.compile.drain *>
           ListenerStopped.raiseError[F, Unit]
       }
     }
+
+  /** `LISTEN` on `channel`, ignoring a failed `UNLISTEN` on release. It only fails once the session is broken, which is
+    * when the listener is already failing with its own error; the runtime would otherwise report it on every
+    * reconnection. Nothing is left registered either way: the pool discards a broken session and runs `UNLISTEN *` when
+    * recycling a healthy one.
+    */
+  private def listen(session: Session[F], channel: Identifier): Resource[F, Stream[F, Notification[String]]] =
+    Resource
+      .make(session.channel(channel).listenR(maxQueued).allocated) { case (_, unlisten) =>
+        unlisten.handleError(_ => ())
+      }
+      .map { case (notifications, _) => notifications }
 
   private def catchUp: F[Unit] =
     topics.values.toList.traverse_(_.publish1(Message.CatchUp))

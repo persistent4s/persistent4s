@@ -16,7 +16,7 @@
 
 package persistent4s.postgres
 
-import cats.MonadThrow
+import cats.{Functor, MonadThrow}
 import cats.effect.*
 import cats.syntax.all.*
 import org.typelevel.log4cats.Logger
@@ -70,6 +70,13 @@ final class PostgresProjectionCheckpoint[F[_]: Async: Logger] private (
     pool.use(_.execute(loadAllQuery))
 
 object PostgresProjectionCheckpoint:
+
+  /** The cursor `projectionName` has reached, read with the caller's session and transaction, or
+    * [[persistent4s.ReadCursor.Start]] before its first checkpoint. Read in the same snapshot as the projection's view
+    * to learn exactly which events that view reflects, as [[PostgresAtomicRepository.readWithCursor]] does.
+    */
+  def cursor[F[_]: Functor](session: Session[F], projectionName: String): F[ReadCursor] =
+    session.option(loadQuery)(projectionName).map(_.fold(ReadCursor.Start)(_.cursor))
 
   private[postgres] def compareAndSet[F[_]: MonadThrow](
     session: Session[F],
