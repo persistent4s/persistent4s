@@ -64,6 +64,11 @@ on first use. If that session fails, the module reconnects with exponential back
 once reconnected, wakes every projection so it re-reads what it may have missed. Nothing is woken while the database is
 unreachable, since a projection whose read fails pauses until it is resumed.
 
+`domain.mapEventStore(f)` wraps a domain's event store, for instance to add headers to every append; its command
+runtime, projection runtimes and `startSync` then use the wrapped store. `module.mapCheckpoint(f)` wraps the
+projection checkpoint store of every domain built from the returned module, for instance to stop the service when a
+projection pauses with an error.
+
 Projection names must be unique across the domains of a module, because checkpoints and leader election leases are
 keyed by name: starting a projection whose name is already running fails with `DuplicateProjectionNames`. Only one
 domain per module may enable the event outbox, since its relay decodes every queued event with that domain's codec.

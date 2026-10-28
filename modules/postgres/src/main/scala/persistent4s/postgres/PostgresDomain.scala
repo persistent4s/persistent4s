@@ -84,6 +84,15 @@ final class PostgresDomain[F[_]: Async: Logger: Tracer: Meter, A <: Event] priva
       exclusive(LeaderElectedProjector(DefaultProjector(eventStore, module.checkpoint), module.leaderElection)),
     )
 
+  /** This domain with `f` applied to its event store, e.g. to add headers to every append. The command runtime, the
+    * projection runtimes and [[startSync]] of the returned domain use the wrapped store; [[transactionalStore]] and
+    * [[outbox]] are unchanged, and projection names stay unique across both domains.
+    */
+  def mapEventStore(
+    f: (EventStore[F, A] & EventNotification[F]) => EventStore[F, A] & EventNotification[F],
+  ): PostgresDomain[F, A] =
+    new PostgresDomain(module, f(eventStore), transactionalStore, outbox, runningProjections)
+
   /** Starts a projection and configures direct `handler.runSync` calls for it.
     *
     * Provide the returned runtime to services with `using`. Commands subscribe before saving and wait for their events
