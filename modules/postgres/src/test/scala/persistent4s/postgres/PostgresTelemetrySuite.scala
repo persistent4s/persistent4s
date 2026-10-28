@@ -46,7 +46,7 @@ object PostgresTelemetrySuite extends IOSuite:
   final case class TestEvent(value: String) extends Event derives Encoder, Decoder
 
   final case class Fixture(
-    postgres: PostgresModule.Components[IO, TestEvent],
+    postgres: PostgresDomain[IO, TestEvent],
     testkit: OtelJavaTestkit[IO],
     tracer: Tracer[IO],
   )
@@ -68,21 +68,22 @@ object PostgresTelemetrySuite extends IOSuite:
         given MeterProvider[IO] = testkit.meterProvider
         given Tracer[IO] = tracer
         given Meter[IO] = meter
-        PostgresModule.makeWithConfig[IO, TestEvent](
-          PostgresConfig(
-            host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
-            password = container.getPassword, database = container.getDatabaseName, maxConnections = 2,
-          ),
-          CirceEventCodec.make[TestEvent](_.asJson, (_, json) => json.as[TestEvent]),
-        )
+        PostgresModule
+          .makeWithConfig[IO](
+            PostgresConfig(
+              host = container.getHost, port = container.getMappedPort(5432), user = container.getUsername,
+              password = container.getPassword, database = container.getDatabaseName, maxConnections = 2,
+            ),
+          )
+          .flatMap(_.domain(CirceEventCodec.make[TestEvent](_.asJson, (_, json) => json.as[TestEvent])))
       }
     yield Fixture(postgres, testkit, tracer)
 
   test("connection maintenance emits database spans without pool or protocol spans") { fixture =>
     for
       before <- fixture.testkit.finishedSpans
-      _      <- fixture.postgres.sessions.use(_ => IO.unit)
-      _      <- fixture.postgres.sessions.use(_ => IO.unit)
+      _      <- fixture.postgres.module.sessions.use(_ => IO.unit)
+      _      <- fixture.postgres.module.sessions.use(_ => IO.unit)
       after  <- fixture.testkit.finishedSpans
     yield expect(after.drop(before.size).forall(_.getKind == SpanKind.CLIENT)) and
       expect(
@@ -97,7 +98,7 @@ object PostgresTelemetrySuite extends IOSuite:
     val privateValue = "private-bound-patient-value"
     for
       values <- fixture.tracer.span("patient.find").surround {
-                  fixture.postgres.sessions.use { session =>
+                  fixture.postgres.module.sessions.use { session =>
                     for
                       _       <- session.execute(sql"CREATE TABLE trace_records (value TEXT NOT NULL)".command)
                       _       <- session.execute(sql"INSERT INTO trace_records (value) VALUES ($text)".command)(privateValue)
@@ -136,7 +137,7 @@ object PostgresTelemetrySuite extends IOSuite:
     val privateValue = "private-error-patient-value"
     for
       result <- fixture.tracer.span("patient.failed-query").surround {
-                  fixture.postgres.sessions.use { session =>
+                  fixture.postgres.module.sessions.use { session =>
                     session.unique(sql"SELECT $text::text, 1 / $int4".query(text *: int4))(
                       privateValue *: 0 *: EmptyTuple,
                     )

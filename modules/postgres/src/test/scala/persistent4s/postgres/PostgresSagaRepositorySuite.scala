@@ -91,7 +91,7 @@ object PostgresSagaRepositorySuite extends IOSuite:
       val config = postgresConfig(container)
       for
         // Built for its DDL: enableSaga creates saga_instances and, because start() enqueues through it, message_outbox.
-        _    <- PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec, enableSaga = true)
+        _    <- PostgresModule.makeWithConfig[IO](config, enableSaga = true).flatMap(_.domain(eventCodec))
         pool <- Session
                   .Builder[IO]
                   .withHost(config.host)

@@ -85,8 +85,9 @@ object PostgresEventSchemaSuite extends IOSuite:
   override def sharedResource: Resource[IO, Res] =
     postgresContainerResource.flatMap { container =>
       PostgresModule
-        .makeWithConfig[IO, VersionedEvent](postgresConfig(container), eventCodec)
-        .map(components => Resources(components.eventStore, components.sessions))
+        .makeWithConfig[IO](postgresConfig(container))
+        .flatMap(_.domain(eventCodec))
+        .map(components => Resources(components.eventStore, components.module.sessions))
     }
 
   private type Container = PostgreSQLContainer[Nothing]
@@ -219,9 +220,9 @@ object PostgresEventSchemaSuite extends IOSuite:
         .use { legacyPool =>
           for
             _      <- legacyPool.use(_.execute(createLegacyEventsTable))
-            result <- PostgresModule.makeWithConfig[IO, VersionedEvent](config, eventCodec).use { components =>
+            result <- PostgresModule.makeWithConfig[IO](config).flatMap(_.domain(eventCodec)).use { components =>
                         for
-                          columnCount <- components.sessions.use(_.unique(eventVersionColumnCount))
+                          columnCount <- components.module.sessions.use(_.unique(eventVersionColumnCount))
                           tag          = Tag("upgraded-schema", UUID.randomUUID().toString)
                           _           <- components.eventStore.appendUnchecked(
                                  List(

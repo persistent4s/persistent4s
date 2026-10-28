@@ -76,16 +76,17 @@ object OrdersModule:
 
   def make: Resource[IO, OrdersModule] =
     for
-      components <- PostgresModule.make[IO, OrderEvent](eventCodec, pgConfigPath, enableSaga = true)
+      database   <- PostgresModule.make[IO](pgConfigPath, enableSaga = true)
+      components <- database.domain(eventCodec)
       store       = components.eventStore
-      checkpoint  = components.checkpoint
+      checkpoint  = database.checkpoint
       sagaRepo   <- Resource.eval(
-                    IO.fromOption(components.sagaRepository)(
+                    IO.fromOption(database.sagaRepository)(
                       new IllegalStateException("Saga repository missing despite enableSaga = true"),
                     ),
                   )
       messageOutbox <- Resource.eval(
-                         IO.fromOption(components.messageOutbox)(
+                         IO.fromOption(database.messageOutbox)(
                            new IllegalStateException("Message outbox missing despite enableSaga = true"),
                          ),
                        )
@@ -123,7 +124,7 @@ object OrdersModule:
       // caller's job — a real service would supervise this; an example settles for making the death loud instead of
       // letting the process go on serving HTTP with a silently dead saga.
       _ <- runner
-             .run(ReserveStockSaga, components.leaderElection)
+             .run(ReserveStockSaga, database.leaderElection)
              .compile
              .drain
              .handleErrorWith(error => Logger[IO].error(error)("saga runner stopped; sagas will no longer advance"))

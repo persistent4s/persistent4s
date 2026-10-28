@@ -50,7 +50,7 @@ object PostgresEventSourcedRepliesSuite extends IOSuite:
 
   override def maxParallelism: Int = 1
 
-  final case class Fixture(components: PostgresModule.Components[IO, Granted], pool: Resource[IO, Session[IO]])
+  final case class Fixture(components: PostgresDomain[IO, Granted], pool: Resource[IO, Session[IO]])
 
   type Res = Fixture
 
@@ -98,8 +98,9 @@ object PostgresEventSourcedRepliesSuite extends IOSuite:
         password = container.getPassword, database = container.getDatabaseName, maxConnections = 16,
       )
       for
-        components <- PostgresModule.makeWithConfig[IO, Granted](config, eventCodec, enableMessageOutbox = true)
-        pool       <- Session
+        components <-
+          PostgresModule.makeWithConfig[IO](config, enableMessageOutbox = true).flatMap(_.domain(eventCodec))
+        pool <- Session
                   .Builder[IO]
                   .withHost(config.host)
                   .withPort(config.port)

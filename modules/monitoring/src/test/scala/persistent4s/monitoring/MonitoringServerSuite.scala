@@ -79,10 +79,10 @@ object MonitoringServerSuite extends IOSuite:
   override def sharedResource: Resource[IO, Client[IO]] =
     for
       container  <- postgresContainerResource
-      components <- PostgresModule.makeWithConfig[IO, TestEvent](postgresConfig(container), eventCodec)
+      components <- PostgresModule.makeWithConfig[IO](postgresConfig(container)).flatMap(_.domain(eventCodec))
       _          <- MonitoringServer.make[IO](
-             components.checkpoint,
-             components.sendNotification,
+             components.module.checkpoint,
+             components.module.sendNotification,
              port"9092",
            )
       client <- EmberClientBuilder.default[IO].build

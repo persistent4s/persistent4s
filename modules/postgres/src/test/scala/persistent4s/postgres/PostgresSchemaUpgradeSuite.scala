@@ -68,7 +68,7 @@ object PostgresSchemaUpgradeSuite extends IOSuite:
 
   private val LegacyCheckpointPosition = 2L
 
-  final case class Upgraded(config: PostgresConfig, components: PostgresModule.Components[IO, UpgradeEvent])
+  final case class Upgraded(config: PostgresConfig, components: PostgresDomain[IO, UpgradeEvent])
 
   type Res = Upgraded
 
@@ -77,7 +77,7 @@ object PostgresSchemaUpgradeSuite extends IOSuite:
       container  <- postgresContainerResource
       config      = postgresConfig(container)
       _          <- Resource.eval(createLegacyDatabase(config))
-      components <- PostgresModule.makeWithConfig[IO, UpgradeEvent](config, eventCodec)
+      components <- PostgresModule.makeWithConfig[IO](config).flatMap(_.domain(eventCodec))
     yield Upgraded(config, components)
 
   sealed trait UpgradeEvent extends Event
@@ -172,7 +172,7 @@ object PostgresSchemaUpgradeSuite extends IOSuite:
 
   // ----- helpers -----
 
-  private def append(components: PostgresModule.Components[IO, UpgradeEvent], value: String) =
+  private def append(components: PostgresDomain[IO, UpgradeEvent], value: String) =
     val event = Recorded(value)
     components.eventStore
       .appendUnchecked(List(PendingEvent(event, Set.empty, eventCodec.eventType(event), true, None, Map.empty)))
@@ -211,10 +211,10 @@ object PostgresSchemaUpgradeSuite extends IOSuite:
           def filter: Set[EventTypeName] = Set(EventTypeName.of[Recorded])
           def handle(event: EventEnvelope[UpgradeEvent]): IO[Unit] = seen.update(_ :+ event.payload)
       for
-        loaded  <- components.checkpoint.load(LegacyProjection)
+        loaded  <- components.module.checkpoint.load(LegacyProjection)
         written <- append(components, "after-upgrade")
         seen    <- Ref.of[IO, List[UpgradeEvent]](Nil)
-        _       <- DefaultProjector(components.eventStore, components.checkpoint)
+        _       <- DefaultProjector(components.eventStore, components.module.checkpoint)
                .run(projection(seen))
                .compile
                .drain
@@ -235,10 +235,10 @@ object PostgresSchemaUpgradeSuite extends IOSuite:
 
   test("starting the module again on an upgraded database changes nothing") { case Upgraded(config, components) =>
     for
-      _       <- PostgresModule.makeWithConfig[IO, UpgradeEvent](config, eventCodec).use_
+      _       <- PostgresModule.makeWithConfig[IO](config).flatMap(_.domain(eventCodec)).use_
       written <- append(components, s"after-restart-${UUID.randomUUID()}")
       legacy  <- components.eventStore.readFrom(0L, EventFilter(), Some(LegacyValues.size)).compile.toList
-      indexes <- components.sessions.use(_.execute(indexNames))
+      indexes <- components.module.sessions.use(_.execute(indexNames))
     yield expect.all(
       clue(written.metadata.commitGroup) > 0L,
       clue(legacy.map(_.metadata.commitGroup)).forall(_ == 0L),

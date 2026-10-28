@@ -35,8 +35,8 @@ import persistent4s.Backoff
 /** Shares one PostgreSQL `LISTEN` session between every notification consumer of the process.
   *
   * A consumer that runs `LISTEN` itself keeps a pooled session for as long as it listens, so a pool smaller than the
-  * number of projections and relays leaves none for their reads. The hub instead keeps a single session listening on
-  * a fixed set of channels and broadcasts each notification to the subscribers of its channel.
+  * number of projections and relays leaves none for their reads. The hub instead keeps a single session listening on a
+  * fixed set of channels and broadcasts each notification to the subscribers of its channel.
   *
   * The session is opened by the first [[listenR]] and kept until the hub is released. If it fails, the hub reconnects
   * with exponential backoff. Notifications sent while no `LISTEN` is registered are lost, so the hub publishes
@@ -89,18 +89,16 @@ final class PostgresNotificationHub[F[_]: Async: Logger] private (
   /** Listen on every channel with one session until it fails; never completes normally. */
   private def listenOnce: F[Unit] =
     pool.use { session =>
-      topics.toList
-        .traverse { case (channel, topic) =>
-          session
-            .channel(channel)
-            .listenR(maxQueued)
-            .map(_.evalMap(notification => topic.publish1(Message.Payload(notification.value))))
-        }
-        .use { forwarders =>
-          catchUp *>
-            Stream.emits(forwarders).parJoinUnbounded.compile.drain *>
-            ListenerStopped.raiseError[F, Unit]
-        }
+      topics.toList.traverse { case (channel, topic) =>
+        session
+          .channel(channel)
+          .listenR(maxQueued)
+          .map(_.evalMap(notification => topic.publish1(Message.Payload(notification.value))))
+      }.use { forwarders =>
+        catchUp *>
+          Stream.emits(forwarders).parJoinUnbounded.compile.drain *>
+          ListenerStopped.raiseError[F, Unit]
+      }
     }
 
   private def catchUp: F[Unit] =
