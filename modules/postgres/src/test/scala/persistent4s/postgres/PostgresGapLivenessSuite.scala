@@ -83,11 +83,11 @@ object PostgresGapLivenessSuite extends IOSuite:
   // Large enough to exceed any bounded scan window a read path might use when the caller sets no limit.
   private val LongHistory: Int = 8192
 
-  type Res = PostgresModule.Components[IO, LivenessEvent]
+  type Res = PostgresDomain[IO, LivenessEvent]
 
   override def sharedResource: Resource[IO, Res] =
     postgresContainerResource.flatMap { container =>
-      PostgresModule.makeWithConfig[IO, LivenessEvent](postgresConfig(container), eventCodec)
+      PostgresModule.makeWithConfig[IO](postgresConfig(container)).flatMap(_.domain(eventCodec))
     }
 
   sealed trait LivenessEvent extends Event
@@ -169,14 +169,14 @@ object PostgresGapLivenessSuite extends IOSuite:
       case "DefaultProjector" =>
         DefaultProjector(
           components.eventStore,
-          components.checkpoint,
+          components.module.checkpoint,
           batchSize = BatchSize,
           maxBatchPerPass = MaxBatchPerPass,
         )
       case _ =>
         ParallelProjector(
           components.eventStore,
-          components.checkpoint,
+          components.module.checkpoint,
           batchSize = BatchSize,
           maxBatchPerPass = MaxBatchPerPass,
         )
@@ -201,7 +201,7 @@ object PostgresGapLivenessSuite extends IOSuite:
   ProjectorKinds.foreach { kind =>
     test(s"$kind reaches a matching event that sits behind more than one pass of non-matching events") { components =>
       for
-        _       <- truncate(components.sessions)
+        _       <- truncate(components.module.sessions)
         _       <- appendNoise(components.eventStore, PassLimit * 3)
         _       <- appendTarget(components.eventStore, "after-noise")
         handled <- project(projector(kind, components), expected = 1, within = 5.seconds)
@@ -213,7 +213,7 @@ object PostgresGapLivenessSuite extends IOSuite:
       // projector starts listening, so no notification will arrive to drive the catch-up.
       val stretches = 4
       for
-        _ <- truncate(components.sessions)
+        _ <- truncate(components.module.sessions)
         _ <- (1 to stretches).toList.traverse_ { stretch =>
                appendNoise(components.eventStore, PassLimit - 1) *>
                  appendTarget(components.eventStore, s"stretch-$stretch")
@@ -310,7 +310,7 @@ object PostgresGapLivenessSuite extends IOSuite:
       components =>
         val account = UUID.randomUUID().toString
         for
-          _      <- truncate(components.sessions)
+          _      <- truncate(components.module.sessions)
           _      <- appendLedger(components.eventStore, account, "opened")
           _      <- appendLedger(components.eventStore, account, "funded")
           _      <- appendNoise(components.eventStore, LongHistory)
@@ -324,7 +324,7 @@ object PostgresGapLivenessSuite extends IOSuite:
       val unrelated = UUID.randomUUID().toString
       val unrelatedId = UUID.randomUUID()
       for
-        _ <- truncate(components.sessions)
+        _ <- truncate(components.module.sessions)
         _ <- appendLedger(components.eventStore, account, "opened")
         _ <- appendLedger(components.eventStore, unrelated, "elsewhere", Some(unrelatedId))
         // Re-appending a stored id burns the sequence_number allocated for the discarded row, leaving a gap.
@@ -347,12 +347,12 @@ object PostgresGapLivenessSuite extends IOSuite:
         .attempt
         .map(_.leftMap(_.toString).flatMap(_.bimap(rejection => s"rejected: $rejection", _.map(_.payload))))
     for
-      _     <- truncate(components.sessions)
+      _     <- truncate(components.module.sessions)
       _     <- appendLedger(components.eventStore, account, "opened")
       _     <- appendLedger(components.eventStore, account, "funded")
       first <- withdraw
       // The first run replayed both entries and cached them, so the next run replays only what follows position 2.
-      snapshot <- components.snapshotStore.load(WithdrawalSnapshot, account, 1)
+      snapshot <- components.module.snapshotStore.load(WithdrawalSnapshot, account, 1)
       _        <- appendNoise(components.eventStore, LongHistory)
       _        <- appendLedger(components.eventStore, account, "deposited")
       second   <- withdraw

@@ -16,16 +16,10 @@
 
 package persistent4s.postgres
 
-import java.util.UUID
-import java.util.concurrent.TimeoutException
-
-import scala.concurrent.duration.FiniteDuration
-
 import cats.effect.*
 import cats.effect.std.{Console, SecureRandom}
 import cats.syntax.all.*
 
-import fs2.concurrent.Topic
 import fs2.io.net.Network
 import io.opentelemetry.instrumentation.api.incubator.semconv.db.{SqlDialect, SqlQueryAnalyzer}
 import org.typelevel.otel4s.metrics.Histogram
@@ -39,20 +33,12 @@ import skunk.implicits.*
 import skunk.telemetry.{QueryAnalyzer, TelemetryConfig}
 
 import persistent4s.{
-  CommandRuntime,
-  DefaultProjector,
   Event,
   EventCodec,
-  EventNotification,
-  EventStore,
   EventStoreNotification,
   InstrumentedEventStore,
   InstrumentedProjectionCheckpoint,
-  LeaderElectedProjector,
-  Projection,
   ProjectionCheckpoint,
-  ProjectionRuntime,
-  SyncCommandRuntime,
 }
 
 sealed trait PostgresModuleError extends Throwable
@@ -93,191 +79,165 @@ object PostgresModuleError:
 
     override def getCause: Throwable = cause
 
-/** A module that provides a fully-initialized PostgresEventStore. It handles:
-  *   - Loading configuration from application.conf
-  *   - Establishing database connections
-  *   - Creating the event store schema if it doesn't exist
-  *   - Providing the PostgresEventStore instance
+  /** Raised by [[PostgresModule.domain]] when another domain of the same module already enabled the event outbox. */
+  case object OutboxAlreadyEnabled extends PostgresModuleError:
+
+    override def getMessage: String =
+      "Another domain of this PostgresModule already enabled the event outbox. Its relay decodes every queued event " +
+        "with that domain's codec, so only one domain per module may enable it."
+
+/** Shared PostgreSQL infrastructure for one service: a connection pool, the schema, projection checkpoints, command
+  * snapshots, leader election, the message outbox, the saga repository and a single notification listener. None of it
+  * depends on an event type, so a service builds one module and then one [[PostgresDomain]] per event type with
+  * [[domain]]; every domain shares this module's pool and listening session.
+  *
+  * `sessions` is exposed for application read model repositories, so event storage, snapshots and atomic projection
+  * commits need no second pool or duplicate configuration.
   *
   * Query spans use sanitized SQL summaries; pool and wire-protocol spans are disabled. Bound parameters are excluded
   * from query attributes. Skunk can still include values in exception details or mixed literal/parameter SQL text, so
   * applications must sanitize those fields before export. Providers must come from the application's telemetry SDK.
+  *
+  * @param sessions
+  *   the shared session pool
+  * @param messageOutbox
+  *   present only when the module was built with `enableMessageOutbox = true` or `enableSaga = true`; otherwise `None`
+  *   and no message outbox table is created
+  * @param sagaRepository
+  *   present only when the module was built with `enableSaga = true`
   */
-object PostgresModule:
+final class PostgresModule[F[_]: Async: Logger: Tracer: Meter: SecureRandom] private (
+  val sessions: Resource[F, Session[F]],
+  val checkpoint: ProjectionCheckpoint[F],
+  val snapshotStore: PostgresCommandSnapshotStore[F],
+  val leaderElection: PostgresLeaderElection[F],
+  val messageOutbox: Option[PostgresMessageOutbox[F]],
+  val sagaRepository: Option[PostgresSagaRepository[F]],
+  notificationHub: PostgresNotificationHub[F],
+  outboxEnabled: Ref[F, Boolean],
+  runningProjections: Ref[F, Set[String]],
+):
 
-  /** Fully initialized PostgreSQL components sharing one connection pool. `sessions` is exposed for application read
-    * model repositories; command snapshots, event storage and atomic projection commits therefore require no second
-    * pool or duplicate configuration.
+  /** Build the store, runtimes and optional event outbox for the events `codec` handles.
     *
-    * @param eventStore
-    *   the instrumented store; use this for ordinary appends and reads
-    * @param transactionalStore
-    *   the same store, untyped-down to its PostgreSQL implementation, for the dual-write entry points
-    *   (`appendWithMessages`/`appendUncheckedWithMessages`) that commit events and outgoing messages in one
-    *   transaction. Appends made through it bypass the otel4s instrumentation on [[eventStore]].
+    * @param codec
+    *   the event codec for serializing/deserializing this domain's events
     * @param outbox
-    *   present only when the module was built with `enableOutbox = true`; otherwise `None` and no outbox table is
-    *   created
-    * @param messageOutbox
-    *   present only when the module was built with `enableMessageOutbox = true`; otherwise `None` and no message outbox
-    *   table is created
+    *   create the event outbox table and enqueue every event appended through this domain into it. Only one domain per
+    *   module may enable it, because its relay decodes every queued event with this domain's codec; a second one fails
+    *   with [[PostgresModuleError.OutboxAlreadyEnabled]] until the first is released.
     */
-  final case class Components[F[_], A <: Event](
-    eventStore: EventStore[F, A] & EventNotification[F],
-    transactionalStore: PostgresEventStore[F, A],
-    checkpoint: ProjectionCheckpoint[F],
-    snapshotStore: PostgresCommandSnapshotStore[F],
-    outbox: Option[PostgresOutbox[F, A]],
-    messageOutbox: Option[PostgresMessageOutbox[F]],
-    leaderElection: PostgresLeaderElection[F],
-    sagaRepository: Option[PostgresSagaRepository[F]],
-    sessions: Resource[F, Session[F]],
-    sendNotification: EventStoreNotification => F[Unit],
-  ):
+  def domain[A <: Event](codec: EventCodec[A], outbox: Boolean = false): Resource[F, PostgresDomain[F, A]] =
+    for
+      _     <- if outbox then enableOutbox else Resource.unit[F]
+      raw    = PostgresEventStore[F, A](sessions, codec, notificationHub, outboxEnabled = outbox)
+      store <- Resource.eval(InstrumentedEventStore.makeWithNotification[F, A](raw))
+    yield PostgresDomain(
+      this,
+      store,
+      raw,
+      Option.when(outbox)(PostgresOutbox[F, A](sessions, codec, notificationHub)),
+      runningProjections,
+    )
 
-    val commandRuntime: CommandRuntime[F, A] =
-      CommandRuntime(eventStore, Some(snapshotStore))
+  /** Send a notification to every projection listening on this database, e.g. to pause or resume one. */
+  def sendNotification(notification: EventStoreNotification): F[Unit] =
+    sessions.use(_.channel(PostgresEventStore.NotificationChannel).notify(PostgresNotification.encode(notification)))
 
-    def projectionRuntime(using Async[F], Logger[F], Tracer[F], Meter[F]): ProjectionRuntime[F, A] =
-      ProjectionRuntime(DefaultProjector(eventStore, checkpoint))
+  /** Build an atomic projection repository from derived PostgreSQL table metadata using this module's shared session
+    * pool.
+    */
+  def repository[K, S <: Product](table: PostgresTable[K, S]): DerivedPostgresRepository[F, K, S] =
+    DerivedPostgresRepository(sessions, table)
 
-    /** Like [[projectionRuntime]], but each projection runs under [[leaderElection]] so that several instances of the
-      * same service pointed at this database never race a projection's shared checkpoint.
-      */
-    def leaderElectedProjectionRuntime(using Async[F], Logger[F], Tracer[F], Meter[F]): ProjectionRuntime[F, A] =
-      ProjectionRuntime(LeaderElectedProjector(DefaultProjector(eventStore, checkpoint), leaderElection))
+  /** Build a derived repository and replace selected generated callbacks while retaining the shared session pool. */
+  def repository[K, S <: Product](
+    table: PostgresTable[K, S],
+    customize: PostgresRepositoryTable[F, K, S] => PostgresRepositoryTable[F, K, S],
+  ): DerivedPostgresRepository[F, K, S] =
+    DerivedPostgresRepository.customized(sessions, table)(customize)
 
-    /** Starts a projection and configures direct `handler.runSync` calls for it.
-      *
-      * Provide the returned runtime to services with `using`. Commands subscribe before saving and wait for their
-      * events to reach this projection. Notifications stay within this process, so use one application instance.
-      * Releasing the resource stops the projection.
-      *
-      * @param projection
-      *   read model that commands wait for
-      * @param timeout
-      *   maximum wait after a command saves its events
-      * @param timeoutError
-      *   error raised when the projection wait expires; command and projection errors remain unchanged
-      * @return
-      *   shared runtime for synchronous commands, with managed projection shutdown
-      */
-    def startSync[K, S](
-      projection: Projection[F, A, K, S],
-      timeout: FiniteDuration,
-      timeoutError: => Throwable = new TimeoutException("Projection did not catch up in time"),
-    )(using Async[F], Logger[F], Tracer[F], Meter[F]): Resource[F, SyncCommandRuntime[F, A]] =
-      for
-        updates <- Resource.eval(Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])])
-        _       <- leaderElectedProjectionRuntime.startAll(_.run(projection, Some(updates)))
-      yield SyncCommandRuntime.fromTopic(commandRuntime, updates, projection.filter, timeout,
-        timeoutError = timeoutError)
+  private def enableOutbox: Resource[F, Unit] =
+    Resource.make(
+      outboxEnabled.getAndSet(true).flatMap { alreadyEnabled =>
+        if alreadyEnabled then PostgresModuleError.OutboxAlreadyEnabled.raiseError[F, Unit]
+        else sessions.use(_.execute(PostgresOutbox.createTableCommand)).void.onError(_ => outboxEnabled.set(false))
+      },
+    )(_ => outboxEnabled.set(false))
 
-    /** Build an atomic projection repository from derived PostgreSQL table metadata using this module's shared session
-      * pool.
-      */
-    def repository[K, S <: Product](table: PostgresTable[K, S])(using Async[F]): DerivedPostgresRepository[F, K, S] =
-      DerivedPostgresRepository(sessions, table)
-
-    /** Build a derived repository and replace selected generated callbacks while retaining the shared session pool. */
-    def repository[K, S <: Product](
-      table: PostgresTable[K, S],
-      customize: PostgresRepositoryTable[F, K, S] => PostgresRepositoryTable[F, K, S],
-    )(using Async[F]): DerivedPostgresRepository[F, K, S] =
-      DerivedPostgresRepository.customized(sessions, table)(customize)
+object PostgresModule:
 
   private val defaultConfigPath = "persistent4s.postgres"
 
-  /** Create a PostgresModule Resource that manages the lifecycle of the database connection and event store.
+  /** Create a PostgresModule Resource that manages the lifecycle of the database connection and schema.
     *
-    * @param codec
-    *   the event codec for serializing/deserializing events
     * @param configPath
     *   the path in application.conf where the PostgresConfig is located (default: "persistent4s.postgres")
-    * @param enableOutbox
-    *   create the event outbox table and enqueue every newly-appended non-external event into it
     * @param enableMessageOutbox
     *   create the outgoing-message outbox table, enabling the dual-write entry points on
-    *   [[Components.transactionalStore]]
+    *   [[PostgresDomain.transactionalStore]]
+    * @param enableSaga
+    *   create the saga table, and the message outbox table sagas send their commands through
     * @return
-    *   initialized event, command-snapshot, checkpoint and shared-session components, or a clear connection/config
-    *   failure
+    *   the initialized module, or a clear connection/config failure
     */
-  def make[F[_]: Async: Network: Logger: Tracer: Meter: TracerProvider: MeterProvider: Console, A <: Event](
-    codec: EventCodec[A],
+  def make[F[_]: Async: Network: Logger: Tracer: Meter: TracerProvider: MeterProvider: Console](
     configPath: String = defaultConfigPath,
-    enableOutbox: Boolean = false,
     enableMessageOutbox: Boolean = false,
     enableSaga: Boolean = false,
-  ): Resource[F, Components[F, A]] =
-    for
-      config <- Resource.eval(loadConfig[F](configPath))
-      _      <- Resource.eval(
-             Logger[F].info(
-               s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
-             ),
-           )
-      pool       <- createSessionPool[F](config)
-      _          <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox, enableSaga))
-      components <- components[F, A](pool, codec, enableOutbox, enableMessageOutbox, enableSaga)
-    yield components
+  ): Resource[F, PostgresModule[F]] =
+    Resource.eval(loadConfig[F](configPath)).flatMap(makeWithConfig[F](_, enableMessageOutbox, enableSaga))
 
   /** Create a PostgresModule Resource using an explicitly provided configuration (bypasses application.conf loading).
     *
     * @param config
     *   the PostgresConfig to use
-    * @param codec
-    *   the event codec for serializing/deserializing events
     * @return
-    *   initialized event, command-snapshot, checkpoint and shared-session components
+    *   the initialized module, or a clear connection failure
     */
-  def makeWithConfig[F[_]: Async: Network: Logger: Tracer: Meter: TracerProvider: MeterProvider: Console, A <: Event](
+  def makeWithConfig[F[_]: Async: Network: Logger: Tracer: Meter: TracerProvider: MeterProvider: Console](
     config: PostgresConfig,
-    codec: EventCodec[A],
-    enableOutbox: Boolean = false,
     enableMessageOutbox: Boolean = false,
     enableSaga: Boolean = false,
-  ): Resource[F, Components[F, A]] =
+  ): Resource[F, PostgresModule[F]] =
     for
       _ <- Resource.eval(
              Logger[F].info(
                s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
              ),
            )
-      pool       <- createSessionPool[F](config)
-      _          <- Resource.eval(initializeDatabase[F](pool, enableOutbox, enableMessageOutbox, enableSaga))
-      components <- components[F, A](pool, codec, enableOutbox, enableMessageOutbox, enableSaga)
-    yield components
+      pool   <- createSessionPool[F](config)
+      _      <- Resource.eval(initializeDatabase[F](pool, enableMessageOutbox, enableSaga))
+      module <- module[F](pool, enableMessageOutbox, enableSaga)
+    yield module
 
-  /** Wire the raw PostgreSQL store, wrap it with otel4s instrumentation, and expose the shared pool alongside command
-    * snapshots so one configuration serves events, snapshots and read models. The raw store is also exposed directly so
-    * the dual-write entry points stay reachable, and `SecureRandom` is built here rather than demanded from the caller.
+  /** Wire the components shared by every domain. `SecureRandom` is built here rather than demanded from the caller, and
+    * the store of every domain and both outboxes share one [[PostgresNotificationHub]], so the module listens with a
+    * single session.
     */
-  private def components[F[_]: Async: Logger: Tracer: Meter, A <: Event](
+  private def module[F[_]: Async: Logger: Tracer: Meter](
     pool: Resource[F, Session[F]],
-    codec: EventCodec[A],
-    enableOutbox: Boolean,
     enableMessageOutbox: Boolean,
     enableSaga: Boolean,
-  ): Resource[F, Components[F, A]] =
+  ): Resource[F, PostgresModule[F]] =
     for
       given SecureRandom[F] <- Resource.eval(SecureRandom.javaSecuritySecureRandom[F])
-      raw                    = PostgresEventStore[F, A](pool, codec, outboxEnabled = enableOutbox)
-      store                 <- Resource.eval(InstrumentedEventStore.makeWithNotification[F, A](raw))
+      notificationHub       <- PostgresNotificationHub.make[F](pool)
       checkpoint            <- Resource.eval(
                       InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)),
                     )
-    yield Components(
-      store,
-      raw,
+      outboxEnabled      <- Resource.eval(Ref.of[F, Boolean](false))
+      runningProjections <- Resource.eval(Ref.of[F, Set[String]](Set.empty))
+    yield new PostgresModule[F](
+      pool,
       checkpoint,
       PostgresCommandSnapshotStore.make[F](pool),
-      if enableOutbox then Some(PostgresOutbox[F, A](pool, codec)) else None,
-      if enableMessageOutbox || enableSaga then Some(PostgresMessageOutbox[F](pool)) else None,
       PostgresLeaderElection.make[F](pool),
+      if enableMessageOutbox || enableSaga then Some(PostgresMessageOutbox[F](pool, notificationHub)) else None,
       if enableSaga then Some(PostgresSagaRepository[F](pool)) else None,
-      pool,
-      raw.notify,
+      notificationHub,
+      outboxEnabled,
+      runningProjections,
     )
 
   private def loadConfig[F[_]: Sync](configPath: String): F[PostgresConfig] =
@@ -356,7 +316,6 @@ object PostgresModule:
 
   private def initializeDatabase[F[_]: Async: Logger](
     pool: Resource[F, Session[F]],
-    enableOutbox: Boolean,
     enableMessageOutbox: Boolean,
     enableSaga: Boolean,
   ): F[Unit] =
@@ -366,7 +325,7 @@ object PostgresModule:
         _                 <-
           if !eventsTableExists then Logger[F].info("Event store schema not found, creating schema...")
           else Logger[F].info("Event store schema already exists, ensuring required objects are present")
-        _ <- createSchema(session, enableOutbox, enableMessageOutbox, enableSaga)
+        _ <- createSchema(session, enableMessageOutbox, enableSaga)
       yield ()
     }
 
@@ -375,14 +334,9 @@ object PostgresModule:
 
   private def createSchema[F[_]: Sync](
     session: Session[F],
-    enableOutbox: Boolean,
     enableMessageOutbox: Boolean,
     enableSaga: Boolean,
   ): F[Unit] =
-    val outboxDdl =
-      if enableOutbox then session.execute(PostgresOutbox.createTableCommand).void
-      else Sync[F].unit
-
     val outboxMessageDdl =
       if enableMessageOutbox || enableSaga then session.execute(PostgresMessageOutbox.createTableCommand).void
       else Sync[F].unit
@@ -403,7 +357,6 @@ object PostgresModule:
       session.execute(createEventTypeCommitOrderIndexCommand) *>
       session.execute(createEventTagsTableCommand) *>
       session.execute(createEventTagsSequenceIndexCommand) *>
-      outboxDdl *>
       outboxMessageDdl *>
       session.execute(PostgresProjectionCheckpoint.createTableCommand) *>
       session.execute(PostgresProjectionCheckpoint.addCommitGroupCommand) *>

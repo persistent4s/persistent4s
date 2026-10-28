@@ -43,6 +43,31 @@ libraryDependencies ++= Seq(
 
 Runnable examples live in `modules/examples`, each with its own `docker-compose.yml` and README.
 
+## PostgreSQL module and domains
+
+A service builds one `PostgresModule`, then one `PostgresDomain` per event type it stores:
+
+```scala
+for
+  database <- PostgresModule.make[IO](enableMessageOutbox = true)
+  library  <- database.domain(LibraryEvent.eventCodec)
+  billing  <- database.domain(BillingEvent.eventCodec, outbox = true)
+yield ...
+```
+
+The module owns what every domain shares: the connection pool (`sessions`), the schema, projection checkpoints,
+command snapshots, leader election, the message outbox, the saga repository and `sendNotification`. Each domain has
+its own `eventStore`, `transactionalStore`, `commandRuntime`, projection runtimes and `startSync`.
+
+All projections and outbox relays of a module receive PostgreSQL notifications through one listening session, opened
+on first use. If that session fails, the module reconnects with exponential backoff (500 ms, doubling up to 5 s) and,
+once reconnected, wakes every projection so it re-reads what it may have missed. Nothing is woken while the database is
+unreachable, since a projection whose read fails pauses until it is resumed.
+
+Projection names must be unique across the domains of a module, because checkpoints and leader election leases are
+keyed by name: starting a projection whose name is already running fails with `DuplicateProjectionNames`. Only one
+domain per module may enable the event outbox, since its relay decodes every queued event with that domain's codec.
+
 ## Event definitions
 
 Events only need their fields and JSON codecs:
@@ -116,9 +141,10 @@ Configure the shared runtime once at startup and pass it as a given to the servi
 
 ```scala
 val service = for
-  database <- PostgresModule.make[IO, LibraryEvent](LibraryEvent.eventCodec)
-  books = BookRepository.make(database.sessions)
-  commands <- database.startSync(BookProjection(books), timeout = 5.seconds)
+  database <- PostgresModule.make[IO]()
+  library  <- database.domain(LibraryEvent.eventCodec)
+  books     = BookRepository.make(database.sessions)
+  commands <- library.startSync(BookProjection(books), timeout = 5.seconds)
 yield BookServiceImpl(books)(using commands)
 
 class BookServiceImpl(repository: BookRepository)(using SyncCommandRuntime[IO, LibraryEvent]):

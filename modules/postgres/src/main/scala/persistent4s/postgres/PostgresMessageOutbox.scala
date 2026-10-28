@@ -29,10 +29,12 @@ import skunk.implicits.*
 import persistent4s.*
 
 /** PostgreSQL-backed [[MessageOutbox]]. A single `message_outbox` table; each row is a self-routing message. Draining
-  * claims a bounded batch, publishes it, and deletes it — all in one short transaction.
+  * claims a bounded batch, publishes it, and deletes it — all in one short transaction. Wake-up signals are received
+  * through the shared [[PostgresNotificationHub]], which must listen on `channelId`.
   */
 final case class PostgresMessageOutbox[F[_]: Async] private (
   pool: Resource[F, Session[F]],
+  notificationHub: PostgresNotificationHub[F],
   channelId: Identifier,
 ) extends MessageOutbox[F]:
 
@@ -62,7 +64,7 @@ final case class PostgresMessageOutbox[F[_]: Async] private (
     }
 
   override def notifications: Stream[F, Unit] =
-    Stream.resource(pool).flatMap(session => session.channel(channelId).listen(1024).void)
+    Stream.resource(notificationHub.listenR(channelId)).flatten.void
 
 object PostgresMessageOutbox:
 
@@ -71,8 +73,9 @@ object PostgresMessageOutbox:
 
   def apply[F[_]: Async](
     pool: Resource[F, Session[F]],
+    notificationHub: PostgresNotificationHub[F],
     channelId: Identifier = NotificationChannel,
-  ): PostgresMessageOutbox[F] = new PostgresMessageOutbox[F](pool, channelId)
+  ): PostgresMessageOutbox[F] = new PostgresMessageOutbox[F](pool, notificationHub, channelId)
 
   private type MessageRow = Long *: String *: Option[String] *: String *: Map[String, String] *: EmptyTuple
 

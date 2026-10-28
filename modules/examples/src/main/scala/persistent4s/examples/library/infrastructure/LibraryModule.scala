@@ -66,14 +66,15 @@ object LibraryModule:
   ): Resource[IO, LibraryModule] =
 
     for
-      resources    <- PostgresModule.make[IO, LibraryEvent](LibraryEvent.eventCodec, configPath)
+      database     <- PostgresModule.make[IO](configPath)
+      resources    <- database.domain(LibraryEvent.eventCodec)
       store         = resources.eventStore
       commands      = resources.commandRuntime
-      checkpoint    = resources.checkpoint
-      _            <- MonitoringServer.make(checkpoint, resources.sendNotification, monitoringPort)
-      bookRepo      = BookRepository.make(resources.sessions)
-      memberRepo    = MemberRepository.make(resources.sessions)
-      borrowingRepo = BorrowingRepository.make(resources.sessions)
+      checkpoint    = database.checkpoint
+      _            <- MonitoringServer.make(checkpoint, database.sendNotification, monitoringPort)
+      bookRepo      = BookRepository.make(database.sessions)
+      memberRepo    = MemberRepository.make(database.sessions)
+      borrowingRepo = BorrowingRepository.make(database.sessions)
       bookProj      = BookProjection(bookRepo)
       // AddBook answers with the projected book, so its projection publishes to a topic the command waits on.
       bookTopic <- Resource.eval(Topic[IO, (UUID, Either[Throwable, Map[UUID, Option[BookState]]])])

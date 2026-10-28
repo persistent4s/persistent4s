@@ -71,15 +71,16 @@ object EnrollmentModule:
 
   def make: Resource[IO, EnrollmentModule] =
     for
-      components <- PostgresModule.make[IO, SchoolEvent](eventCodec, pgConfigPath, enableOutbox = true)
+      database   <- PostgresModule.make[IO](pgConfigPath)
+      components <- database.domain(eventCodec, outbox = true)
       store       = components.eventStore
-      checkpoint  = components.checkpoint
+      checkpoint  = database.checkpoint
       outbox     <- Resource.eval(
                   IO.fromOption(components.outbox)(
-                    new IllegalStateException("Outbox missing despite enableOutbox = true"),
+                    new IllegalStateException("Outbox missing despite outbox = true"),
                   ),
                 )
-      _         <- MonitoringServer.make[IO](checkpoint, components.sendNotification, port = port"9092")
+      _         <- MonitoringServer.make[IO](checkpoint, database.sendNotification, port = port"9092")
       metrics   <- Resource.eval(CommandHandlerMetrics.make[IO])
       pgConfig  <- Resource.eval(loadPgConfig)
       bootstrap <- Resource.eval(loadKafkaBootstrap)

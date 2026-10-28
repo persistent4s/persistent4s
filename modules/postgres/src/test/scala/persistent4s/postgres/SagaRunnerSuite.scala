@@ -540,9 +540,9 @@ object SagaRunnerSuite extends IOSuite:
       .flatMap { container =>
         val config = postgresConfig(container)
         for
-          components <- PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec, enableSaga = true)
+          components <- PostgresModule.makeWithConfig[IO](config, enableSaga = true).flatMap(_.domain(eventCodec))
           repository <- Resource.eval(
-                          IO.fromOption(components.sagaRepository)(
+                          IO.fromOption(components.module.sagaRepository)(
                             new IllegalStateException("saga repository missing despite enableSaga = true"),
                           ),
                         )
@@ -553,7 +553,7 @@ object SagaRunnerSuite extends IOSuite:
                     .withUserAndPassword(config.user, config.password)
                     .withDatabase(config.database)
                     .pooled(4)
-        yield Fixture(components.transactionalStore, components.checkpoint, repository, pool)
+        yield Fixture(components.transactionalStore, components.module.checkpoint, repository, pool)
       }
 
   // ----- helpers -----

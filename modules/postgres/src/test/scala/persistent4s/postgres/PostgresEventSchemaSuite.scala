@@ -85,8 +85,9 @@ object PostgresEventSchemaSuite extends IOSuite:
   override def sharedResource: Resource[IO, Res] =
     postgresContainerResource.flatMap { container =>
       PostgresModule
-        .makeWithConfig[IO, VersionedEvent](postgresConfig(container), eventCodec)
-        .map(components => Resources(components.eventStore, components.sessions))
+        .makeWithConfig[IO](postgresConfig(container))
+        .flatMap(_.domain(eventCodec))
+        .map(components => Resources(components.eventStore, components.module.sessions))
     }
 
   private type Container = PostgreSQLContainer[Nothing]
@@ -184,24 +185,26 @@ object PostgresEventSchemaSuite extends IOSuite:
       def decode(eventType: EventTypeName, payload: String): Either[Throwable, VersionedEvent] =
         Left(new UnsupportedOperationException)
 
-    val store = PostgresEventStore[IO, VersionedEvent](resources.sessions, malformedCodec)
+    PostgresNotificationHub.make[IO](resources.sessions).use { hub =>
+      val store = PostgresEventStore[IO, VersionedEvent](resources.sessions, malformedCodec, hub)
 
-    for
-      tag    <- IO(Tag("malformed-json", UUID.randomUUID().toString))
-      result <- store
-                  .appendUnchecked(
-                    List(
-                      PendingEvent(
-                        ValueChanged("invalid"): VersionedEvent,
-                        Set(tag),
-                        EventTypeName.of[ValueChanged],
-                        isExternal = false,
+      for
+        tag    <- IO(Tag("malformed-json", UUID.randomUUID().toString))
+        result <- store
+                    .appendUnchecked(
+                      List(
+                        PendingEvent(
+                          ValueChanged("invalid"): VersionedEvent,
+                          Set(tag),
+                          EventTypeName.of[ValueChanged],
+                          isExternal = false,
+                        ),
                       ),
-                    ),
-                  )
-                  .attempt
-      revision <- store.currentRevision(EventFilter(Set.empty, Set(tag)))
-    yield expect(result.isLeft) and expect(revision == 0L)
+                    )
+                    .attempt
+        revision <- store.currentRevision(EventFilter(Set.empty, Set(tag)))
+      yield expect(result.isLeft) and expect(revision == 0L)
+    }
   }
 
   test("module initialization upgrades a pre-versioning events table in place") { _ =>
@@ -217,9 +220,9 @@ object PostgresEventSchemaSuite extends IOSuite:
         .use { legacyPool =>
           for
             _      <- legacyPool.use(_.execute(createLegacyEventsTable))
-            result <- PostgresModule.makeWithConfig[IO, VersionedEvent](config, eventCodec).use { components =>
+            result <- PostgresModule.makeWithConfig[IO](config).flatMap(_.domain(eventCodec)).use { components =>
                         for
-                          columnCount <- components.sessions.use(_.unique(eventVersionColumnCount))
+                          columnCount <- components.module.sessions.use(_.unique(eventVersionColumnCount))
                           tag          = Tag("upgraded-schema", UUID.randomUUID().toString)
                           _           <- components.eventStore.appendUnchecked(
                                  List(

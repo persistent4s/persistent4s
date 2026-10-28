@@ -71,11 +71,11 @@ object PostgresProjectionGapSuite extends IOSuite:
 
   private val Within: FiniteDuration = 5.seconds
 
-  type Res = PostgresModule.Components[IO, GapEvent]
+  type Res = PostgresDomain[IO, GapEvent]
 
   override def sharedResource: Resource[IO, Res] =
     postgresContainerResource.flatMap { container =>
-      PostgresModule.makeWithConfig[IO, GapEvent](postgresConfig(container), eventCodec)
+      PostgresModule.makeWithConfig[IO](postgresConfig(container)).flatMap(_.domain(eventCodec))
     }
 
   sealed trait GapEvent extends Event
@@ -166,7 +166,7 @@ object PostgresProjectionGapSuite extends IOSuite:
     for
       steps <- Queue.unbounded[IO, SlowStep]
       done  <- Deferred[IO, Either[Throwable, Unit]]
-      _     <- components.sessions.use { session =>
+      _     <- components.module.sessions.use { session =>
              session.transaction.use { _ =>
                def run: IO[Unit] =
                  steps.take.flatMap {
@@ -216,8 +216,8 @@ object PostgresProjectionGapSuite extends IOSuite:
 
   private def projector(kind: String, components: Res): Projector[IO, GapEvent] =
     kind match
-      case "DefaultProjector" => DefaultProjector(components.eventStore, components.checkpoint)
-      case _                  => ParallelProjector(components.eventStore, components.checkpoint)
+      case "DefaultProjector" => DefaultProjector(components.eventStore, components.module.checkpoint)
+      case _                  => ParallelProjector(components.eventStore, components.module.checkpoint)
 
   private def waitUntil(cond: IO[Boolean]): IO[Unit] =
     cond.flatMap {
@@ -244,7 +244,7 @@ object PostgresProjectionGapSuite extends IOSuite:
     test(s"$kind does not skip an event whose transaction commits after a higher position became visible") {
       components =>
         for
-          _       <- truncate(components.sessions)
+          _       <- truncate(components.module.sessions)
           slow    <- openSlowAppend(components, "allocated-first")
           fast    <- append(components, "committed-first")
           handled <- whileProjecting(kind, components) { seen =>
@@ -261,7 +261,7 @@ object PostgresProjectionGapSuite extends IOSuite:
 
     test(s"$kind moves on promptly when the transaction holding a lower position rolls back") { components =>
       for
-        _       <- truncate(components.sessions)
+        _       <- truncate(components.module.sessions)
         slow    <- openSlowAppend(components, "rolled-back")
         fast    <- append(components, "committed")
         handled <- whileProjecting(kind, components) { seen =>
@@ -280,11 +280,11 @@ object PostgresProjectionGapSuite extends IOSuite:
     test(s"$kind resumes right after the event an operator moves its checkpoint to") { components =>
       val name = s"gap-${UUID.randomUUID()}"
       for
-        _       <- truncate(components.sessions)
+        _       <- truncate(components.module.sessions)
         _       <- List("one", "two", "three", "four").traverse_(append(components, _))
         handled <- whileProjecting(kind, components, name) { seen =>
                      waitUntil(seen.get.map(_.size >= 4)).timeoutTo(Within, IO.unit) *>
-                       components.sendNotification(EventStoreNotification.UpdateCheckpointIndex(name, 2L)) *>
+                       components.module.sendNotification(EventStoreNotification.UpdateCheckpointIndex(name, 2L)) *>
                        waitUntil(seen.get.map(_.size >= 6)).timeoutTo(Within, IO.unit)
                    }
       yield expect(
@@ -298,7 +298,7 @@ object PostgresProjectionGapSuite extends IOSuite:
   test("readForProjection delivers a transaction's events together, ahead of a later write positioned between them") {
     components =>
       for
-        _       <- truncate(components.sessions)
+        _       <- truncate(components.module.sessions)
         slow    <- openSlowAppend(components, "slow-first")
         between <- append(components, "between")
         last    <- slow.insert("slow-second")
@@ -320,7 +320,7 @@ object PostgresProjectionGapSuite extends IOSuite:
   test("readForProjection reports events held back by an open transaction until that transaction resolves") {
     components =>
       for
-        _      <- truncate(components.sessions)
+        _      <- truncate(components.module.sessions)
         quiet  <- readForProjection(components)
         slow   <- openSlowAppend(components, "open")
         _      <- append(components, "visible")
@@ -340,7 +340,7 @@ object PostgresProjectionGapSuite extends IOSuite:
     val wanted = Tag("gap", UUID.randomUUID().toString)
     val other = Tag("gap", UUID.randomUUID().toString)
     for
-      _        <- truncate(components.sessions)
+      _        <- truncate(components.module.sessions)
       _        <- appendEnvelope(components, "wanted-1", Set(wanted))
       _        <- appendEnvelope(components, "other", Set(other))
       _        <- appendEnvelope(components, "untagged")
@@ -355,7 +355,7 @@ object PostgresProjectionGapSuite extends IOSuite:
 
   test("every read path reports the commit group of the transaction that stored an event") { components =>
     for
-      _         <- truncate(components.sessions)
+      _         <- truncate(components.module.sessions)
       together  <- components.eventStore.appendUnchecked(List(pending("first"), pending("second")))
       later     <- appendEnvelope(components, "later")
       appended   = together :+ later
@@ -374,7 +374,7 @@ object PostgresProjectionGapSuite extends IOSuite:
   test("cursorAt resolves a position to the event at or before it, and to the start before every event") { components =>
     val duplicateId = UUID.randomUUID()
     for
-      _       <- truncate(components.sessions)
+      _       <- truncate(components.module.sessions)
       onEmpty <- components.eventStore.cursorAt(5L)
       first   <- appendEnvelope(components, "first", id = Some(duplicateId))
       // Re-appending a stored id burns the next sequence_number, leaving a gap right after `first`.
@@ -404,7 +404,7 @@ object PostgresProjectionGapSuite extends IOSuite:
   test("readFrom returns committed events at once while an unrelated transaction holds a lower position open") {
     components =>
       for
-        _    <- truncate(components.sessions)
+        _    <- truncate(components.module.sessions)
         slow <- openSlowAppend(components, "still-open")
         _    <- append(components, "committed")
         read <- components.eventStore

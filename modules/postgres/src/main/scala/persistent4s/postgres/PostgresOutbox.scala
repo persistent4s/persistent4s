@@ -36,13 +36,16 @@ import skunk.data.Arr
   * [[PostgresEventStore.append]]. Rows are deleted by [[markPublished]] once the relay has handed them off; the events
   * themselves remain in the `events` table, which is the source of truth.
   *
-  * The wake-up [[notifications]] stream reuses the same NOTIFY channel as the event store, so a relay observes new
-  * outbox entries within one round-trip of the appending transaction committing.
+  * The wake-up [[notifications]] stream reuses the same NOTIFY channel as the event store, received through the shared
+  * [[PostgresNotificationHub]], so a relay observes new outbox entries within one round-trip of the appending
+  * transaction committing without holding a session of its own.
   *
   * @param pool
   *   shared session pool with the event store (same database, same transaction scope on append)
   * @param codec
   *   event codec used to decode payloads when streaming entries
+  * @param notificationHub
+  *   shared listener the wake-up signals come from; it must listen on `channelId`
   * @param channelId
   *   NOTIFY channel used for wake-up signals
   * @param pollInterval
@@ -51,6 +54,7 @@ import skunk.data.Arr
 final class PostgresOutbox[F[_]: Async, A <: Event] private (
   pool: Resource[F, Session[F]],
   codec: EventCodec[A],
+  notificationHub: PostgresNotificationHub[F],
   channelId: Identifier,
   pollInterval: FiniteDuration,
 ) extends Outbox[F, A]:
@@ -96,14 +100,11 @@ final class PostgresOutbox[F[_]: Async, A <: Event] private (
       }.void
 
   override def notifications: Stream[F, Unit] =
-    Stream.resource(pool).flatMap { session =>
-      session
-        .channel(channelId)
-        .listen(1024)
-        .map(notif => PostgresNotification.decode(notif.value))
-        .collect { case EventStoreNotification.EventsAppended =>
-          ()
-        }
+    Stream.resource(notificationHub.listenR(channelId)).flatten.collect {
+      case PostgresNotificationHub.Message.CatchUp => ()
+      case PostgresNotificationHub.Message.Payload(value)
+          if PostgresNotification.decode(value) == EventStoreNotification.EventsAppended =>
+        ()
     }
 
   private def parsePayload(eventType: EventTypeName, eventVersion: Int, payload: Json): F[A] =
@@ -118,10 +119,11 @@ object PostgresOutbox:
   def apply[F[_]: Async, A <: Event](
     pool: Resource[F, Session[F]],
     codec: EventCodec[A],
+    notificationHub: PostgresNotificationHub[F],
     channelId: Identifier = PostgresEventStore.NotificationChannel,
     pollInterval: FiniteDuration = DefaultPollInterval,
   ): PostgresOutbox[F, A] =
-    new PostgresOutbox[F, A](pool, codec, channelId, pollInterval)
+    new PostgresOutbox[F, A](pool, codec, notificationHub, channelId, pollInterval)
 
   private[postgres] val createTableCommand: Command[Void] =
     sql"""
