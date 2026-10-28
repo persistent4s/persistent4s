@@ -40,8 +40,10 @@ import persistent4s.Backoff
   *
   * The session is opened by the first [[listenR]] and kept until the hub is released. If it fails, the hub reconnects
   * with exponential backoff. Notifications sent while no `LISTEN` is registered are lost, so the hub publishes
-  * [[PostgresNotificationHub.Message.CatchUp]] to every subscriber once `LISTEN` is registered (on the first connection
-  * and after each reconnection) and after each failed attempt; subscribers must then re-read what they track.
+  * [[PostgresNotificationHub.Message.CatchUp]] to every subscriber once `LISTEN` is registered, on the first connection
+  * and after each reconnection; subscribers must then re-read what they track. Nothing is published while the hub is
+  * disconnected: the database may well be unreachable then, and a projection whose read fails pauses until resumed. The
+  * short maximum reconnection delay bounds how long a recovered database goes unnoticed.
   *
   * Subscribers share the connection: one that stops pulling while its queue is full delays every other subscriber.
   */
@@ -79,8 +81,7 @@ final class PostgresNotificationHub[F[_]: Async: Logger] private (
   private def run: F[Unit] =
     Backoff.retryWithBackoff(
       listenOnce.handleErrorWith { error =>
-        Logger[F].warn(error)(s"PostgreSQL notification listener failed, reconnecting") *> catchUp *>
-          error.raiseError[F, Unit]
+        Logger[F].warn(error)(s"PostgreSQL notification listener failed, reconnecting") *> error.raiseError[F, Unit]
       },
       retryInitialDelay,
       retryMaxDelay,
@@ -112,7 +113,9 @@ object PostgresNotificationHub:
     /** The payload of a notification sent on the subscribed channel. */
     case Payload(value: String)
 
-    /** Notifications may have been missed: the hub just (re)registered `LISTEN`, or failed and is retrying. */
+    /** Notifications may have been missed: the hub just registered `LISTEN`, on its first connection or after losing
+      * it.
+      */
     case CatchUp
 
   /** Raised when the notification streams of the listening session end without an error. */
@@ -122,7 +125,7 @@ object PostgresNotificationHub:
 
   val DefaultRetryInitialDelay: FiniteDuration = 500.millis
 
-  val DefaultRetryMaxDelay: FiniteDuration = 30.seconds
+  val DefaultRetryMaxDelay: FiniteDuration = 5.seconds
 
   /** Build a hub listening on `channels`. No session is used until the first [[PostgresNotificationHub.listenR]];
     * releasing the resource stops the listener and ends every subscriber stream.
@@ -136,7 +139,8 @@ object PostgresNotificationHub:
     * @param retryInitialDelay
     *   delay before the first reconnection attempt
     * @param retryMaxDelay
-    *   upper bound of the doubling delay between reconnection attempts
+    *   upper bound of the doubling delay between reconnection attempts, and so of how long subscribers go without a
+    *   catch-up once the database is reachable again
     */
   def make[F[_]: Async: Logger](
     pool: Resource[F, Session[F]],

@@ -20,7 +20,8 @@ import java.util.UUID
 
 import scala.concurrent.duration.*
 
-import cats.effect.{Deferred, IO, Resource}
+import cats.effect.{Deferred, IO, Ref, Resource}
+import cats.effect.std.SecureRandom
 import cats.syntax.all.*
 
 import fs2.Stream
@@ -31,7 +32,7 @@ import org.typelevel.log4cats.Logger
 
 import org.testcontainers.containers.PostgreSQLContainer
 import persistent4s.circe.CirceEventCodec
-import persistent4s.{Event, EventEnvelope, EventTypeName, PendingEvent, StatelessProjection, Tag}
+import persistent4s.{DefaultProjector, Event, EventEnvelope, EventTypeName, PendingEvent, StatelessProjection, Tag}
 import skunk.*
 import skunk.codec.all.*
 import skunk.data.Identifier
@@ -91,12 +92,13 @@ object PostgresNotificationHubSuite extends IOSuite:
       WHERE datname = current_database() AND pid <> pg_backend_pid() AND query LIKE 'LISTEN%'
     """.query(bool)
 
-  private def appendOne(components: PostgresDomain[IO, HubEvent], value: String): IO[Unit] =
+  /** Append one event and return its global position. */
+  private def appendOne(components: PostgresDomain[IO, HubEvent], value: String): IO[Long] =
     components.eventStore
       .appendUnchecked(
         List(PendingEvent(HubEvent(value), Set(Tag("hub", value)), EventTypeName.of[HubEvent], true, None, Map.empty)),
       )
-      .void
+      .map(_.last.metadata.globalPosition)
 
   private def freshId(prefix: String): IO[String] =
     IO(s"$prefix-${UUID.randomUUID().toString}")
@@ -222,6 +224,62 @@ object PostgresNotificationHubSuite extends IOSuite:
                    projected.get
                }
                .timeout(10.seconds)
+      yield success
+    }
+  }
+
+  test("a hub that cannot connect never signals a catch-up") { _ =>
+    val unreachable = Resource.raiseError[IO, Session[IO], Throwable](new RuntimeException("database unreachable"))
+    hub(unreachable).use { hub =>
+      hub.listenR(channel).use { messages =>
+        messages.interruptAfter(1.second).compile.toList.map(received => expect(received.isEmpty))
+      }
+    }
+  }
+
+  test("a projection keeps projecting after the database was unreachable") { container =>
+    module(container, maxConnections = 4).use { components =>
+      val sessions = components.module.sessions
+      for
+        id                     <- freshId("db-outage")
+        down                   <- Ref.of[IO, Boolean](false)
+        before                 <- Deferred[IO, Unit]
+        after                  <- Deferred[IO, Unit]
+        given SecureRandom[IO] <- SecureRandom.javaSecuritySecureRandom[IO]
+        // Every session of the projection and its listener comes from here, so `down` makes the database unreachable
+        // for them while the test itself keeps writing through `sessions`.
+        flaky = Resource.eval(down.get).flatMap { isDown =>
+                  if isDown then Resource.raiseError[IO, Session[IO], Throwable](new RuntimeException("database down"))
+                  else sessions
+                }
+        projection = new StatelessProjection[IO, HubEvent]:
+                       def name: String = id
+                       def filter: Set[EventTypeName] = Set(EventTypeName.of[HubEvent])
+                       def handle(event: EventEnvelope[HubEvent]): IO[Unit] =
+                         if event.payload.value == s"$id-before" then before.complete(()).void
+                         else after.complete(()).void.whenA(event.payload.value == s"$id-after")
+        _ <- hub(flaky).use { hub =>
+               val store = PostgresEventStore[IO, HubEvent](flaky, eventCodec, hub)
+               DefaultProjector(store, PostgresProjectionCheckpoint.make[IO](flaky))
+                 .run(projection)
+                 .compile
+                 .drain
+                 .background
+                 .use { _ =>
+                   for
+                     position <- appendOne(components, s"$id-before")
+                     _        <- before.get
+                     // The handler runs before the checkpoint is saved: start the outage only once
+                     // that save is done, with the projection idle.
+                     _ <- (IO.sleep(20.millis) *> components.module.checkpoint.load(id))
+                            .iterateUntil(_.exists(state => state.running && state.cursor.globalPosition >= position))
+                     // Lose the listener while the database is unreachable, and stay down across several retries.
+                     _ <- down.set(true) *> sessions.use(_.execute(terminateListeners)) *> IO.sleep(600.millis)
+                     _ <- down.set(false) *> appendOne(components, s"$id-after")
+                     _ <- after.get
+                   yield ()
+                 }
+             }.timeout(10.seconds)
       yield success
     }
   }

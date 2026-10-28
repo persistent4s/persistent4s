@@ -60,8 +60,9 @@ command snapshots, leader election, the message outbox, the saga repository and 
 its own `eventStore`, `transactionalStore`, `commandRuntime`, projection runtimes and `startSync`.
 
 All projections and outbox relays of a module receive PostgreSQL notifications through one listening session, opened
-on first use. If that session fails, the module reconnects with exponential backoff and wakes every projection so it
-re-reads what it may have missed.
+on first use. If that session fails, the module reconnects with exponential backoff (500 ms, doubling up to 5 s) and,
+once reconnected, wakes every projection so it re-reads what it may have missed. Nothing is woken while the database is
+unreachable, since a projection whose read fails pauses until it is resumed.
 
 Projection names must be unique across the domains of a module, because checkpoints and leader election leases are
 keyed by name: starting a projection whose name is already running fails with `DuplicateProjectionNames`. Only one
