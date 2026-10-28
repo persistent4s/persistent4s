@@ -348,6 +348,48 @@ object PostgresAtomicRepositorySuite extends IOSuite:
     )
   }
 
+  test("readWithCursor returns the view together with the cursor of its last atomic commit") { resources =>
+    val repository = TestRepository(resources.pool)
+    for
+      key    <- fresh("state")
+      name   <- fresh("projection")
+      next    = ProjectionCheckpointState(name, ReadCursor(3L, 7L), true, None)
+      _      <- repository.persistAtomically(ProjectionCommit(Map(key -> 42), Nil, ReadCursor.Start, next))
+      result <- repository.readWithCursor(name)(repository.find(_, key))
+    yield expect(result == (Some(42), ReadCursor(3L, 7L)))
+  }
+
+  test("readWithCursor returns ReadCursor.Start before the projection's first checkpoint") { resources =>
+    val repository = TestRepository(resources.pool)
+    for
+      key    <- fresh("state")
+      name   <- fresh("projection")
+      result <- repository.readWithCursor(name)(repository.find(_, key))
+    yield expect(result == (None, ReadCursor.Start))
+  }
+
+  test("a commit landing during readWithCursor is seen by neither the view nor the cursor") { resources =>
+    val repository = TestRepository(resources.pool)
+    for
+      key   <- fresh("state")
+      name  <- fresh("projection")
+      first  = ProjectionCheckpointState(name, ReadCursor(0L, 1L), true, None)
+      second = ProjectionCheckpointState(name, ReadCursor(0L, 2L), true, None)
+      _     <- repository.persistAtomically(ProjectionCommit(Map(key -> 1), Nil, ReadCursor.Start, first))
+      // The first read fixes the snapshot; the next commit runs on another connection before the view is read again
+      // and before the cursor is loaded.
+      during <- repository.readWithCursor(name) { session =>
+                  for
+                    before <- repository.find(session, key)
+                    _      <- repository.persistAtomically(ProjectionCommit(Map(key -> 2), Nil, first.cursor, second))
+                    after  <- repository.find(session, key)
+                  yield (before, after)
+                }
+      later <- repository.readWithCursor(name)(repository.find(_, key))
+    yield expect(during == ((Some(1), Some(1)), first.cursor)) and
+      expect(later == (Some(2), second.cursor))
+  }
+
   private val createStateTable: Command[Void] =
     sql"""
       CREATE TABLE IF NOT EXISTS atomic_projection_test (

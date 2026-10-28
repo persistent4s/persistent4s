@@ -328,6 +328,23 @@ remain errors. Composite keys and column overrides work for these writes too.
 `insert(session, row)` and `run(session)` leave transaction ownership with the caller, so an incoming event's receipt
 and table changes can commit or roll back together. `insert(row)` and `run` use a pooled connection for a single write.
 
+## Reading a view with its projection cursor
+
+`readWithCursor` runs a read and loads the projection's checkpoint in one read-only `REPEATABLE READ` snapshot.
+Because a projection commits its rows and its checkpoint in one transaction, the result reflects exactly the events
+up to the returned `ReadCursor`, which is `ReadCursor.Start` before the first checkpoint:
+
+```scala
+def forTherapist(therapistId: String): IO[(List[AppointmentState], ReadCursor)] =
+  readWithCursor("appointment-projection")(session =>
+    filterBy(_.therapistId).is(therapistId).run(session),
+  )
+```
+
+The read must use the supplied session: `find(session, key)`, `findMany(session, keys)`, a filtered query's
+`run(session)`, or any Skunk statement on it. `PostgresProjectionCheckpoint.cursor(session, name)` is available for
+custom read models that manage their own transaction.
+
 ## PostgreSQL telemetry
 
 `PostgresModule.make` and `makeWithConfig` use Skunk 2.0.0-RC3. Supply `TracerProvider[F]` and
