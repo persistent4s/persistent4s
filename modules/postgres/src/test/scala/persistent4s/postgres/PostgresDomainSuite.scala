@@ -20,7 +20,7 @@ import java.util.UUID
 
 import scala.concurrent.duration.*
 
-import cats.effect.{Deferred, IO, Resource}
+import cats.effect.{Deferred, IO, Ref, Resource}
 import cats.syntax.all.*
 
 import io.circe.syntax.*
@@ -34,9 +34,17 @@ import persistent4s.{
   DuplicateProjectionNames,
   Event,
   EventEnvelope,
+  EventFilter,
+  EventNotification,
+  EventStorageSchema,
+  EventStore,
   EventTypeName,
   PendingEvent,
+  ProjectionCheckpoint,
+  ProjectionCheckpointState,
   ProjectionExecutionFailed,
+  ProjectionRead,
+  ReadCursor,
   StatelessProjection,
   Tag,
 }
@@ -189,4 +197,62 @@ object PostgresDomainSuite extends IOSuite:
                .timeout(10.seconds)
       yield success
     }
+  }
+
+  test("mapEventStore wraps the store used by commands and projections") { module =>
+    module.domain(alphaCodec).use { alpha =>
+      for
+        id       <- freshId("mapped-store")
+        reads    <- Ref.of[IO, Int](0)
+        seen     <- Deferred[IO, Unit]
+        alphaType = EventTypeName.of[AlphaEvent]
+        mapped    = alpha.mapEventStore { store =>
+                   new EventStore[IO, AlphaEvent] with EventNotification[IO]:
+                     export store.{append, appendUnchecked, currentRevision, cursorAt, notification, readFrom}
+                     override def storageSchema(event: AlphaEvent): Option[EventStorageSchema] =
+                       store.storageSchema(event)
+                     def readForProjection(after: ReadCursor, filter: EventFilter, limit: Int)
+                       : IO[ProjectionRead[AlphaEvent]] =
+                       reads.update(_ + 1) *> store.readForProjection(after, filter, limit)
+                 }
+        _ <- mapped.projectionRuntime
+               .startAll(_.run(awaiting[AlphaEvent](id, alphaType, _.value, id, seen)))
+               .use(_ => append(alpha, AlphaEvent(id), alphaType) *> seen.get)
+               .timeout(10.seconds)
+        projectionReads <- reads.get
+      yield expect(projectionReads > 0) and
+        expect(mapped.commandRuntime.eventStore eq mapped.eventStore) and
+        expect(!(mapped.eventStore eq alpha.eventStore)) and
+        expect(mapped.transactionalStore eq alpha.transactionalStore)
+    }
+  }
+
+  test("mapCheckpoint wraps the checkpoint store and keeps the module-wide rules shared") { module =>
+    for
+      id       <- freshId("mapped-checkpoint")
+      loaded   <- Ref.of[IO, List[String]](Nil)
+      seen     <- Deferred[IO, Unit]
+      alphaType = EventTypeName.of[AlphaEvent]
+      mapped    = module.mapCheckpoint { checkpoint =>
+                 new ProjectionCheckpoint[IO]:
+                   def load(name: String): IO[Option[ProjectionCheckpointState]] =
+                     loaded.update(name :: _) *> checkpoint.load(name)
+                   def loadAll(): IO[List[ProjectionCheckpointState]] = checkpoint.loadAll()
+                   def save(state: ProjectionCheckpointState): IO[Unit] = checkpoint.save(state)
+               }
+      _ <- mapped
+             .domain(alphaCodec)
+             .use { alpha =>
+               alpha.projectionRuntime
+                 .startAll(_.run(awaiting[AlphaEvent](id, alphaType, _.value, id, seen)))
+                 .use(_ => append(alpha, AlphaEvent(id), alphaType) *> seen.get)
+             }
+             .timeout(10.seconds)
+      names        <- loaded.get
+      sharedOutbox <- module.domain(alphaCodec, outbox = true).use { _ =>
+                        mapped.domain(betaCodec, outbox = true).use_.attempt
+                      }
+    yield expect(names.contains(id)) and
+      expect(!(mapped.checkpoint eq module.checkpoint)) and
+      expect(sharedOutbox == Left(PostgresModuleError.OutboxAlreadyEnabled))
   }

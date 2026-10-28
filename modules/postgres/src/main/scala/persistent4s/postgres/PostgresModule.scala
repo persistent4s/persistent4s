@@ -140,6 +140,19 @@ final class PostgresModule[F[_]: Async: Logger: Tracer: Meter: SecureRandom] pri
       runningProjections,
     )
 
+  /** This module with `f` applied to its projection checkpoint store, e.g. to stop the service when a projection pauses
+    * with an error. Domains built from the returned module run their projections with the wrapped store; everything
+    * else, including the listening session and the module-wide rules, is shared with this module.
+    *
+    * Atomic repositories advance the checkpoint in the same transaction as their rows, without calling `save`; the
+    * wrapper still sees every `load`, and every `save` of a pause, a resume or an error.
+    */
+  def mapCheckpoint(f: ProjectionCheckpoint[F] => ProjectionCheckpoint[F]): PostgresModule[F] =
+    new PostgresModule[F](
+      sessions, f(checkpoint), snapshotStore, leaderElection, messageOutbox, sagaRepository, notificationHub,
+      outboxEnabled, runningProjections,
+    )
+
   /** Send a notification to every projection listening on this database, e.g. to pause or resume one. */
   def sendNotification(notification: EventStoreNotification): F[Unit] =
     sessions.use(_.channel(PostgresEventStore.NotificationChannel).notify(PostgresNotification.encode(notification)))
