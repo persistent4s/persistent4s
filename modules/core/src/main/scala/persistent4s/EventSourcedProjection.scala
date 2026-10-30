@@ -18,6 +18,8 @@ package persistent4s
 
 import scala.annotation.implicitNotFound
 import scala.collection.mutable.ListBuffer
+import scala.compiletime.{erasedValue, error, summonFrom, summonInline}
+import scala.deriving.Mirror
 import scala.reflect.ClassTag
 import scala.util.control.NonFatal
 
@@ -252,6 +254,123 @@ final class EventHandlerDefinition[F[_], A <: Event, E <: A, K, S, P] private[pe
   def handleF(f: (Option[S], P) => F[Option[S]]): Unit =
     register { case (state, selected, _) => f(state, selected) }
 
+/** The class and schema of one concrete event `L` in the sealed family `E`, collected at compile time by
+  * [[EventSourcedProjection.onFamily]].
+  */
+final private[persistent4s] class FamilyMember[A <: Event, E, L <: A](using
+  classTag: ClassTag[L],
+  schema: EventSchema[L],
+  widen: L <:< E,
+):
+
+  /** A handler for this member whose input is the payload typed as the family. */
+  def definition[F[_]: ApplicativeThrow, K, S](
+    key: Option[E => K],
+    collector: EventHandlerCollector[F, A, K, S],
+  ): EventHandlerDefinition[F, A, L, K, S, E] =
+    key match
+      case Some(key) =>
+        new EventHandlerDefinition(
+          Some(event => key(widen(event.payload)) :: Nil),
+          event => widen(event.payload),
+          collector,
+        )
+      case None =>
+        new EventHandlerDefinition(
+          collector.defaultKey.map(defaultKey =>
+            (event: EventEnvelope[L]) => defaultKey.resolve(schema, event.payload),
+          ),
+          event => widen(event.payload),
+          collector,
+          keyValidation = () => collector.defaultKey.foreach(_.validate(schema)),
+        )
+
+private[persistent4s] object FamilyMember:
+
+  /** Every concrete event below the sealed family `E`, flattening nested sealed traits and enums. */
+  inline def all[A <: Event, E <: A]: List[FamilyMember[A, E, ?]] =
+    summonFrom {
+      case family: Mirror.SumOf[E] => collect[A, E, family.MirroredElemTypes]
+      case _                       =>
+        error("onFamily requires a sealed trait or enum whose concrete events can be enumerated at compile time")
+    }
+
+  private inline def collect[A <: Event, E <: A, Elems <: Tuple]: List[FamilyMember[A, E, ?]] =
+    inline erasedValue[Elems] match
+      case _: EmptyTuple => Nil
+      case _: (t *: ts)  =>
+        val rest = collect[A, E, ts]
+        summonFrom {
+          case child: Mirror.SumOf[`t`] =>
+            collect[A, E, child.MirroredElemTypes] ++ rest
+          case _ =>
+            FamilyMember[A, E, t & A](using
+              summonInline[ClassTag[t & A]],
+              summonInline[EventSchema[t & A]],
+              summonInline[(t & A) <:< E],
+            ) :: rest
+        }
+
+/** The staged definition returned by [[EventSourcedProjection.onFamily]]. Every operation applies to each concrete
+  * event of the family, exactly as if it had been declared with its own [[EventSourcedProjection.on]].
+  */
+final class FamilyHandlerDefinition[F[_], A <: Event, E, K, S] private[persistent4s] (
+  members: List[EventHandlerDefinition[F, A, ?, K, S, E]],
+):
+
+  /** Override a projection-level default and key every event of the family by one declared event scope. */
+  def keyedBy(scope: Scope[K]): FamilyHandlerDefinition[F, A, E, K, S] =
+    FamilyHandlerDefinition(members.map(_.keyedBy(scope)))
+
+  /** Override a projection-level default and key every event of the family by two declared event scopes. */
+  def keyedBy[K1, K2](first: Scope[K1], second: Scope[K2])(using
+    tupleKey: (K1, K2) =:= K,
+  ): FamilyHandlerDefinition[F, A, E, K, S] =
+    FamilyHandlerDefinition(members.map(_.keyedBy(first, second)))
+
+  /** See [[EventHandlerDefinition.reject]]. */
+  def reject(error: PartialFunction[(Option[S], E), Throwable]): FamilyHandlerDefinition[F, A, E, K, S] =
+    FamilyHandlerDefinition(members.map(_.reject(error)))
+
+  /** See [[EventHandlerDefinition.create]]. */
+  def create(f: E => S): Unit = members.foreach(_.create(f))
+
+  /** See [[EventHandlerDefinition.createF]]. */
+  def createF(f: E => F[S]): Unit = members.foreach(_.createF(f))
+
+  /** See [[EventHandlerDefinition.set]]. */
+  def set(f: E => S): Unit = members.foreach(_.set(f))
+
+  /** See [[EventHandlerDefinition.setF]]. */
+  def setF(f: E => F[S]): Unit = members.foreach(_.setF(f))
+
+  /** See [[EventHandlerDefinition.update]]. */
+  def update(f: S => S): Unit = members.foreach(_.update(f))
+
+  /** See [[EventHandlerDefinition.update]]. */
+  def update(f: (S, E) => S): Unit = members.foreach(_.update(f))
+
+  /** See [[EventHandlerDefinition.updateF]]. */
+  def updateF(f: S => F[S]): Unit = members.foreach(_.updateF(f))
+
+  /** See [[EventHandlerDefinition.updateF]]. */
+  def updateF(f: (S, E) => F[S]): Unit = members.foreach(_.updateF(f))
+
+  /** See [[EventHandlerDefinition.upsert]]. */
+  def upsert(f: (Option[S], E) => S): Unit = members.foreach(_.upsert(f))
+
+  /** See [[EventHandlerDefinition.upsertF]]. */
+  def upsertF(f: (Option[S], E) => F[S]): Unit = members.foreach(_.upsertF(f))
+
+  /** See [[EventHandlerDefinition.delete]]. */
+  def delete: Unit = members.foreach(_.delete)
+
+  /** See [[EventHandlerDefinition.handle]]. */
+  def handle(f: (Option[S], E) => Option[S]): Unit = members.foreach(_.handle(f))
+
+  /** See [[EventHandlerDefinition.handleF]]. */
+  def handleF(f: (Option[S], E) => F[Option[S]]): Unit = members.foreach(_.handleF(f))
+
 /** A [[Projection]] declared as one typed handler per concrete event. The handler registrations derive the event
   * filter, key resolution, and state transitions, so those three concerns cannot drift apart.
   *
@@ -268,6 +387,13 @@ final class EventHandlerDefinition[F[_], A <: Event, E <: A, K, S, P] private[pe
   * [[EventHandlerDefinition.reject]] for a domain-specific or conditional error.
   *
   * Use [[onEnvelope]] or [[onManyEnvelope]] when key resolution or state transitions need event metadata.
+  *
+  * Use [[onFamily]] when one function handles every event of a sealed family, such as a shared `evolve`:
+  *
+  * {{{
+  * override protected val eventHandlers = handlers:
+  *   onFamily[AccountEvent](_.accountId).handle(Account.evolve)
+  * }}}
   */
 trait EventSourcedProjection[F[_]: ApplicativeThrow, A <: Event, K, S] extends Projection[F, A, K, S]:
 
@@ -341,6 +467,31 @@ trait EventSourcedProjection[F[_]: ApplicativeThrow, A <: Event, K, S] extends P
     collector: EventHandlerCollector[F, A, K, S],
   ): EventHandlerDefinition[F, A, E, K, S, EventEnvelope[E]] =
     new EventHandlerDefinition(Some(keys), event => event, collector)
+
+  /** Handle every concrete event of the sealed family `E` with the same operation, using the projection-level default
+    * declared by [[handlersBy]] or an explicit [[FamilyHandlerDefinition.keyedBy]].
+    *
+    * The family expands at compile time into one handler per concrete event, flattening nested sealed traits, so each
+    * event keeps its own [[EventSchema]] name, aliases, and scopes. Declaring one of those events again with [[on]]
+    * fails as a duplicate handler.
+    */
+  final protected inline def onFamily[E <: A](using
+    collector: EventHandlerCollector[F, A, K, S],
+  ): FamilyHandlerDefinition[F, A, E, K, S] =
+    familyHandler(FamilyMember.all[A, E], None)
+
+  /** Handle every concrete event of the sealed family `E` with the same operation and one key derived from the payload.
+    * See [[onFamily]].
+    */
+  final protected inline def onFamily[E <: A](key: E => K)(using
+    collector: EventHandlerCollector[F, A, K, S],
+  ): FamilyHandlerDefinition[F, A, E, K, S] =
+    familyHandler(FamilyMember.all[A, E], Some(key))
+
+  private def familyHandler[E <: A](members: List[FamilyMember[A, E, ?]], key: Option[E => K])(using
+    collector: EventHandlerCollector[F, A, K, S],
+  ): FamilyHandlerDefinition[F, A, E, K, S] =
+    FamilyHandlerDefinition(members.map(_.definition(key, collector)))
 
   private def validate(all: List[EventHandler[F, A, K, S]]): List[EventHandler[F, A, K, S]] =
     require(all.nonEmpty, "An EventSourcedProjection must declare at least one event handler")
