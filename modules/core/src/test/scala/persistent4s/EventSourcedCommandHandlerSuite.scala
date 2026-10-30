@@ -19,6 +19,7 @@ package persistent4s
 import java.time.Instant
 import java.util.UUID
 
+import scala.compiletime.testing.typeCheckErrors
 import scala.util.Try
 
 import cats.effect.{Concurrent, IO}
@@ -308,6 +309,20 @@ object EventSourcedCommandHandlerSuite extends SimpleIOSuite:
     val command = TestCommand("target")
     expect(inferredHandler.evolve(command, 0, Created("target", 2)) == 2) and
       expect(inferredHandler.evolve(command, 0, Created("other", 2)) == 0)
+  }
+
+  pureTest("on does not compile for a sealed family of events") {
+    val errors = typeCheckErrors(
+      """
+      new EventSourcedCommandHandler[TestCommand, Unit, TestEvent, Unit]:
+        protected val behavior = handler(()):
+          scope(EntityScope)(_.id)
+          on[TestEvent].allEvents.ignore
+          emit(command => Created(command.id, 1))
+      """,
+    )
+
+    expect(errors.exists(_.message.contains("TestEvent is a sealed family of events")))
   }
 
   pureTest("a typed event with no shared command scope requires allEvents") {
