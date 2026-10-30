@@ -353,7 +353,7 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
 
     forEach(variants)(errors => expect(errors.exists(_.message.contains("is a sealed family of events")))) and
       expect(named.exists(_.contains("AccountEvent is a sealed family of events"))) and
-      expect(named.exists(_.contains("Use onFamily[AccountEvent]")))
+      expect(named.exists(_.contains("use onFamily[AccountEvent] in an EventSourcedProjection")))
   }
 
   pureTest("on still compiles for an abstract event type in a generic helper") {

@@ -19,7 +19,8 @@ package persistent4s
 import scala.quoted.*
 
 /** Evidence that `E` is not a sealed family of events. A sealed trait or enum is never stored under its own name, so a
-  * handler declared with [[EventSourcedProjection.on]] for it would never run.
+  * handler declared with `on` for it, in an [[EventSourcedProjection]] or an [[EventSourcedCommandHandler]], would
+  * never run.
   */
 sealed trait ConcreteEvent[E]
 
@@ -46,7 +47,7 @@ private object ConcreteEventMacros:
     if isFamily then
       report.errorAndAbort(
         s"${symbol.name} is a sealed family of events, which is never stored under its own name. " +
-          s"Use onFamily[${symbol.name}] to handle each of its concrete events, or on with one concrete event.",
+          s"Declare on with each of its concrete events, or use onFamily[${symbol.name}] in an EventSourcedProjection.",
       )
 
     '{ ConcreteEvent.Instance.asInstanceOf[ConcreteEvent[E]] }

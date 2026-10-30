@@ -420,7 +420,7 @@ trait EventSourcedCommandHandler[C, S, A <: Event, R]:
     * single typed scope shared by the command and event is matched automatically. No shared scope requires an explicit
     * `.allEvents`, while multiple shared scopes require `.within(scope)` or `.withinAll`.
     */
-  final protected def on[E <: A: ClassTag: EventSchema](using
+  final protected def on[E <: A: ClassTag: EventSchema: ConcreteEvent](using
     collector: CommandBehaviorCollector[C, S, A, R],
   ): CommandEventHandlerDefinition[C, S, A, R, E] =
     new CommandEventHandlerDefinition(collector)
