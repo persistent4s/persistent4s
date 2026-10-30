@@ -31,6 +31,7 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
   sealed trait E extends Event
 
   sealed trait AccountEvent extends E:
+
     def id: String
 
   final case class Opened(id: String, initial: Int) extends AccountEvent
@@ -44,6 +45,7 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
   final case class Frozen(id: String) extends ClosureEvent
 
   object Frozen:
+
     given EventSchema[Frozen] = EventSchema[Frozen]("account.frozen")
 
   final case class Renamed(id: String, name: String) extends E
@@ -61,8 +63,16 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
   final case class NotScoped(bookId: UUID) extends UnscopedEvent
 
   enum CounterEvent extends E:
+
     case Started(id: String)
+
     case Bumped(id: String)
+
+  enum SignalEvent extends E:
+
+    case Reset
+
+    case Ping(id: String)
 
   sealed trait EmptyFamily extends E
 
@@ -81,6 +91,8 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
 
   private given EventSchema[ScopedOnce] =
     EventSchema[ScopedOnce]("library.scoped-once").scopedBy(books)(_.bookId)
+
+  private given resetSchema: EventSchema[SignalEvent.Reset.type] = EventSchema[SignalEvent.Reset.type]("signal.reset")
 
   private def evolve(state: Option[Int], event: AccountEvent): Option[Int] =
     event match
@@ -173,8 +185,7 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
       val name = "guarded-accounts"
       protected val repository: Repository[IO, String, Int] = noopRepository
       protected val eventHandlers = handlers:
-        onFamily[AccountEvent](_.id)
-          .reject { case (None, _: Deposited) => rejection }
+        onFamily[AccountEvent](_.id).reject { case (None, _: Deposited) => rejection }
           .handle(evolve)
 
     for
@@ -287,4 +298,91 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
     )
 
     expect(errors.exists(_.message.contains("onFamily requires a sealed trait or enum")))
+  }
+
+  pureTest("every on variant rejects a sealed family, including an enum, and points to onFamily") {
+    val variants = List(
+      typeCheckErrors(
+        """
+        new EventSourcedProjection[IO, E, String, Int]:
+          val name = "on"
+          protected val repository: Repository[IO, String, Int] = noopRepository
+          protected val eventHandlers = handlers:
+            on[AccountEvent](_.id).handle(evolve)
+        """,
+      ),
+      typeCheckErrors(
+        """
+        new EventSourcedProjection[IO, E, UUID, Int]:
+          val name = "on-default-key"
+          protected val repository: Repository[IO, UUID, Int] = noopRepository
+          protected val eventHandlers = handlersBy(books):
+            on[BookEvent].set(_ => 1)
+        """,
+      ),
+      typeCheckErrors(
+        """
+        new EventSourcedProjection[IO, E, String, Int]:
+          val name = "on-many"
+          protected val repository: Repository[IO, String, Int] = noopRepository
+          protected val eventHandlers = handlers:
+            onMany[CounterEvent](_ => Nil).set(_ => 1)
+        """,
+      ),
+      typeCheckErrors(
+        """
+        new EventSourcedProjection[IO, E, String, Int]:
+          val name = "on-envelope"
+          protected val repository: Repository[IO, String, Int] = noopRepository
+          protected val eventHandlers = handlers:
+            onEnvelope[SignalEvent](_ => "key").set(_ => 1)
+        """,
+      ),
+      typeCheckErrors(
+        """
+        new EventSourcedProjection[IO, E, String, Int]:
+          val name = "on-many-envelope"
+          protected val repository: Repository[IO, String, Int] = noopRepository
+          protected val eventHandlers = handlers:
+            onManyEnvelope[E](_ => Nil).set(_ => 1)
+        """,
+      ),
+    )
+
+    val named = variants.head.map(_.message)
+
+    forEach(variants)(errors => expect(errors.exists(_.message.contains("is a sealed family of events")))) and
+      expect(named.exists(_.contains("AccountEvent is a sealed family of events"))) and
+      expect(named.exists(_.contains("Use onFamily[AccountEvent]")))
+  }
+
+  pureTest("on still compiles for an abstract event type in a generic helper") {
+    val errors = typeCheckErrors(
+      """
+      new EventSourcedProjection[IO, E, String, Int]:
+        val name = "generic"
+        protected val repository: Repository[IO, String, Int] = noopRepository
+
+        private def counted[X <: E: scala.reflect.ClassTag: EventSchema](key: X => String)(using
+          EventHandlerCollector[IO, E, String, Int],
+        ): Unit =
+          on[X](key).upsert((state, _) => state.getOrElse(0) + 1)
+
+        protected val eventHandlers = handlers:
+          counted[Renamed](_.id)
+      """,
+    )
+
+    expect(clue(errors.map(_.message)).isEmpty)
+  }
+
+  test("on still accepts a parameterless enum case with its own schema") {
+    val signals = new EventSourcedProjection[IO, E, String, Int]:
+      val name = "signals"
+      protected val repository: Repository[IO, String, Int] = noopRepository
+      protected val eventHandlers = handlers:
+        on[SignalEvent.Reset.type](_ => "signal").set(_ => 0)
+
+    for reset <- signals.handle(Some(5), envAs(SignalEvent.Reset, resetSchema.eventType))
+    yield expect(signals.filter == Set(EventTypeName.fromString("signal.reset"))) and expect(reset.contains(0))
   }

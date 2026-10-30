@@ -431,7 +431,7 @@ trait EventSourcedProjection[F[_]: ApplicativeThrow, A <: Event, K, S] extends P
   /** Start a handler using the projection-level default declared by [[handlersBy]], or requiring an explicit
     * [[EventHandlerDefinition.keyedBy]] before a state operation.
     */
-  final protected def on[E <: A: ClassTag: EventSchema](using
+  final protected def on[E <: A: ClassTag: EventSchema: ConcreteEvent](using
     collector: EventHandlerCollector[F, A, K, S],
   ): EventHandlerDefinition[F, A, E, K, S, E] =
     val schema = summon[EventSchema[E]]
@@ -445,25 +445,27 @@ trait EventSourcedProjection[F[_]: ApplicativeThrow, A <: Event, K, S] extends P
     )
 
   /** Handle one key derived from the event payload. */
-  final protected def on[E <: A: ClassTag: EventSchema](key: E => K)(using
+  final protected def on[E <: A: ClassTag: EventSchema: ConcreteEvent](key: E => K)(using
     collector: EventHandlerCollector[F, A, K, S],
   ): EventHandlerDefinition[F, A, E, K, S, E] =
     new EventHandlerDefinition(Some(event => key(event.payload) :: Nil), _.payload, collector)
 
   /** Handle several distinct keys derived from the event payload. */
-  final protected def onMany[E <: A: ClassTag: EventSchema](keys: E => IterableOnce[K])(using
+  final protected def onMany[E <: A: ClassTag: EventSchema: ConcreteEvent](keys: E => IterableOnce[K])(using
     collector: EventHandlerCollector[F, A, K, S],
   ): EventHandlerDefinition[F, A, E, K, S, E] =
     new EventHandlerDefinition(Some(event => keys(event.payload)), _.payload, collector)
 
   /** Handle one key using the full envelope, including metadata. */
-  final protected def onEnvelope[E <: A: ClassTag: EventSchema](key: EventEnvelope[E] => K)(using
+  final protected def onEnvelope[E <: A: ClassTag: EventSchema: ConcreteEvent](key: EventEnvelope[E] => K)(using
     collector: EventHandlerCollector[F, A, K, S],
   ): EventHandlerDefinition[F, A, E, K, S, EventEnvelope[E]] =
     new EventHandlerDefinition(Some(event => key(event) :: Nil), event => event, collector)
 
   /** Handle several distinct keys using the full envelope, including metadata. */
-  final protected def onManyEnvelope[E <: A: ClassTag: EventSchema](keys: EventEnvelope[E] => IterableOnce[K])(using
+  final protected def onManyEnvelope[E <: A: ClassTag: EventSchema: ConcreteEvent](
+    keys: EventEnvelope[E] => IterableOnce[K],
+  )(using
     collector: EventHandlerCollector[F, A, K, S],
   ): EventHandlerDefinition[F, A, E, K, S, EventEnvelope[E]] =
     new EventHandlerDefinition(Some(keys), event => event, collector)
