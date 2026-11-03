@@ -80,9 +80,10 @@ object PostgresMessageOutboxSuite extends IOSuite:
     postgresContainerResource.flatMap { container =>
       val config = postgresConfig(container)
       for
-        components <- PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec, enableMessageOutbox = true)
-        outbox     <- Resource.eval(
-                    IO.fromOption(components.messageOutbox)(new IllegalStateException("message outbox missing")),
+        components <-
+          PostgresModule.makeWithConfig[IO](config, enableMessageOutbox = true).flatMap(_.domain(eventCodec))
+        outbox <- Resource.eval(
+                    IO.fromOption(components.module.messageOutbox)(new IllegalStateException("message outbox missing")),
                   )
         pool <- Session
                   .Builder[IO]

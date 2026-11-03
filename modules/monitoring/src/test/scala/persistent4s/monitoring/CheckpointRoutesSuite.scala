@@ -18,6 +18,7 @@ package persistent4s.monitoring
 
 import cats.effect.{IO, Ref}
 
+import persistent4s.ReadCursor
 import persistent4s.{EventStoreNotification, ProjectionCheckpointState}
 
 import org.http4s.*
@@ -26,7 +27,7 @@ import weaver.SimpleIOSuite
 
 object CheckpointRoutesSuite extends SimpleIOSuite:
 
-  private val proj = ProjectionCheckpointState("books", 42L, true, None)
+  private val proj = ProjectionCheckpointState("books", ReadCursor(0L, 42L), true, None)
 
   private def makeApp(
     states: List[ProjectionCheckpointState],

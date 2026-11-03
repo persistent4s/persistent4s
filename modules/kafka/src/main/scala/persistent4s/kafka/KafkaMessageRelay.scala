@@ -22,7 +22,7 @@ import cats.effect.Async
 import cats.syntax.all.*
 import fs2.Stream
 
-import persistent4s.{MessageOutbox, MessagePublisher}
+import persistent4s.{Backoff, MessageOutbox, MessagePublisher}
 
 /** Drains a [[MessageOutbox]] into Kafka via a [[MessagePublisher]]. Long-running: start once, `run` only returns if an
   * unrecoverable error escapes. Restart-safe (progress lives in the outbox table).

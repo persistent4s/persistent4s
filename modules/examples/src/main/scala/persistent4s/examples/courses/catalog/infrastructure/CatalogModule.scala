@@ -21,14 +21,18 @@ import com.comcast.ip4s.*
 import fs2.io.net.Network
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import org.typelevel.otel4s.metrics.Meter
-import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
+import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
 import pureconfig.ConfigSource
 import skunk.*
 
 given Tracer[IO] = Tracer.Implicits.noop
 
 given Meter[IO] = Meter.Implicits.noop
+
+given TracerProvider[IO] = TracerProvider.noop[IO]
+
+given MeterProvider[IO] = MeterProvider.noop[IO]
 
 given Logger[IO] = Slf4jLogger.getLogger[IO]
 
@@ -58,15 +62,16 @@ object CatalogModule:
 
   def make: Resource[IO, CatalogModule] =
     for
-      components <- PostgresModule.make[IO, CatalogEvent](eventCodec, pgConfigPath, enableOutbox = true)
+      database   <- PostgresModule.make[IO](pgConfigPath)
+      components <- database.domain(eventCodec, outbox = true)
       store       = components.eventStore
-      checkpoint  = components.checkpoint
+      checkpoint  = database.checkpoint
       outbox     <- Resource.eval(
                   IO.fromOption(components.outbox)(
-                    new IllegalStateException("Outbox missing despite enableOutbox = true"),
+                    new IllegalStateException("Outbox missing despite outbox = true"),
                   ),
                 )
-      _         <- MonitoringServer.make[IO](checkpoint, components.sendNotification, port = port"9091")
+      _         <- MonitoringServer.make[IO](checkpoint, database.sendNotification, port = port"9091")
       metrics   <- Resource.eval(CommandHandlerMetrics.make[IO])
       pgConfig  <- Resource.eval(loadPgConfig)
       bootstrap <- Resource.eval(loadKafkaBootstrap)

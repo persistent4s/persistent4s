@@ -18,15 +18,16 @@ package persistent4s.monitoring
 
 import cats.effect.IO
 
+import persistent4s.ReadCursor
 import persistent4s.ProjectionCheckpointState
 
 import weaver.SimpleIOSuite
 
 object HtmlRendererSuite extends SimpleIOSuite:
 
-  private val running = ProjectionCheckpointState("books", 42L, true, None)
+  private val running = ProjectionCheckpointState("books", ReadCursor(0L, 42L), true, None)
 
-  private val paused = ProjectionCheckpointState("members", 7L, false, Some("RuntimeException: boom"))
+  private val paused = ProjectionCheckpointState("members", ReadCursor(0L, 7L), false, Some("RuntimeException: boom"))
 
   test("render includes projection names") {
     val html = HtmlRenderer.render(List(running, paused))
@@ -43,6 +44,12 @@ object HtmlRendererSuite extends SimpleIOSuite:
 
   test("render includes global position") {
     IO.pure(expect(HtmlRenderer.render(List(running)).contains("42")))
+  }
+
+  test("renderJson reports both parts of the checkpoint cursor") {
+    val state = ProjectionCheckpointState("books", ReadCursor(31L, 42L), true, None)
+    val json = HtmlRenderer.renderJson(List(state))
+    IO.pure(expect.all(json.contains("\"position\":42"), json.contains("\"commitGroup\":31")))
   }
 
   test("render includes error message") {
@@ -86,6 +93,6 @@ object HtmlRendererSuite extends SimpleIOSuite:
   }
 
   test("render escapes HTML special characters in projection name") {
-    val state = ProjectionCheckpointState("<script>", 0L, true, None)
+    val state = ProjectionCheckpointState("<script>", ReadCursor(0L, 0L), true, None)
     IO.pure(expect(HtmlRenderer.render(List(state)).contains("&lt;script&gt;")))
   }

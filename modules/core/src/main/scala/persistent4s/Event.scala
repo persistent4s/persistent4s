@@ -25,9 +25,8 @@ import scala.reflect.ClassTag
   */
 trait Event
 
-/** A type-safe wrapper around a stored event identifier. New high-level handlers obtain this value from an explicit
-  * [[EventSchema]], whose identifier survives Scala class renames. [[EventTypeName.of]] remains the legacy,
-  * class-name-based constructor for low-level integrations and incremental migration.
+/** A type-safe wrapper around a stored event name. Handlers use [[EventSchema]], which defaults to the event's class
+  * name. A custom schema can keep a fixed name across class renames. [[EventTypeName.of]] always uses the class name.
   *
   * Instead of writing `"StudentCreated"` (error-prone), users write `EventTypeName.of[StudentCreated]` which is checked
   * by the compiler.
@@ -36,8 +35,8 @@ opaque type EventTypeName = String
 
 object EventTypeName:
 
-  /** Create a legacy EventTypeName from a class type. The simple class name is resolved via ClassTag and is therefore
-    * not rename-safe for durable storage; prefer `summon[EventSchema[E]].eventType` for new event definitions.
+  /** Create an event name from its simple class name. Use a custom [[EventSchema]] to keep the stored name when
+    * renaming the class.
     *
     * Example: `EventTypeName.of[StudentCreated]` produces `"StudentCreated"`
     */

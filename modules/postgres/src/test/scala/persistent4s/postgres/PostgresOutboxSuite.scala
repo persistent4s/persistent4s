@@ -75,10 +75,10 @@ object PostgresOutboxSuite extends IOSuite:
     postgresContainerResource.flatMap { container =>
       val config = postgresConfig(container)
       for
-        components <- PostgresModule.makeWithConfig[IO, TestEvent](config, eventCodec, enableOutbox = true)
+        components <- PostgresModule.makeWithConfig[IO](config).flatMap(_.domain(eventCodec, outbox = true))
         outbox     <- Resource.eval(
                     IO.fromOption(components.outbox)(
-                      new IllegalStateException("outbox missing despite enableOutbox = true"),
+                      new IllegalStateException("outbox missing despite outbox = true"),
                     ),
                   )
         pool <- Session

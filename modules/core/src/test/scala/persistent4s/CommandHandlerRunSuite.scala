@@ -112,6 +112,12 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       readFrom(0L, eventFilter, None).compile.toList
         .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): F[ProjectionRead[A]] =
+      ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+    def cursorAt(globalPosition: Long): F[ReadCursor] =
+      Async[F].pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
+
     override def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -223,6 +229,12 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
         readFrom(0L, eventFilter, None).compile.toList
           .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
+      def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[A]] =
+        ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+      def cursorAt(globalPosition: Long): IO[ReadCursor] =
+        IO.pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
+
       def readFrom(
         fromPosition: Long,
         eventFilter: EventFilter,
@@ -287,11 +299,10 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
 
   private val ReplyTopic = "replies"
 
-  /** The shape a service answering another one needs: the reply is enqueued in the transaction that appends the event,
-    * and it is enqueued *especially* on the path that decides to write no event at all. A case class rather than an
-    * object because the address to answer arrives with the request, so it has to be closed over.
+  /** Announces every student it creates, in the transaction that appends the event. A case class rather than an object
+    * so each test can choose the key the announcement carries.
     */
-  final case class AnsweringCreateStudentHandler(replyKey: String)
+  final case class AnnouncingCreateStudentHandler(replyKey: String)
       extends CommandHandler[CreateStudent, StudentState, TestEvent]:
 
     def tags(command: CreateStudent): Set[Tag] = Set(studentTag(command.studentId))
@@ -310,14 +321,14 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     override def messages(
       state: StudentState,
       command: CreateStudent,
-      outcome: Either[Throwable, List[TestEvent]],
+      events: List[TestEvent],
     ): Either[Throwable, List[OutgoingMessage]] =
       Right(
         List(
           OutgoingMessage(
             topic = ReplyTopic,
             key = Some(replyKey),
-            payload = outcome.fold(error => s"rejected:${error.getMessage}", events => s"accepted:${events.size}"),
+            payload = s"accepted:${events.size}",
             headers = Map("studentId" -> command.studentId),
           ),
         ),
@@ -349,14 +360,15 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     new MessageEncoder[String]:
       def encode(message: String): Either[Throwable, String] = Left(new RuntimeException("boom"))
 
-  /** [[AnsweringCreateStudentHandler]]'s job expressed the other way: it *names* the reply and lets the library encode
-    * and address it, instead of assembling an [[OutgoingMessage]] and a payload by hand.
+  /** Answers the saga that asked, through a reply it *names* and lets the library encode and address, on acceptance and
+    * on rejection alike. Announces created students too, unless `announce` is off, which only an acceptance may do.
     *
     * Answers nothing for the student called "quiet", which is the only way to reach the `None` branch — a partner that
     * is genuinely fire-and-forget for some commands and answers others.
     */
-  final case class SagaAnsweringHandler(request: RequestContext)(using MessageEncoder[String])
-      extends SagaCommandHandler[CreateStudent, StudentState, TestEvent]:
+  final case class SagaAnsweringHandler(request: RequestContext, announce: Boolean = false)(using
+    MessageEncoder[String],
+  ) extends SagaCommandHandler[CreateStudent, StudentState, TestEvent]:
 
     def tags(command: CreateStudent): Set[Tag] = Set(studentTag(command.studentId))
 
@@ -379,6 +391,13 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
       Option.unless(command.studentId == "quiet")(
         PendingReply(outcome.fold(error => s"rejected:${error.getMessage}", events => s"accepted:${events.size}")),
       )
+
+    override def messages(
+      state: StudentState,
+      command: CreateStudent,
+      events: List[TestEvent],
+    ): Either[Throwable, List[OutgoingMessage]] =
+      Right(List(OutgoingMessage("students.created", Some(command.studentId), "created")).filter(_ => announce))
 
   private def seedStudentCreated(store: InMemoryEventStore[IO, TestEvent], studentId: String): IO[Unit] =
     store
@@ -632,7 +651,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
   }
 
   test("runWithMessages commits the decided events and the handler's messages together") {
-    val handler = AnsweringCreateStudentHandler("saga-1")
+    val handler = AnnouncingCreateStudentHandler("saga-1")
     for
       store  <- InMemoryEventStore.make[IO, TestEvent]
       result <- {
@@ -655,8 +674,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     )
   }
 
-  test("runWithMessages answers a rejected command as a Left instead of raising, and writes no event") {
-    val handler = AnsweringCreateStudentHandler("saga-1")
+  test("runWithMessages returns a rejection as a Left and enqueues none of the handler's messages") {
+    val handler = AnnouncingCreateStudentHandler("saga-1")
     for
       store  <- InMemoryEventStore.make[IO, TestEvent]
       _      <- seedStudentCreated(store, "1")
@@ -669,8 +688,8 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     yield expect.all(
       result.isLeft,
       events.length == 1, // the seeded event only
-      messages.length == 1,
-      messages.head.payload == "rejected:Student already exists",
+      // The announcement is about a change that did not happen, so it must not leave.
+      messages.isEmpty,
     )
   }
 
@@ -790,6 +809,30 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
     )
   }
 
+  test("a saga handler commits its own messages with its reply on acceptance, and only its reply on rejection") {
+    val handler = SagaAnsweringHandler(sagaRequest(), announce = true)
+    for
+      store    <- InMemoryEventStore.make[IO, TestEvent]
+      accepted <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      rejected <- {
+        given MessagingStore[TestEvent] = store
+        handler.runWithMessages[IO](CreateStudent("1"))
+      }
+      messages <- store.getMessages
+    yield expect.all(
+      accepted.isRight,
+      rejected.isLeft,
+      messages.map(message => message.topic -> message.payload) == Vector(
+        ReplyTopic         -> "accepted:1",
+        "students.created" -> "created",
+        ReplyTopic         -> "rejected:Student already exists",
+      ),
+    )
+  }
+
   /** Throws where a handler is least expected to: computing the scope to read, before any effect has been built. */
   final case class ThrowingTagsHandler(request: RequestContext)
       extends SagaCommandHandler[CreateStudent, StudentState, TestEvent]:
@@ -831,7 +874,7 @@ object CommandHandlerRunSuite extends SimpleIOSuite:
   }
 
   test("runWithMessages: the loser of a conflict re-reads, changes its answer, and leaves no stale message") {
-    val handler = AnsweringCreateStudentHandler("saga-1")
+    val handler = SagaAnsweringHandler(sagaRequest())
     for
       store            <- InMemoryEventStore.make[IO, TestEvent]
       arrivals         <- Ref.of[IO, Int](0)

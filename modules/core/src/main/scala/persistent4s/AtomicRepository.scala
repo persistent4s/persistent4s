@@ -18,22 +18,22 @@ package persistent4s
 
 /** The state changes and checkpoint advance produced by one projection batch.
   *
-  * An [[AtomicRepository]] must persist every field in this value atomically. `expectedPosition` is the checkpoint
-  * position from which the batch was computed and must be used as an optimistic concurrency check.
+  * An [[AtomicRepository]] must persist every field in this value atomically. `expected` is the checkpoint cursor from
+  * which the batch was computed and must be used as an optimistic concurrency check.
   */
 final case class ProjectionCommit[K, S](
   upserts: Map[K, S],
   deletes: List[K],
-  expectedPosition: Long,
+  expected: ReadCursor,
   checkpoint: ProjectionCheckpointState,
 )
 
 /** Raised when an atomic projection commit was computed from a checkpoint that is no longer current. */
 final case class ProjectionCheckpointConflict(
   projectionName: String,
-  expectedPosition: Long,
+  expected: ReadCursor,
 ) extends RuntimeException(
-      s"Projection $projectionName is no longer at checkpoint $expectedPosition",
+      s"Projection $projectionName is no longer at checkpoint $expected",
     )
 
 /** A projection repository capable of committing read-model changes and their checkpoint in one transaction.
@@ -46,7 +46,7 @@ trait AtomicRepository[F[_], K, S] extends Repository[F, K, S]:
   /** Atomically apply the read-model changes and advance the checkpoint.
     *
     * Implementations must fail with [[ProjectionCheckpointConflict]] when the stored checkpoint does not equal
-    * `commit.expectedPosition`. On every failure, neither state changes nor the checkpoint may be persisted.
+    * `commit.expected`. On every failure, neither state changes nor the checkpoint may be persisted.
     */
   def persistAtomically(commit: ProjectionCommit[K, S]): F[Unit]
 

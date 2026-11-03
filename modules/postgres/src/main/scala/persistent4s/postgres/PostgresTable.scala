@@ -19,15 +19,16 @@ package persistent4s.postgres
 import cats.MonadThrow
 import cats.syntax.all.*
 
+import skunk.codec.all.{bool, int4, int8}
 import skunk.util.Origin
-import skunk.{AppliedFragment, Codec, Command, Fragment, Query, Void}
+import skunk.{AppliedFragment, Codec, Command, Fragment, Query, Session, Void}
 
 /** Convention-based PostgreSQL persistence for one projection-state table.
   *
   * A table keeps its durable SQL name explicit while deriving columns and row encoding from [[PostgresRow]]. The key
-  * selector must reference one state field directly or return a tuple of direct state fields. Generated persistence
-  * uses full-row upserts and can be converted to the session-bound [[PostgresRepositoryTable]] used by
-  * [[PostgresAtomicRepository]].
+  * selector must reference one state field directly or return a tuple of direct state fields. Projection persistence
+  * uses full-row upserts through the session-bound [[PostgresRepositoryTable]]. [[DerivedPostgresRepository]] also
+  * provides insert-only writes and conditional partial updates.
   */
 final class PostgresTable[K, S <: Product] private (
   val name: String,
@@ -117,6 +118,49 @@ final class PostgresTable[K, S <: Product] private (
       batchSize = batchSize,
     )
 
+  /** Read rows using the caller's connection. Missing keys are omitted and large inputs are batched.
+    *
+    * @param session
+    *   caller's database connection
+    * @param keys
+    *   keys to load; duplicate keys are ignored
+    * @return
+    *   existing rows, without an implied order
+    */
+  def fetch[F[_]: MonadThrow](session: Session[F], keys: List[K]): F[List[S]] =
+    keys.distinct
+      .grouped(batchSize)
+      .toList
+      .traverse(chunk => session.execute(findManyQuery(chunk.size))(chunk))
+      .map(_.flatten)
+
+  /** Save rows using the caller's connection and transaction. Existing keys are replaced.
+    *
+    * @param session
+    *   caller's database connection
+    * @param states
+    *   rows to save, with one row per key
+    * @return
+    *   `Unit` when every batch is saved
+    */
+  def upsert[F[_]: MonadThrow](session: Session[F], states: List[S]): F[Unit] =
+    states.grouped(batchSize).toList.traverse_(chunk => session.execute(upsertManyCommand(chunk.size))(chunk).void)
+
+  /** Remove keys using the caller's connection and transaction. Missing keys are ignored.
+    *
+    * @param session
+    *   caller's database connection
+    * @param keys
+    *   keys to remove; duplicates are ignored
+    * @return
+    *   `Unit` when every batch is removed
+    */
+  def delete[F[_]: MonadThrow](session: Session[F], keys: List[K]): F[Unit] =
+    keys.distinct
+      .grouped(batchSize)
+      .toList
+      .traverse_(chunk => session.execute(deleteManyCommand(chunk.size))(chunk).void)
+
   private[postgres] def allQuery: Query[Void, S] =
     Query(
       s"SELECT ${quotedColumns.mkString(", ")} FROM $quotedTable",
@@ -124,6 +168,50 @@ final class PostgresTable[K, S <: Product] private (
       Void.codec,
       row.codec,
     )
+
+  private[postgres] def insertQuery: Query[S, Boolean] =
+    val placeholders = row.codec.sql.runA(1).value
+    Query(
+      s"INSERT INTO $quotedTable (${quotedColumns.mkString(", ")}) VALUES ($placeholders) " +
+        s"ON CONFLICT (${quotedKeyColumns.mkString(", ")}) DO NOTHING RETURNING TRUE",
+      Origin.unknown,
+      row.codec,
+      bool,
+    )
+
+  private[postgres] def updateAssignment[A](name: String, codec: Codec[A], value: A): AppliedFragment =
+    require(!keyFieldNames.contains(name), s"A PostgreSQL update cannot assign key field [$name]")
+    filterValuePredicate(name, codec, value)
+
+  private[postgres] def updateEquality[A](name: String, codec: Codec[A], value: A): AppliedFragment =
+    val column = filterColumn(name, codec)
+    if value == None then sqlFragment(s"$column IS NULL")
+    else filterValuePredicate(name, codec, value)
+
+  private[postgres] def updateLessThan[A](name: String, codec: Codec[A], value: A): AppliedFragment =
+    val column = filterColumn(name, codec)
+    Fragment[A](List(Left(s"$column < "), Right(codec.sql)), codec, Origin.unknown)(value)
+
+  private[postgres] def updateQuery(
+    key: K,
+    assignments: List[AppliedFragment],
+    conditions: List[AppliedFragment],
+  ): AppliedFragment =
+    require(assignments.nonEmpty, "A PostgreSQL update requires at least one assignment")
+    val byKey = Fragment[K](
+      List(Left(s"(${quotedKeyColumns.mkString(", ")}) = ("), Right(keyCodec.sql), Left(")")),
+      keyCodec,
+      Origin.unknown,
+    )(key)
+    val changes = assignments.tail.foldLeft(assignments.head)((all, next) => all |+| sqlFragment(", ") |+| next)
+    val predicate = conditions.foldLeft(byKey)((all, next) => all |+| sqlFragment(" AND ") |+| next)
+    val statement = sqlFragment(s"UPDATE $quotedTable SET ") |+| changes |+|
+      sqlFragment(" WHERE ") |+| predicate |+| sqlFragment(" RETURNING TRUE")
+    require(
+      statement.fragment.encoder.types.size <= Short.MaxValue.toInt,
+      "PostgreSQL update exceeds the protocol parameter limit",
+    )
+    statement
 
   private[postgres] def filterValueQuery[A](
     scalaFieldName: String,
@@ -197,6 +285,36 @@ final class PostgresTable[K, S <: Product] private (
       Origin.unknown,
     )(value)
 
+  private[postgres] def filterGreaterThanPredicate[A](
+    scalaFieldName: String,
+    codec: Codec[A],
+    value: A,
+  ): AppliedFragment =
+    val column = filterColumn(scalaFieldName, codec)
+    Fragment[A](
+      List(Left(s"$column > "), Right(codec.sql)),
+      codec,
+      Origin.unknown,
+    )(value)
+
+  private[postgres] def filterNotEqualPredicate[A](name: String, codec: Codec[A], value: A): AppliedFragment =
+    if value == None then filterNotNullPredicate(name)
+    else Fragment[A](List(Left(s"${filterColumn(name, codec)} <> "), Right(codec.sql)), codec, Origin.unknown)(value)
+
+  private[postgres] def filterBetweenPredicate[A](name: String, codec: Codec[A], from: A, to: A): AppliedFragment =
+    val bounds = codec *: codec
+    Fragment[(A, A)](
+      List(Left(s"${filterColumn(name, codec)} BETWEEN "), Right(codec.sql), Left(" AND "), Right(codec.sql)),
+      bounds,
+      Origin.unknown,
+    )((from, to))
+
+  private[postgres] def filterSelectionPredicate[F[_], A](
+    name: String,
+    selection: PostgresSelection[F, A],
+  ): AppliedFragment =
+    sqlFragment(s"${filterColumn(name, selection.codec)} IN (") |+| selection.statement |+| sqlFragment(")")
+
   private[postgres] def filterValuesPredicate[A](
     scalaFieldName: String,
     codec: Codec[A],
@@ -224,20 +342,84 @@ final class PostgresTable[K, S <: Product] private (
     sqlFragment(s"${filterColumn(scalaFieldName)} IS NOT NULL")
 
   private[postgres] def filterQuery(predicates: List[AppliedFragment]): AppliedFragment =
-    require(predicates.nonEmpty, "A generated PostgreSQL filter query requires at least one predicate")
+    selectQuery(predicates, Nil, None, None)
 
-    val conjunction = predicates.tail.foldLeft(predicates.head) { (combined, predicate) =>
-      combined |+| sqlFragment(" AND ") |+| predicate
+  private def predicates(plan: PostgresFilterPlan): List[AppliedFragment] =
+    if plan.matchesNothing then List(sqlFragment("FALSE"))
+    else
+      plan.clauses.map { clause =>
+        clause.alternatives match
+          case single :: Nil => single
+          case alternatives  =>
+            val disjunction = alternatives.tail.foldLeft(alternatives.head) { (combined, alternative) =>
+              combined |+| sqlFragment(" OR ") |+| alternative
+            }
+            sqlFragment("(") |+| disjunction |+| sqlFragment(")")
+      }
+
+  private[postgres] def filterQuery(plan: PostgresFilterPlan): AppliedFragment =
+    selectQuery(predicates(plan), plan.ordering, plan.limit, plan.offset)
+
+  private[postgres] def selectionQuery[A](name: String, codec: Codec[A], plan: PostgresFilterPlan): AppliedFragment =
+    selectQuery(predicates(plan), plan.ordering, plan.limit, plan.offset, Some(filterColumn(name, codec)))
+
+  private[postgres] def countQuery(plan: PostgresFilterPlan): AppliedFragment =
+    selectQuery(predicates(plan), Nil, None, None, Some("count(*)"))
+
+  private[postgres] def countByQuery[A](name: String, codec: Codec[A], plan: PostgresFilterPlan): AppliedFragment =
+    val column = filterColumn(name, codec)
+    selectQuery(predicates(plan), Nil, None, None, Some(s"$column, count(*)")) |+| sqlFragment(s" GROUP BY $column")
+
+  private[postgres] def deleteQuery(plan: PostgresFilterPlan): AppliedFragment =
+    require(!plan.hasQueryOptions, "A PostgreSQL filtered delete cannot have ordering, a limit, or an offset")
+    val conditions = predicates(plan)
+    val base = sqlFragment(s"DELETE FROM $quotedTable")
+    val applied = conditions match
+      case Nil           => base
+      case first :: rest =>
+        base |+| sqlFragment(" WHERE ") |+|
+          rest.foldLeft(first)((all, next) => all |+| sqlFragment(" AND ") |+| next)
+    checkParameterLimit(applied)
+    applied
+
+  private def selectQuery(
+    predicates: List[AppliedFragment],
+    ordering: List[PostgresOrdering],
+    limit: Option[Int],
+    offset: Option[Long],
+    selection: Option[String] = None,
+  ): AppliedFragment =
+    val select = sqlFragment(s"SELECT ${selection.getOrElse(quotedColumns.mkString(", "))} FROM $quotedTable")
+    val filtered = predicates match
+      case Nil           => select
+      case first :: rest =>
+        val conjunction = rest.foldLeft(first) { (combined, predicate) =>
+          combined |+| sqlFragment(" AND ") |+| predicate
+        }
+        select |+| sqlFragment(" WHERE ") |+| conjunction
+    val ordered =
+      if ordering.isEmpty then filtered
+      else
+        val columns = ordering.map { order =>
+          val direction = if order.descending then "DESC" else "ASC"
+          s"${filterColumn(order.scalaFieldName)} $direction"
+        }
+        filtered |+| sqlFragment(columns.mkString(" ORDER BY ", ", ", ""))
+    val limited = limit.fold(ordered) { count =>
+      ordered |+| Fragment[Int](List(Left(" LIMIT "), Right(int4.sql)), int4, Origin.unknown)(count)
     }
-    val applied =
-      sqlFragment(s"SELECT ${quotedColumns.mkString(", ")} FROM $quotedTable WHERE ") |+| conjunction
+    val applied = offset.fold(limited) { count =>
+      limited |+| Fragment[Long](List(Left(" OFFSET "), Right(int8.sql)), int8, Origin.unknown)(count)
+    }
 
+    checkParameterLimit(applied)
+    applied
+
+  private def checkParameterLimit(applied: AppliedFragment): Unit =
     require(
       applied.fragment.encoder.types.size <= Short.MaxValue.toInt,
       s"PostgreSQL filter query contains [${applied.fragment.encoder.types.size}] parameters, exceeding the protocol limit",
     )
-
-    applied
 
   private[postgres] def findManyQuery(size: Int): Query[List[K], S] =
     require(size > 0, "A generated PostgreSQL find query requires at least one key")
@@ -302,11 +484,22 @@ final class PostgresTable[K, S <: Product] private (
     val index = row.fields.indexWhere(_.scalaName == scalaFieldName)
     require(index >= 0, s"PostgreSQL filter references unknown state field [$scalaFieldName]")
     require(
-      codec.types == row.codec.types(index) :: Nil,
+      codec.types == row.codec.types(index) :: Nil ||
+        (codec.types.size == 1 && Set("text", "varchar").contains(codec.types.head.name.takeWhile(_ != '(')) &&
+          Set("text", "varchar").contains(row.codec.types(index).name.takeWhile(_ != '('))),
       s"PostgreSQL filter codec [${codec.types.mkString(", ")}] does not match row codec " +
         s"[${row.codec.types(index)}] for field [$scalaFieldName]",
     )
     SqlIdentifier.column(columns(index))
+
+  private[postgres] def mappedFieldCodec[A](name: String, codec: Codec[A]): Codec[A] =
+    filterColumn(name, codec)
+    val fieldType = row.codec.types(row.fields.indexWhere(_.scalaName == name))
+    new Codec[A]:
+      override val types = List(fieldType)
+      override val sql = codec.sql
+      override def encode(value: A) = codec.encode(value)
+      override def decode(offset: Int, values: List[Option[String]]) = codec.decode(offset, values)
 
   private def copy(
     batchSize: Int = batchSize,

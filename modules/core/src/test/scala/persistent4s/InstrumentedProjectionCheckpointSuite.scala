@@ -54,7 +54,7 @@ object InstrumentedProjectionCheckpointSuite extends SimpleIOSuite:
     for
       ref          <- Ref.of[IO, Map[String, ProjectionCheckpointState]](Map.empty)
       instrumented <- InstrumentedProjectionCheckpoint.make[IO](FakeCheckpoint(ref))
-      state         = ProjectionCheckpointState("proj-a", 5L, running = true, None)
+      state         = ProjectionCheckpointState("proj-a", ReadCursor(0L, 5L), running = true, None)
       _            <- instrumented.save(state)
       stored       <- ref.get
     yield expect(stored.get("proj-a").contains(state))
@@ -65,7 +65,7 @@ object InstrumentedProjectionCheckpointSuite extends SimpleIOSuite:
       ref          <- Ref.of[IO, Map[String, ProjectionCheckpointState]](Map.empty)
       inner         = FakeCheckpoint(ref)
       instrumented <- InstrumentedProjectionCheckpoint.make[IO](inner)
-      state         = ProjectionCheckpointState("proj-b", 3L, running = true, None)
+      state         = ProjectionCheckpointState("proj-b", ReadCursor(0L, 3L), running = true, None)
       _            <- inner.save(state)
       loaded       <- instrumented.load("proj-b")
     yield expect(loaded.contains(state))
@@ -84,8 +84,8 @@ object InstrumentedProjectionCheckpointSuite extends SimpleIOSuite:
       ref          <- Ref.of[IO, Map[String, ProjectionCheckpointState]](Map.empty)
       inner         = FakeCheckpoint(ref)
       instrumented <- InstrumentedProjectionCheckpoint.make[IO](inner)
-      stateA        = ProjectionCheckpointState("proj-a", 1L, running = true, None)
-      stateB        = ProjectionCheckpointState("proj-b", 2L, running = false, Some("err"))
+      stateA        = ProjectionCheckpointState("proj-a", ReadCursor(0L, 1L), running = true, None)
+      stateB        = ProjectionCheckpointState("proj-b", ReadCursor(0L, 2L), running = false, Some("err"))
       _            <- inner.save(stateA) *> inner.save(stateB)
       all          <- instrumented.loadAll()
     yield expect(all.toSet == Set(stateA, stateB))
@@ -94,7 +94,7 @@ object InstrumentedProjectionCheckpointSuite extends SimpleIOSuite:
   test("save propagates an inner failure") {
     for
       instrumented <- InstrumentedProjectionCheckpoint.make[IO](new FailingCheckpoint)
-      result       <- instrumented.save(ProjectionCheckpointState("proj-c", 0L, running = true, None)).attempt
+      result       <- instrumented.save(ProjectionCheckpointState("proj-c", ReadCursor(0L, 0L), running = true, None)).attempt
     yield expect(result.isLeft)
   }
 

@@ -18,13 +18,10 @@ package persistent4s
 
 import scala.reflect.ClassTag
 
-/** Stable storage identity and current schema version for an event type `E`.
+/** Event name, version, and optional scopes for an event type `E`.
   *
-  * Unlike [[EventTypeName.of]], the identifier is not derived from a Scala class name and therefore survives class and
-  * package renames. Versions start at `1` and are incremented whenever persisted payloads require an upcast before they
-  * can be decoded as the current event type.
-  *
-  * Aliases allow an existing stored identifier to be migrated to a stable identifier without rewriting old rows.
+  * The default uses the event's class name and version `1`. Define a custom schema to keep a fixed name when renaming
+  * classes, read older names through aliases, or declare versions and scopes.
   */
 final case class EventSchema[E] private (
   eventType: EventTypeName,
@@ -81,6 +78,15 @@ final case class EventSchema[E] private (
     scopeResolvers.valuesIterator.flatMap(_(event)).toSet
 
 object EventSchema:
+
+  /** Supply a class-name schema when the event has no custom schema.
+    *
+    * @param classTag
+    *   the event's class
+    * @return
+    *   a schema using the simple class name, version `1`, and no declared scopes
+    */
+  given default[E <: Event](using classTag: ClassTag[E]): EventSchema[E] = legacy[E]
 
   /** Define a stable event identifier and its current payload version. */
   def apply[E](eventType: String, version: Int = 1): EventSchema[E] =

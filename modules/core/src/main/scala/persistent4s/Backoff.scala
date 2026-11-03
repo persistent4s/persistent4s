@@ -14,14 +14,14 @@
  * limitations under the License.
  */
 
-package persistent4s.kafka
+package persistent4s
 
 import scala.concurrent.duration.*
 
 import cats.effect.Temporal
 import cats.syntax.all.*
 
-private[kafka] object Backoff:
+private[persistent4s] object Backoff:
 
   /** Supervise `action` with exponential backoff: on failure, sleep then restart, doubling the delay up to `maxDelay`.
     * The delay resets to `initialDelay` after a run that lasted at least `maxDelay` (i.e. one that had recovered), so

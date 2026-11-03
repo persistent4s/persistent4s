@@ -46,7 +46,7 @@ import scala.concurrent.duration.FiniteDuration
   *   the topic a [[Projector]] publishes to after persisting - see [[Projector.run]]
   * @param filter
   *   the target projection's event type filter (see Projection.filter): events the command produces outside this set
-  *   are not waited on, since the projection would never publish for them
+  *   are not waited on, since the projection would never publish for them; empty means every type
   * @param timeout
   *   how long to wait for the projection to catch up before failing
   * @param maxQueued
@@ -65,29 +65,13 @@ final case class SyncCommandHandler[F[_], C, E <: Event, K, PS](
     * catch up in time. The events are appended either way - this only gates the return, it cannot undo the write.
     */
   def runSync(command: C)(using F: Temporal[F]): F[Map[K, Option[PS]]] =
-
-    def awaitAll(
-      stream: Stream[F, (UUID, Either[Throwable, Map[K, Option[PS]]])],
-      ids: Set[UUID],
-    ): F[Map[K, Option[PS]]] =
-      stream.collect { case (id, result) if ids.contains(id) => (id, result) }.evalMap { case (id, result) =>
-        result.liftTo[F].map(id -> _)
-      }
-        .scan((ids, Map.empty[K, Option[PS]])) { case ((remaining, acc), (id, payload)) =>
-          (remaining - id, acc ++ payload)
-        }
-        .find { case (remaining, _) => remaining.isEmpty }
-        .map(_._2)
-        .compile
-        .lastOrError
-
     topic.subscribeAwait(maxQueued).use { stream =>
       for
         envelopes <- execute(command)
-        ids        = envelopes.filter(e => filter.contains(e.metadata.eventType)).map(_.metadata.id).toSet
+        ids        = envelopes.filter(e => filter.isEmpty || filter.contains(e.metadata.eventType)).map(_.metadata.id).toSet
         result    <-
           if ids.isEmpty then F.pure(Map.empty[K, Option[PS]])
-          else F.timeout(awaitAll(stream, ids), timeout)
+          else F.timeout(SyncCommandHandler.awaitAll(stream, ids), timeout)
       yield result
     }
 
@@ -96,6 +80,21 @@ final case class SyncCommandHandler[F[_], C, E <: Event, K, PS](
     execute(command)
 
 object SyncCommandHandler:
+
+  private[persistent4s] def awaitAll[F[_]: Concurrent, K, PS](
+    stream: Stream[F, (UUID, Either[Throwable, Map[K, Option[PS]]])],
+    ids: Set[UUID],
+  ): F[Map[K, Option[PS]]] =
+    stream.collect { case (id, result) if ids.contains(id) => (id, result) }.evalMap { case (id, result) =>
+      result.liftTo[F].map(id -> _)
+    }
+      .scan((ids, Map.empty[K, Option[PS]])) { case ((remaining, acc), (id, payload)) =>
+        (remaining - id, acc ++ payload)
+      }
+      .find { case (remaining, _) => remaining.isEmpty }
+      .map(_._2)
+      .compile
+      .lastOrError
 
   /** Wait on a projection for a [[CommandHandler]]. */
   def fromCommandHandler[F[_]: Concurrent: Tracer, C, S, E <: Event, K, PS](

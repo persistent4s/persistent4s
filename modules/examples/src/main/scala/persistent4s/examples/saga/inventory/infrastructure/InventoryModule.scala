@@ -20,13 +20,17 @@ import cats.effect.*
 import fs2.io.net.Network
 import org.typelevel.log4cats.Logger
 import org.typelevel.log4cats.slf4j.Slf4jLogger
-import org.typelevel.otel4s.metrics.Meter
-import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
+import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
 import pureconfig.ConfigSource
 
 given Tracer[IO] = Tracer.Implicits.noop
 
 given Meter[IO] = Meter.Implicits.noop
+
+given TracerProvider[IO] = TracerProvider.noop[IO]
+
+given MeterProvider[IO] = MeterProvider.noop[IO]
 
 given Logger[IO] = Slf4jLogger.getLogger[IO]
 
@@ -64,10 +68,11 @@ object InventoryModule:
 
   def make: Resource[IO, InventoryModule] =
     for
-      components <- PostgresModule.make[IO, InventoryEvent](eventCodec, pgConfigPath, enableMessageOutbox = true)
+      database   <- PostgresModule.make[IO](pgConfigPath, enableMessageOutbox = true)
+      components <- database.domain(eventCodec)
       store       = components.eventStore
       outbox     <- Resource.eval(
-                  IO.fromOption(components.messageOutbox)(
+                  IO.fromOption(database.messageOutbox)(
                     new IllegalStateException("Message outbox missing despite enableMessageOutbox = true"),
                   ),
                 )
@@ -82,7 +87,7 @@ object InventoryModule:
       metrics <- Resource.eval(CommandHandlerMetrics.make[IO])
       // The *transactional* store, not the instrumented one: replying inside the appending transaction is what
       // `TransactionalMessages` adds, and only the raw PostgreSQL store implements it. Appends on this path therefore
-      // bypass the otel4s instrumentation, which is the trade `Components.transactionalStore` documents.
+      // bypass the otel4s instrumentation, which is the trade `PostgresDomain.transactionalStore` documents.
       _ <- InventoryCommandConsumer
              .stream[IO](subscriber, components.transactionalStore, Topics.InventoryCommands, metrics)
              .compile

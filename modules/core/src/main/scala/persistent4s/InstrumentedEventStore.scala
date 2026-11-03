@@ -28,6 +28,7 @@ import org.typelevel.otel4s.trace.Tracer
   * Emits:
   *   - span `persistent4s.eventstore.append` per append call
   *   - span `persistent4s.eventstore.read_from` per readFrom stream (open for the stream's lifetime)
+  *   - span `persistent4s.eventstore.read_for_projection` per readForProjection call
   *   - span `persistent4s.eventstore.append_unchecked` per appendUnchecked call (reuse the same
   *     `persistent4s.events.appended` counter and `persistent4s.append.duration` histogram as `append`)
   *   - counter `persistent4s.events.appended`
@@ -107,6 +108,27 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
       )
       .flatMap(_ => inner.readFrom(fromPosition, eventFilter, maxEvents).evalTap(_ => eventsRead.add(1L, metricAttrs*)))
 
+  override def readForProjection(
+    after: ReadCursor,
+    eventFilter: EventFilter,
+    maxEvents: Int,
+  ): F[ProjectionRead[A]] =
+    val spanAttrs = spanAttributes(eventFilter)
+    val metricAttrs = metricAttributes(eventFilter)
+    Tracer[F]
+      .spanBuilder("persistent4s.eventstore.read_for_projection")
+      .addAttribute(Attribute("after.commit_group", after.commitGroup))
+      .addAttribute(Attribute("after.position", after.globalPosition))
+      .addAttributes(spanAttrs*)
+      .build
+      .surround(
+        inner.readForProjection(after, eventFilter, maxEvents).flatTap { read =>
+          eventsRead.add(read.events.size.toLong, metricAttrs*)
+        },
+      )
+
+  override def cursorAt(globalPosition: Long): F[ReadCursor] = inner.cursorAt(globalPosition)
+
   private def spanAttributes(f: EventFilter): List[Attribute[String]] =
     List(
       Attribute("filter.tags", f.tags.map(_.value).mkString(",")),
@@ -153,7 +175,7 @@ object InstrumentedEventStore:
   ): F[EventStore[F, A] & EventNotification[F]] =
     make(inner).map { instrumented =>
       new EventStore[F, A] with EventNotification[F]:
-        export instrumented.{append, appendUnchecked, currentRevision, readFrom}
+        export instrumented.{append, appendUnchecked, currentRevision, cursorAt, readForProjection, readFrom}
         override def storageSchema(event: A): Option[EventStorageSchema] = instrumented.storageSchema(event)
         def notification(projectionName: String): fs2.Stream[F, EventStoreNotification] =
           inner.notification(projectionName)

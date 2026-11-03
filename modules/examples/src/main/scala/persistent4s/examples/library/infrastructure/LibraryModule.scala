@@ -24,13 +24,13 @@ import com.comcast.ip4s.*
 import fs2.concurrent.Topic
 import fs2.io.net.Network
 
-import org.typelevel.otel4s.metrics.Meter
-import org.typelevel.otel4s.trace.Tracer
+import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
+import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
 
 import persistent4s.*
-import persistent4s.examples.library.api.ValidationError
+import persistent4s.examples.library.api.ProjectionTimeoutError
 import persistent4s.examples.library.domain.LibraryEvent
-import persistent4s.examples.library.domain.book.{AddBook, BookProjection, BookRepository, BookState}
+import persistent4s.examples.library.domain.book.{BookProjection, BookRepository, BookState}
 import persistent4s.examples.library.domain.borrowing.{BorrowingProjection, BorrowingRepository}
 import persistent4s.examples.library.domain.member.{MemberProjection, MemberRepository}
 import persistent4s.postgres.PostgresModule
@@ -42,6 +42,10 @@ given Tracer[IO] = Tracer.Implicits.noop
 
 given Meter[IO] = Meter.Implicits.noop
 
+given TracerProvider[IO] = TracerProvider.noop[IO]
+
+given MeterProvider[IO] = MeterProvider.noop[IO]
+
 given logger: Logger[IO] = Slf4jLogger.getLogger[IO]
 
 final class LibraryModule private (
@@ -51,7 +55,7 @@ final class LibraryModule private (
   val bookRepository: BookRepository,
   val memberRepository: MemberRepository,
   val borrowingRepository: BorrowingRepository,
-  val addBookSyncHandler: SyncCommandHandler[IO, AddBook, LibraryEvent, UUID, BookState],
+  val syncCommands: SyncCommandRuntime[IO, LibraryEvent],
 )
 
 object LibraryModule:
@@ -62,33 +66,28 @@ object LibraryModule:
   ): Resource[IO, LibraryModule] =
 
     for
-      resources    <- PostgresModule.make[IO, LibraryEvent](LibraryEvent.eventCodec, configPath)
+      database     <- PostgresModule.make[IO](configPath)
+      resources    <- database.domain(LibraryEvent.eventCodec)
       store         = resources.eventStore
       commands      = resources.commandRuntime
-      checkpoint    = resources.checkpoint
-      _            <- MonitoringServer.make(checkpoint, resources.sendNotification, monitoringPort)
-      bookRepo      = BookRepository.make(resources.sessions)
-      memberRepo    = MemberRepository.make(resources.sessions)
-      borrowingRepo = BorrowingRepository.make(resources.sessions)
+      checkpoint    = database.checkpoint
+      _            <- MonitoringServer.make(checkpoint, database.sendNotification, monitoringPort)
+      bookRepo      = BookRepository.make(database.sessions)
+      memberRepo    = MemberRepository.make(database.sessions)
+      borrowingRepo = BorrowingRepository.make(database.sessions)
       bookProj      = BookProjection(bookRepo)
       // AddBook answers with the projected book, so its projection publishes to a topic the command waits on.
       bookTopic <- Resource.eval(Topic[IO, (UUID, Either[Throwable, Map[UUID, Option[BookState]]])])
-      // Each projection's loop runs under leader election. With several instances of this service pointed at the
-      // same database, only the elected leader drives a given projection, so they never race the shared
-      // checkpoint; another instance takes over automatically if the leader stops.
+      // Run one instance while synchronous commands use notifications from this local topic.
       projections <- resources.leaderElectedProjectionRuntime.startAll { registered =>
                        registered.run(bookProj, Some(bookTopic))
                        registered.run(MemberProjection(memberRepo))
                        registered.run(BorrowingProjection(borrowingRepo))
                      }
-      addBookSyncHandler = SyncCommandHandler.fromEventSourced(
-                             AddBook.Handler,
-                             commands,
-                             { case AddBook.Error.AlreadyExists(id) =>
-                               ValidationError(s"Book already exists: $id")
-                             },
-                             bookTopic,
-                             bookProj.filter,
-                             timeout = 5.seconds,
-                           )
-    yield new LibraryModule(store, commands, projections, bookRepo, memberRepo, borrowingRepo, addBookSyncHandler)
+      syncCommands = SyncCommandRuntime.fromTopic(
+                       commands, bookTopic, bookProj.filter, timeout = 5.seconds,
+                       timeoutError = ProjectionTimeoutError(
+                         "The book was created, but its view hasn't caught yet - please retry your read",
+                       ),
+                     )
+    yield new LibraryModule(store, commands, projections, bookRepo, memberRepo, borrowingRepo, syncCommands)

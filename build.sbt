@@ -1,8 +1,8 @@
 import org.typelevel.sbt.gha.{JavaSpec, PermissionValue, Permissions}
 
-ThisBuild / tlBaseVersion          := "0.3"
+ThisBuild / tlBaseVersion          := "0.4"
 ThisBuild / tlMimaPreviousVersions := Set.empty // reset after multi-module restructure
-ThisBuild / scalaVersion           := "3.3.8"
+ThisBuild / scalaVersion           := "3.3.9"
 ThisBuild / tlJdkRelease           := Some(17)
 ThisBuild / organization           := "io.github.persistent4s"
 ThisBuild / organizationName       := "Antonio Jimenez and Bastien Jolidon"
@@ -52,31 +52,33 @@ Global / onChangedBuildSource := ReloadOnSourceChanges
 Global / semanticdbEnabled    := true // for metals
 
 // Versions
-val CatsEffectV = "3.7.0"
+val CatsEffectV = "3.7.1"
 
-val Fs2V = "3.13.0"
+val Fs2V = "3.14.0"
 
 val SkunkV = "2.0.0-RC3"
 
-val CirceV = "0.14.16"
+val CirceV = "0.14.17"
 
 val Log4CatsV = "2.8.0"
 
 val Otel4sV = "1.1.0"
 
-val LogbackV = "1.6.3"
+val OtelInstrumentationV = "2.31.1-alpha"
+
+val LogbackV = "1.6.6"
 
 val TestcontainersV = "1.21.4"
 
-val Fs2KafkaV = "4.0.0"
+val Fs2KafkaV = "4.1.3"
 
 val WeaverV = "0.13.0"
 
-val Http4sV = "0.23.36"
+val Http4sV = "0.23.38"
 
 val Smithy4sV = smithy4s.codegen.BuildInfo.version
 
-val PureconfigV = "0.17.10"
+val PureconfigV = "0.17.11"
 
 lazy val root = (project in file("."))
   .enablePlugins(NoPublishPlugin)
@@ -99,15 +101,17 @@ lazy val postgres = (project in file("modules/postgres"))
   .settings(
     name                 := "persistent4s-postgres",
     libraryDependencies ++= List(
-      "org.tpolecat"          %% "skunk-core"      % SkunkV,
-      "org.tpolecat"          %% "skunk-circe"     % SkunkV,
-      "org.typelevel"         %% "otel4s-core"     % Otel4sV,
-      "org.typelevel"         %% "log4cats-core"   % Log4CatsV,
-      "com.github.pureconfig" %% "pureconfig-core" % PureconfigV,
-      "org.typelevel"         %% "weaver-cats"     % WeaverV         % Test,
-      "ch.qos.logback"         % "logback-classic" % LogbackV        % Test,
-      "org.testcontainers"     % "postgresql"      % TestcontainersV % Test,
-      "org.typelevel"         %% "log4cats-noop"   % Log4CatsV       % Test,
+      "org.tpolecat"                    %% "skunk-core"                                  % SkunkV,
+      "org.tpolecat"                    %% "skunk-circe"                                 % SkunkV,
+      "org.typelevel"                   %% "otel4s-core"                                 % Otel4sV,
+      "io.opentelemetry.instrumentation" % "opentelemetry-instrumentation-api-incubator" % OtelInstrumentationV,
+      "org.typelevel"                   %% "log4cats-core"                               % Log4CatsV,
+      "com.github.pureconfig"           %% "pureconfig-core"                             % PureconfigV,
+      "org.typelevel"                   %% "weaver-cats"                                 % WeaverV         % Test,
+      "ch.qos.logback"                   % "logback-classic"                             % LogbackV        % Test,
+      "org.testcontainers"               % "postgresql"                                  % TestcontainersV % Test,
+      "org.typelevel"                   %% "log4cats-noop"                               % Log4CatsV       % Test,
+      "org.typelevel"                   %% "otel4s-oteljava-testkit"                     % Otel4sV         % Test,
     ),
   )
 

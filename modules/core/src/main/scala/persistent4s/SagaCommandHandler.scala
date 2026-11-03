@@ -43,18 +43,19 @@ trait SagaCommandHandler[C, S, E <: Event] extends CommandHandler[C, S, E]:
     */
   def reply(state: S, command: C, outcome: Either[Throwable, List[E]]): Option[PendingReply]
 
-  /** Encodes [[reply]] and addresses it from [[request]], so a handler never touches [[SagaHeaders]] itself.
+  /** The encoded [[reply]], addressed from [[request]] so a handler never touches [[SagaHeaders]] itself, followed on
+    * an acceptance by the handler's own [[messages]]. A rejection carries the reply alone.
     *
-    * Yields nothing when the request nominated nowhere to answer — a command from something that is not a saga, which
+    * Yields no reply when the request nominated nowhere to answer — a command from something that is not a saga, which
     * is legitimate. That is silent here on purpose: this is pure code with no logger, and [[SagaParticipant]] has
     * already warned about the unaddressed request before dispatching it.
     */
-  final override def messages(
+  final override private[persistent4s] def outgoing(
     state: S,
     command: C,
     outcome: Either[Throwable, List[E]],
   ): Either[Throwable, List[OutgoingMessage]] =
-    reply(state, command, outcome) match
-      case None          => Right(Nil)
-      case Some(pending) =>
-        pending.encoded.map(payload => SagaHeaders.reply(request.message, payload, headers = pending.headers).toList)
+    for
+      answer <- SagaHeaders.answer(request, reply(state, command, outcome))
+      caused <- outcome.fold(_ => Right(Nil), events => messages(state, command, events))
+    yield answer ++ caused

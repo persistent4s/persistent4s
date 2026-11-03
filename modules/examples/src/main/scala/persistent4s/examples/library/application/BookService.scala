@@ -19,31 +19,39 @@ package persistent4s.examples.library.application
 import java.util.UUID
 
 import cats.effect.IO
+import cats.syntax.all.*
 
-import persistent4s.SyncCommandHandler
+import persistent4s.SyncCommandRuntime
 import persistent4s.examples.library.api.*
 import persistent4s.examples.library.domain.LibraryEvent
 import persistent4s.examples.library.domain.book.*
 
 class BookServiceImpl(
   repository: BookRepository,
-  syncHandler: SyncCommandHandler[IO, AddBook, LibraryEvent, UUID, BookState],
-) extends BookService[IO]:
+)(using SyncCommandRuntime[IO, LibraryEvent])
+    extends BookService[IO]:
 
   def addBook(title: String, author: String, totalCopies: Int): IO[AddBookOutput] =
     (for
-      bookId    <- IO(UUID.randomUUID())
-      states    <- syncHandler.runSync(AddBook(bookId, title, author, totalCopies))
-      bookState <- IO.fromOption(states.get(bookId).flatten)(
-                     new Exception(s"BookProjection produced no state for $bookId"),
-                   )
+      bookId <- IO(UUID.randomUUID())
+      _      <- AddBook.Handler
+             .runSync[IO](AddBook(bookId, title, author, totalCopies))
+             .flatMap(_.leftMap { case AddBook.Error.AlreadyExists(id) =>
+               ValidationError(s"Book already exists: $id")
+             }.liftTo[IO])
+      bookState <- repository
+                     .find(bookId)
+                     .flatMap(
+                       IO.fromOption(_)(
+                         new Exception(s"BookProjection produced no state for $bookId"),
+                       ),
+                     )
     yield AddBookOutput(
       BookItem(bookState.bookId.toString(), bookState.title, bookState.author, bookState.totalCopies,
         bookState.availableCopies),
     )).adaptError {
-      case _: java.util.concurrent.TimeoutException =>
-        ProjectionTimeoutError("The book was created, but its view hasn't caught yet - please retry your read")
-      case e =>
+      case error: ProjectionTimeoutError => error
+      case e                             =>
         ValidationError(e.getMessage)
     }
 

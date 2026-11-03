@@ -18,6 +18,7 @@ package persistent4s
 
 import cats.effect.IO
 import cats.effect.Ref
+import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
@@ -78,6 +79,12 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       readFrom(0L, eventFilter, None).compile.toList
         .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[TestEvent]] =
+      ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+    def cursorAt(globalPosition: Long): IO[ReadCursor] =
+      IO.pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
@@ -104,12 +111,75 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
       readFrom(0L, eventFilter, None).compile.toList
         .map(_.lastOption.map(_.metadata.globalPosition).getOrElse(0L))
 
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[TestEvent]] =
+      ProjectionRead.byPosition(readFrom(after.globalPosition, eventFilter, Some(maxEvents)))
+
+    def cursorAt(globalPosition: Long): IO[ReadCursor] =
+      IO.pure(if globalPosition <= 0L then ReadCursor.Start else ReadCursor(0L, globalPosition))
+
     def readFrom(
       fromPosition: Long,
       eventFilter: EventFilter,
       maxEvents: Option[Int] = None,
     ): Stream[IO, EventEnvelope[TestEvent]] =
       Stream.empty
+
+  /** Answers projection reads with values no fallback could produce, so a test can tell they came from here. */
+  final class SentinelStore extends EventStore[IO, TestEvent] with EventNotification[IO]:
+
+    val read: ProjectionRead[TestEvent] = ProjectionRead(
+      List(
+        EventEnvelope(
+          EventMetadata(
+            42L,
+            UUID.randomUUID(),
+            Set.empty,
+            EventTypeName.of[TestEvent.Created],
+            false,
+            java.time.Instant.EPOCH,
+            Map.empty,
+            commitGroup = 7L,
+          ),
+          TestEvent.Created("sentinel"),
+        ),
+      ),
+      heldBack = true,
+    )
+
+    def append(
+      eventFilter: EventFilter,
+      expectedIndex: Long,
+      evts: List[PendingEvent[TestEvent]]*,
+    ): IO[List[EventEnvelope[TestEvent]]] = IO.raiseError(new UnsupportedOperationException("not needed"))
+
+    def appendUnchecked(evts: List[PendingEvent[TestEvent]]*): IO[List[EventEnvelope[TestEvent]]] =
+      IO.raiseError(new UnsupportedOperationException("not needed"))
+
+    def currentRevision(eventFilter: EventFilter): IO[Long] = IO.pure(0L)
+
+    def readFrom(
+      fromPosition: Long,
+      eventFilter: EventFilter,
+      maxEvents: Option[Int] = None,
+    ): Stream[IO, EventEnvelope[TestEvent]] = Stream.empty
+
+    def readForProjection(after: ReadCursor, eventFilter: EventFilter, maxEvents: Int): IO[ProjectionRead[TestEvent]] =
+      IO.pure(read)
+
+    def cursorAt(globalPosition: Long): IO[ReadCursor] = IO.pure(ReadCursor(7L, globalPosition))
+
+    def notification(projectionName: String): Stream[IO, EventStoreNotification] = Stream.empty
+
+  test("readForProjection and cursorAt reach the inner store through both make and makeWithNotification") {
+    val inner = SentinelStore()
+    for
+      plain     <- InstrumentedEventStore.make[IO, TestEvent](inner)
+      notifying <- InstrumentedEventStore.makeWithNotification[IO, TestEvent](inner)
+      results   <- List[EventStore[IO, TestEvent]](plain, notifying).traverse { store =>
+                   (store.readForProjection(ReadCursor.Start, EventFilter(), 10), store.cursorAt(5L)).tupled
+                 }
+    yield expect(clue(results) == List.fill(2)((inner.read, ReadCursor(7L, 5L))))
+  }
 
   test("append delegates to inner store") {
     for

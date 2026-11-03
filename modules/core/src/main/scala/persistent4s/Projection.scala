@@ -105,12 +105,12 @@ trait Projection[F[_]: Applicative, A <: Event, K, S]:
   /** Atomically persist state and checkpoint when the repository supports [[AtomicRepository]]. */
   final private[persistent4s] def persistStatesAtomically(
     states: Map[K, Option[S]],
-    expectedPosition: Long,
+    expected: ReadCursor,
     checkpoint: ProjectionCheckpointState,
   ): Option[F[Unit]] =
     val toDelete = states.collect { case (key, None) => key }.toList
     val toUpsert = states.collect { case (key, Some(state)) => key -> state }.toMap
-    repository.atomicPersist(ProjectionCommit(toUpsert, toDelete, expectedPosition, checkpoint))
+    repository.atomicPersist(ProjectionCommit(toUpsert, toDelete, expected, checkpoint))
 
   /** View this projection as one over a wider event type `B >: A`. Events that are not actually `A` are ignored (no
     * key, no state change).
