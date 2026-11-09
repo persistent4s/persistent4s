@@ -120,6 +120,7 @@ final case class EventSchemaMismatch(
       s"Event schema mismatch for $eventClass: handler declared ${declared.eventType.value}@${declared.version}, " +
         s"but the store codec uses ${storage.eventType.value}@${storage.version}",
     )
+    with Persistent4sFailure
 
 /** A legacy [[EventCodec]] was asked to decode a version it cannot evolve. */
 final case class UnsupportedEventVersion(
@@ -128,3 +129,4 @@ final case class UnsupportedEventVersion(
 ) extends IllegalArgumentException(
       s"Event ${eventType.value} has unsupported schema version $version",
     )
+    with Persistent4sFailure

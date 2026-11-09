@@ -27,10 +27,12 @@ import cats.syntax.all.*
 /** Raised by a strict `create` handler when the event expects a missing state but one already exists. */
 final case class ProjectionStateAlreadyExists(eventType: EventTypeName)
     extends IllegalStateException(s"Projection state already exists while handling ${eventType.value}")
+    with Persistent4sFailure
 
 /** Raised by an `update` handler when the event expects an existing state but none exists. */
 final case class ProjectionStateNotFound(eventType: EventTypeName)
     extends IllegalStateException(s"Projection state does not exist while handling ${eventType.value}")
+    with Persistent4sFailure
 
 /** Raised when an envelope's stored event type points to a handler for a different payload class. */
 final case class EventPayloadTypeMismatch(
@@ -40,6 +42,7 @@ final case class EventPayloadTypeMismatch(
 ) extends IllegalArgumentException(
       s"Event ${eventType.value} expects payload $expectedClass but received $actualClass",
     )
+    with Persistent4sFailure
 
 /** A handler registered by an [[EventSourcedProjection]]. Use the projection's handler DSL to create one. */
 final class EventHandler[F[_], A <: Event, K, S] private (

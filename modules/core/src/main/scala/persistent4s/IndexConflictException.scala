@@ -33,3 +33,4 @@ final case class IndexConflictException(
 ) extends RuntimeException(
       s"Index conflict: expected $expectedIndex, actual $actualIndex",
     )
+    with Persistent4sFailure

@@ -407,7 +407,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
     else
       codec.encodeWithSchema(pending.payload) match
         case Left(error) =>
-          Async[F].raiseError(new RuntimeException(s"EventCodec failed to encode event: ${error.getMessage}", error))
+          Async[F].raiseError(EventEncodingFailed(pending.payload.getClass.getName, error))
         case Right(encoded) =>
           parseJson(encoded.payload) match
             case Left(error)        => Async[F].raiseError(error)

@@ -38,10 +38,11 @@ import persistent4s.{
   EventStoreNotification,
   InstrumentedEventStore,
   InstrumentedProjectionCheckpoint,
+  Persistent4sFailure,
   ProjectionCheckpoint,
 }
 
-sealed trait PostgresModuleError extends Throwable
+sealed trait PostgresModuleError extends Persistent4sFailure
 
 object PostgresModuleError:
 
