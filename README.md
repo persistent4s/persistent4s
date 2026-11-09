@@ -140,7 +140,9 @@ AddBook.Handler.runSync[IO](command)
 ```
 
 It returns the same `Either[AddBook.Error, List[EventEnvelope[LibraryEvent]]]` as `run`, after the selected projection
-has saved the command's events. Typed rejections stay `Left`; command and projection errors remain unchanged.
+has saved the command's events. Typed rejections stay `Left` and command errors remain unchanged. A projection that
+fails on one of the events raises `ProjectionEventFailed`, with the projection's error as its cause; a projection that
+does not catch up in time raises `ProjectionCatchUpTimeout`. In both cases the events are already saved.
 
 Configure the shared runtime once at startup and pass it as a given to the service:
 
@@ -363,6 +365,16 @@ and queries mixing literals with parameters can still contain values, so applica
 those fields before export. Database duration and pool wait metrics remain available. Applications
 control sampling, including whether background database operations should start their own traces,
 through their telemetry SDK.
+
+Failures are reported with an `error.type` attribute: the SQLSTATE code for PostgreSQL errors, such as
+`53200` when the server is out of memory, and the class name otherwise. Projection failures are named
+after the error that caused them.
+
+| Metric | Attributes | Meaning |
+| --- | --- | --- |
+| `persistent4s.eventstore.errors` | `operation`, `error.type`, event filter | Failed event store operations, excluding concurrency conflicts |
+| `persistent4s.projector.paused` | `projection.name`, `error.type` | Times a projection paused on an error |
+| `persistent4s.projector.failed` | `projection.name` | 1 while a projection is paused by an error, until it is resumed |
 
 ## Design principles
 

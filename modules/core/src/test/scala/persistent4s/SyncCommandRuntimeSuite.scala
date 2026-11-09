@@ -231,7 +231,8 @@ object SyncCommandRuntimeSuite extends SimpleIOSuite:
       runtime      = SyncCommandRuntime.fromTopic(commands, topic, createdTypes, 20.millis)
       result      <- run(Record("a"))(using runtime).attempt
       subscribers <- topic.subscribers.head.compile.lastOrError
-    yield expect(result.left.exists(_.isInstanceOf[TimeoutException])) and expect(subscribers == 0)
+    yield expect(result.left.exists(_.isInstanceOf[ProjectionCatchUpTimeout])) and
+      expect(result.left.exists(_.isInstanceOf[TimeoutException])) and expect(subscribers == 0)
   }
 
   test("a projection wait timeout uses the configured error without evaluating it on success") {

@@ -88,11 +88,12 @@ lazy val core = (project in file("modules/core"))
   .settings(
     name                 := "persistent4s-core",
     libraryDependencies ++= List(
-      "org.typelevel" %% "cats-effect"   % CatsEffectV,
-      "co.fs2"        %% "fs2-core"      % Fs2V,
-      "org.typelevel" %% "log4cats-core" % Log4CatsV,
-      "org.typelevel" %% "otel4s-core"   % Otel4sV,
-      "org.typelevel" %% "weaver-cats"   % WeaverV % Test,
+      "org.typelevel" %% "cats-effect"             % CatsEffectV,
+      "co.fs2"        %% "fs2-core"                % Fs2V,
+      "org.typelevel" %% "log4cats-core"           % Log4CatsV,
+      "org.typelevel" %% "otel4s-core"             % Otel4sV,
+      "org.typelevel" %% "weaver-cats"             % WeaverV % Test,
+      "org.typelevel" %% "otel4s-oteljava-testkit" % Otel4sV % Test,
     ),
   )
 

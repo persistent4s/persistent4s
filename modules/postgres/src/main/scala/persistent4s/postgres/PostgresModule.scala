@@ -38,10 +38,11 @@ import persistent4s.{
   EventStoreNotification,
   InstrumentedEventStore,
   InstrumentedProjectionCheckpoint,
+  Persistent4sFailure,
   ProjectionCheckpoint,
 }
 
-sealed trait PostgresModuleError extends Throwable
+sealed trait PostgresModuleError extends Persistent4sFailure
 
 object PostgresModuleError:
 
@@ -131,7 +132,7 @@ final class PostgresModule[F[_]: Async: Logger: Tracer: Meter: SecureRandom] pri
     for
       _     <- if outbox then enableOutbox else Resource.unit[F]
       raw    = PostgresEventStore[F, A](sessions, codec, notificationHub, outboxEnabled = outbox)
-      store <- Resource.eval(InstrumentedEventStore.makeWithNotification[F, A](raw))
+      store <- Resource.eval(InstrumentedEventStore.makeWithNotification[F, A](raw, PostgresErrorType.sqlState))
     yield PostgresDomain(
       this,
       store,

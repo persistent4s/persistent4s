@@ -29,14 +29,17 @@ import fs2.concurrent.Topic
 /** Raised before startup when two registered projections share a checkpoint name. */
 final case class DuplicateProjectionNames(names: List[String])
     extends IllegalArgumentException(s"Duplicate projection names: ${names.mkString(", ")}")
+    with Persistent4sFailure
 
 /** Raised when a projection stream completes even though a running projector is expected to be long-lived. */
 final case class ProjectionTerminatedUnexpectedly(projectionName: String)
     extends RuntimeException(s"Projection $projectionName terminated unexpectedly")
+    with Persistent4sFailure
 
 /** Adds the projection name to an unexpected stream failure. */
 final case class ProjectionExecutionFailed(projectionName: String, cause: Throwable)
     extends RuntimeException(s"Projection $projectionName failed: ${cause.getMessage}", cause)
+    with Persistent4sFailure
 
 final private[persistent4s] case class RegisteredProjection[F[_]](
   name: String,

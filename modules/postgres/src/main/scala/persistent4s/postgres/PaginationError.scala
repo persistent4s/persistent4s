@@ -16,12 +16,14 @@
 
 package persistent4s.postgres
 
+import persistent4s.Persistent4sFailure
+
 /** Invalid pagination arguments rejected before querying PostgreSQL.
   *
   * @param message
   *   explanation of the invalid argument
   */
-enum PaginationError(message: String) extends IllegalArgumentException(message):
+enum PaginationError(message: String) extends IllegalArgumentException(message) with Persistent4sFailure:
 
   /** The requested row count is negative.
     *
