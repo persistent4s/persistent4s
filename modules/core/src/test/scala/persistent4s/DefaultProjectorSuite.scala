@@ -638,10 +638,15 @@ object DefaultProjectorSuite extends SimpleIOSuite:
                          .background
                          .use(_ => stream.head.compile.lastOrError.timeout(5.seconds))
                      }
-    yield expect.all(
-      published._1 == appended.head.metadata.id,
-      published._2.left.toOption.exists(_.getMessage.contains("simulated")),
-    )
+    yield expect(published._1 == appended.head.metadata.id) and
+      (published._2 match
+        case Left(ProjectionEventFailed(name, eventId, cause)) =>
+          expect.all(
+            name == projection.name,
+            eventId == appended.head.metadata.id,
+            cause.getMessage.contains("simulated"),
+          )
+        case other => failure(s"Expected ProjectionEventFailed, got $other"))
   }
 
   test("on partial batch failure: persists progress up to the failed event, pauses the projector with an error") {

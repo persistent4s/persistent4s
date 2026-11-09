@@ -17,7 +17,6 @@
 package persistent4s.postgres
 
 import java.util.UUID
-import java.util.concurrent.TimeoutException
 
 import scala.concurrent.duration.FiniteDuration
 
@@ -39,6 +38,7 @@ import persistent4s.{
   EventStore,
   LeaderElectedProjector,
   Projection,
+  ProjectionCatchUpTimeout,
   ProjectionRuntime,
   Projector,
   SyncCommandRuntime,
@@ -104,14 +104,15 @@ final class PostgresDomain[F[_]: Async: Logger: Tracer: Meter, A <: Event] priva
     * @param timeout
     *   maximum wait after a command saves its events
     * @param timeoutError
-    *   error raised when the projection wait expires; command and projection errors remain unchanged
+    *   error raised when the projection wait expires (default: [[ProjectionCatchUpTimeout]]); command errors remain
+    *   unchanged and projection errors arrive as [[persistent4s.ProjectionEventFailed]]
     * @return
     *   shared runtime for synchronous commands, with managed projection shutdown
     */
   def startSync[K, S](
     projection: Projection[F, A, K, S],
     timeout: FiniteDuration,
-    timeoutError: => Throwable = new TimeoutException("Projection did not catch up in time"),
+    timeoutError: => Throwable = new ProjectionCatchUpTimeout,
   ): Resource[F, SyncCommandRuntime[F, A]] =
     for
       updates <- Resource.eval(Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])])

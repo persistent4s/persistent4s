@@ -140,7 +140,9 @@ AddBook.Handler.runSync[IO](command)
 ```
 
 It returns the same `Either[AddBook.Error, List[EventEnvelope[LibraryEvent]]]` as `run`, after the selected projection
-has saved the command's events. Typed rejections stay `Left`; command and projection errors remain unchanged.
+has saved the command's events. Typed rejections stay `Left` and command errors remain unchanged. A projection that
+fails on one of the events raises `ProjectionEventFailed`, with the projection's error as its cause; a projection that
+does not catch up in time raises `ProjectionCatchUpTimeout`. In both cases the events are already saved.
 
 Configure the shared runtime once at startup and pass it as a given to the service:
 
