@@ -19,6 +19,7 @@ package persistent4s
 import java.util.UUID
 
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
 
 import cats.effect.std.Queue
 import cats.effect.{Deferred, IO, Ref}
@@ -26,6 +27,8 @@ import cats.syntax.all.*
 
 import fs2.Stream
 import fs2.concurrent.Topic
+import io.opentelemetry.api.common.AttributeKey
+import org.typelevel.otel4s.oteljava.testkit.OtelJavaTestkit
 
 import persistent4s.EventStoreNotification.*
 
@@ -700,6 +703,44 @@ object DefaultProjectorSuite extends SimpleIOSuite:
       saved.get("tracking").exists(!_.running),                              // projector is paused
       saved.get("tracking").flatMap(_.error).exists(_.contains("simulated")), // error recorded in checkpoint
     )
+  }
+
+  test("a pause is counted with its error type and reported as failed while it lasts") {
+    OtelJavaTestkit.inMemory[IO]().use { testkit =>
+      def points(name: String) =
+        testkit.collectMetrics.map(_.filter(_.getName == name).flatMap { metric =>
+          (metric.getLongSumData.getPoints.asScala ++ metric.getLongGaugeData.getPoints.asScala).toList
+        })
+      for
+        meter      <- testkit.meterProvider.get("projector-test")
+        store      <- InMemoryStore.make[TestEvent]
+        checkpoint <- InMemoryCheckpoint.make
+        handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+        states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+        projection  = trackingProjection(handled, states, failOnPosition = Some(1L))
+        _          <- seed(store, (Set(entityTag("a")), TestEvent.Created("a")))
+        recorded   <- {
+          given Meter[IO] = meter
+          DefaultProjector(store, checkpoint).run(projection).compile.drain.background.use { _ =>
+            waitUntil(points("persistent4s.projector.paused").map(_.nonEmpty)).timeout(2.seconds) *>
+              (points("persistent4s.projector.paused"), points("persistent4s.projector.failed")).tupled
+          }
+        }
+        (paused, failed) = recorded
+      yield expect(
+        paused.map(point =>
+          (
+            point.getValue,
+            point.getAttributes.get(AttributeKey.stringKey("projection.name")),
+            point.getAttributes.get(AttributeKey.stringKey("error.type")),
+          ),
+        ) == List((1L, "tracking", "java.lang.RuntimeException")),
+      ) and expect(
+        failed.map(point =>
+          (point.getValue, point.getAttributes.get(AttributeKey.stringKey("projection.name"))),
+        ) == List((1L, "tracking")),
+      )
+    }
   }
 
   test("processes events appended after a notification without polling") {

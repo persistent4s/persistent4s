@@ -28,7 +28,7 @@ import org.typelevel.log4cats.noop.NoOpLogger
 import org.typelevel.otel4s.metrics.{Meter, MeterProvider}
 import org.typelevel.otel4s.oteljava.testkit.OtelJavaTestkit
 import org.typelevel.otel4s.trace.{Tracer, TracerProvider}
-import persistent4s.Event
+import persistent4s.{Event, ProjectionEventFailed}
 import persistent4s.circe.CirceEventCodec
 import skunk.codec.all.*
 import skunk.exception.PostgresErrorException
@@ -160,4 +160,16 @@ object PostgresTelemetrySuite extends IOSuite:
           !span.getAttributes.asMap.asScala.keys.exists(_.getKey.startsWith("db.query.parameter.")),
         ),
       )
+  }
+
+  test("PostgreSQL failures are named by SQLSTATE, also when a projection fails on them") { fixture =>
+    for
+      error <- fixture.postgres.module.sessions
+                 .use(_.unique(sql"SELECT 1 / 0".query(int4)))
+                 .attempt
+                 .flatMap(result => IO.fromOption(result.left.toOption)(new AssertionError("Expected a failure")))
+      wrapped = ProjectionEventFailed("orders", java.util.UUID.randomUUID(), error)
+    yield expect(PostgresErrorType.sqlState.name(error) == "22012") and
+      expect(PostgresErrorType.sqlState.name(wrapped) == "22012") and
+      expect(PostgresErrorType.sqlState.name(new RuntimeException("boom")) == "java.lang.RuntimeException")
   }

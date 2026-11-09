@@ -74,14 +74,21 @@ final class PostgresDomain[F[_]: Async: Logger: Tracer: Meter, A <: Event] priva
     CommandRuntime(eventStore, Some(module.snapshotStore))
 
   def projectionRuntime: ProjectionRuntime[F, A] =
-    ProjectionRuntime(exclusive(DefaultProjector(eventStore, module.checkpoint)))
+    ProjectionRuntime(
+      exclusive(DefaultProjector(eventStore, module.checkpoint, errorType = PostgresErrorType.sqlState)),
+    )
 
   /** Like [[projectionRuntime]], but each projection runs under the module's leader election so that several instances
     * of the same service pointed at this database never race a projection's shared checkpoint.
     */
   def leaderElectedProjectionRuntime: ProjectionRuntime[F, A] =
     ProjectionRuntime(
-      exclusive(LeaderElectedProjector(DefaultProjector(eventStore, module.checkpoint), module.leaderElection)),
+      exclusive(
+        LeaderElectedProjector(
+          DefaultProjector(eventStore, module.checkpoint, errorType = PostgresErrorType.sqlState),
+          module.leaderElection,
+        ),
+      ),
     )
 
   /** This domain with `f` applied to its event store, e.g. to add headers to every append. The command runtime, the

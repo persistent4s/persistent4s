@@ -21,11 +21,12 @@ import cats.Applicative
 import cats.effect.Async
 import cats.effect.Deferred
 import cats.effect.Ref
+import cats.effect.Resource
 import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.log4cats.Logger
 import org.typelevel.otel4s.Attribute
-import org.typelevel.otel4s.metrics.{Counter, Histogram, Meter}
+import org.typelevel.otel4s.metrics.{Counter, Histogram, Meter, ObservableGauge}
 import org.typelevel.otel4s.trace.Tracer
 import persistent4s.EventStoreNotification.*
 import fs2.concurrent.Topic
@@ -61,6 +62,8 @@ import java.util.UUID
   * @param heldBackRecheck
   *   how often to re-read while the store holds events back behind a write that has not resolved yet (default: 500
   *   milliseconds)
+  * @param errorType
+  *   names the error that paused a projection in the `persistent4s.projector.paused` metric (default: its class name)
   */
 final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event](
   eventStore: EventStore[F, A] & EventNotification[F],
@@ -69,6 +72,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
   maxBatchPerPass: Int = 10,
   publishTimeout: FiniteDuration = 1.second,
   heldBackRecheck: FiniteDuration = 500.millis,
+  errorType: ErrorType = ErrorType.default,
 ) extends Projector[F, A]:
 
   final private case class Work(
@@ -320,7 +324,7 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
             next = current.copy(running = false, error = Some(formatError(error)))
             _   <- checkpoint.save(next).handleErrorWith(_ => Applicative[F].unit)
             _   <- projectionState.set(next)
-            _   <- pausedCounter.add(1L, projAttr)
+            _   <- pausedCounter.add(1L, projAttr, Attribute("error.type", errorType.name(error)))
           } yield ()
 
         def retryAfterConflict(
@@ -398,10 +402,26 @@ final case class DefaultProjector[F[_]: Async: Logger: Tracer: Meter, A <: Event
                 }
               }
 
-          projector.concurrently(notifications).concurrently(heldBackRechecks)
+          Stream.resource(observeFailure(projectionState, projAttr)) >>
+            projector.concurrently(notifications).concurrently(heldBackRechecks)
         }
       }
   }
+
+  /** Reports 1 while the projection is paused by an error, so a pause stays visible until the projection is resumed. */
+  private def observeFailure(
+    projectionState: Ref[F, ProjectionCheckpointState],
+    projAttr: Attribute[String],
+  ): Resource[F, ObservableGauge] =
+    Meter[F]
+      .observableGauge[Long]("persistent4s.projector.failed")
+      .withDescription("1 while a projection is paused by an error, otherwise 0")
+      .withUnit("{projections}")
+      .createWithCallback { measurement =>
+        projectionState.get.flatMap { state =>
+          measurement.record(if !state.running && state.error.isDefined then 1L else 0L, projAttr)
+        }
+      }
 
   private def makeInstruments: F[(Histogram[F, Long], Histogram[F, Double], Counter[F, Long])] =
     (

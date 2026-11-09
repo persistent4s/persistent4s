@@ -366,6 +366,16 @@ those fields before export. Database duration and pool wait metrics remain avail
 control sampling, including whether background database operations should start their own traces,
 through their telemetry SDK.
 
+Failures are reported with an `error.type` attribute: the SQLSTATE code for PostgreSQL errors, such as
+`53200` when the server is out of memory, and the class name otherwise. Projection failures are named
+after the error that caused them.
+
+| Metric | Attributes | Meaning |
+| --- | --- | --- |
+| `persistent4s.eventstore.errors` | `operation`, `error.type`, event filter | Failed event store operations, excluding concurrency conflicts |
+| `persistent4s.projector.paused` | `projection.name`, `error.type` | Times a projection paused on an error |
+| `persistent4s.projector.failed` | `projection.name` | 1 while a projection is paused by an error, until it is resumed |
+
 ## Design principles
 
 - **Purely functional** — built on cats-effect `IO` and fs2 `Stream`
