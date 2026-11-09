@@ -18,8 +18,8 @@ package persistent4s
 
 import scala.annotation.tailrec
 
-/** Names a failure for the `error.type` metric attribute. Names must come from a small, fixed set, such as class names or
-  * database error codes, so that they can be used as metric labels.
+/** Names a failure for the `error.type` metric attribute. Names must come from a small, fixed set, such as class names
+  * or database error codes, so that they can be used as metric labels.
   */
 trait ErrorType:
 
