@@ -69,8 +69,8 @@ final private case class EncodedStorageRow(
   * notifications for horizontal scaling. They are received through a [[PostgresNotificationHub]], so every projection
   * of the process shares one listening session.
   *
-  * @param pool
-  *   a resource for obtaining database sessions
+  * @param sessions
+  *   the session pool and the schema of the event tables
   * @param codec
   *   the event codec for serializing/deserializing events; encoded payload strings must be valid JSON
   * @param notificationHub
@@ -79,7 +79,7 @@ final private case class EncodedStorageRow(
   *   when true, every newly-inserted non-external event also enqueues an outbox row in the same transaction
   */
 final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] private (
-  pool: Resource[F, Session[F]],
+  sessions: PostgresSessions[F],
   codec: EventCodec[A],
   notificationHub: PostgresNotificationHub[F],
   channelId: Identifier,
@@ -90,11 +90,19 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
 
   import PostgresEventStore.*
 
+  private val statements = Statements(sessions.schema)
+
+  private val outboxStatements = PostgresOutbox.Statements(sessions.schema)
+
+  private val messageStatements = PostgresMessageOutbox.Statements(sessions.schema)
+
+  import statements.*
+
   override def storageSchema(event: A): Option[EventStorageSchema] =
     Some(EventStorageSchema(codec.eventType(event), codec.eventVersion(event)))
 
   override def currentRevision(eventFilter: EventFilter): F[Long] =
-    pool.use(session => currentRevision(session, eventFilter.tags, eventFilter.eventTypes))
+    sessions.use(session => currentRevision(session, eventFilter.tags, eventFilter.eventTypes))
 
   override def append(
     eventFilter: EventFilter,
@@ -134,7 +142,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
   ): F[List[EventEnvelope[A]]] =
     if flatEvents.isEmpty && messages.isEmpty then Async[F].pure(List.empty)
     else
-      pool.use { session =>
+      sessions.use { session =>
         session.transaction.use { _ =>
           for
             _ <- occ match
@@ -165,7 +173,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
     val eventTypesList = eventFilter.eventTypes.toList.map(_.value)
     val tagsList = eventFilter.tags.map(_.value).toList
 
-    Stream.resource(pool).flatMap { session =>
+    Stream.resource(sessions.pool).flatMap { session =>
       Stream.resource(session.transaction).flatMap { _ =>
         val rowStream: Stream[F, EventRow] =
           (eventTypesList.isEmpty, tagsList.isEmpty, maxEvents) match
@@ -238,7 +246,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
       eventFilter.tags.toList.map(_.value),
       maxEvents,
     )
-    pool.use { session =>
+    sessions.use { session =>
       session.transaction(TransactionIsolationLevel.RepeatableRead, TransactionAccessMode.ReadOnly).use { _ =>
         for
           rows     <- session.execute(read.fragment.query(eventDecoder))(read.argument)
@@ -251,7 +259,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
   override def cursorAt(globalPosition: Long): F[ReadCursor] =
     if globalPosition <= 0L then Async[F].pure(ReadCursor.Start)
     else
-      pool.use(_.option(cursorAtQuery)(globalPosition)).map {
+      sessions.use(_.option(cursorAtQuery)(globalPosition)).map {
         case Some(commitGroup *: position *: EmptyTuple) => ReadCursor(commitGroup, position)
         case None                                        => ReadCursor.Start
       }
@@ -295,7 +303,7 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
     *   the notification to send
     */
   def notify(n: EventStoreNotification): F[Unit] =
-    pool.use(_.channel(channelId).notify(PostgresNotification.encode(n)))
+    sessions.use(_.channel(channelId).notify(PostgresNotification.encode(n)))
 
   private def checkForConflicts(
     session: Session[F],
@@ -384,11 +392,11 @@ final class PostgresEventStore[F[_]: Async: Logger: SecureRandom, A <: Event] pr
 
   private def enqueueOutbox(session: Session[F], globalPositions: List[Long]): F[Unit] =
     if !outboxEnabled || globalPositions.isEmpty then Async[F].unit
-    else session.prepare(PostgresOutbox.insertCommand).flatMap(cmd => globalPositions.traverse_(cmd.execute))
+    else session.prepare(outboxStatements.insertCommand).flatMap(cmd => globalPositions.traverse_(cmd.execute))
 
   private def enqueueMessages(session: Session[F], messages: List[OutgoingMessage]): F[Unit] =
     if messages.isEmpty then Async[F].unit
-    else session.prepare(PostgresMessageOutbox.insertCommand).flatMap(cmd => messages.traverse_(cmd.execute))
+    else session.prepare(messageStatements.insertCommand).flatMap(cmd => messages.traverse_(cmd.execute))
 
   /** The storage form of a pending event: the schema the codec owns plus its payload as JSON.
     *
@@ -459,8 +467,8 @@ object PostgresEventStore:
 
   /** Create a new PostgresEventStore.
     *
-    * @param pool
-    *   a resource for obtaining database sessions
+    * @param sessions
+    *   the session pool and the schema of the event tables
     * @param codec
     *   the event codec for serializing/deserializing events
     * @param notificationHub
@@ -471,13 +479,13 @@ object PostgresEventStore:
     *   a new PostgresEventStore instance
     */
   def apply[F[_]: Async: Logger: SecureRandom, A <: Event](
-    pool: Resource[F, Session[F]],
+    sessions: PostgresSessions[F],
     codec: EventCodec[A],
     notificationHub: PostgresNotificationHub[F],
     channelId: Identifier = NotificationChannel,
     outboxEnabled: Boolean = false,
   ): PostgresEventStore[F, A] =
-    new PostgresEventStore[F, A](pool, codec, notificationHub, channelId, outboxEnabled)
+    new PostgresEventStore[F, A](sessions, codec, notificationHub, channelId, outboxEnabled)
 
   private val tagsCodec: Codec[Set[Tag]] = jsonb.imap { json =>
     json.asArray
@@ -491,251 +499,253 @@ object PostgresEventStore:
       .getOrElse(Map.empty)
   }(headers => Json.obj(headers.view.mapValues(Json.fromString).toSeq*))
 
-  private[postgres] val eventDecoder: Decoder[EventRow] =
-    int8 *: uuid *: text *: int4 *: tagsCodec *: jsonb *: bool *: headersCodec *: timestamptz *: int8
-
-  private val acquireTagLocksQuery: Query[Arr[String], String] =
-    sql"""
-      SELECT pg_advisory_xact_lock(hashtextextended(t.tag, 0))::text
-      FROM (SELECT unnest($_text) AS tag ORDER BY 1) AS t
-    """.query(text)
-
-  /** The no-op `DO UPDATE` makes a duplicate `event_id` still produce a `RETURNING` row, so the caller always gets the
-    * committed envelope. `xmax = 0` then distinguishes a freshly inserted row from one that already existed: on a real
-    * insert the row carries no updating transaction id, whereas the upsert path leaves `xmax` set. That flag is what
-    * keeps the outbox from re-publishing a redelivered event.
-    */
-  private def insertEventsQuery(
-    n: Int,
-  ): Query[
-    List[UUID *: String *: Int *: Json *: Json *: Boolean *: Json *: EmptyTuple],
-    UUID *: Long *: OffsetDateTime *: Boolean *: Long *: EmptyTuple,
-  ] =
-    val rows = (uuid *: text *: int4 *: jsonb *: jsonb *: bool *: jsonb).values.list(n)
-    sql"""
-      INSERT INTO events (event_id, event_type, event_version, tags, payload, is_external, headers)
-      VALUES $rows
-      ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
-      RETURNING event_id, sequence_number, recorded_at, (xmax = 0) AS inserted, commit_group
-    """.query(uuid *: int8 *: timestamptz *: bool *: int8)
-
-  private def insertEventTagsCommand(
-    n: Int,
-  ): Command[List[String *: Long *: EmptyTuple]] =
-    val pairs = (text *: int8).values.list(n)
-    sql"""
-      INSERT INTO event_tags (tag, sequence_number)
-      VALUES $pairs
-      ON CONFLICT DO NOTHING
-    """.command
-
-  private val lastSequenceQuery: Query[Void, Long] =
-    sql"""
-      SELECT COALESCE(MAX(sequence_number), 0)
-      FROM events
-    """.query(int8)
-
-  private def lastSequenceByEventTypesQuery(
-    numEventTypes: Int,
-  ): Query[List[String], Long] =
-    sql"""
-      SELECT COALESCE(MAX(sequence_number), 0)
-      FROM events
-      WHERE event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-    """.query(int8)
-
-  private val lastSequenceByTagsQuery: Query[Arr[String], Long] =
-    sql"""
-      SELECT COALESCE(MAX(perTag.latest), 0)
-      FROM unnest($_text) AS t(tag)
-      CROSS JOIN LATERAL (
-        SELECT MAX(et.sequence_number) AS latest
-        FROM event_tags et
-        WHERE et.tag = t.tag
-      ) AS perTag
-    """.query(int8)
-
-  private def lastSequenceByBothQuery(
-    numTags: Int,
-    numEventTypes: Int,
-  ): Query[List[String] *: List[String] *: EmptyTuple, Long] =
-    sql"""
-      SELECT COALESCE(MAX(et.sequence_number), 0)
-      FROM event_tags et
-      JOIN events e ON e.sequence_number = et.sequence_number
-      WHERE et.tag = ANY(ARRAY[${text.list(numTags)}])
-        AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-    """.query(int8)
-
   // Widened so PostgresOutbox can reuse the same row shape and decoder for its join against `events`; keeping one
   // definition is what stops the two SELECT column lists from drifting apart.
   private[postgres] type EventRow =
     Long *: UUID *: String *: Int *: Set[Tag] *: Json *: Boolean *: Map[String, String] *: OffsetDateTime *: Long *:
       EmptyTuple
 
-  // A scalar subquery so the horizon is computed once per statement, not once per row.
-  private val horizon: Fragment[Void] =
-    sql"(SELECT pg_snapshot_xmin(pg_current_snapshot())::text::bigint)"
+  private[postgres] val eventDecoder: Decoder[EventRow] =
+    int8 *: uuid *: text *: int4 *: tagsCodec *: jsonb *: bool *: headersCodec *: timestamptz *: int8
 
-  private def projectionReadFragment(
-    after: ReadCursor,
-    eventTypes: List[String],
-    tags: List[String],
-    maxEvents: Int,
-  ): AppliedFragment =
-    val base =
+  final private[postgres] class Statements(schema: PostgresSchema):
+
+    val acquireTagLocksQuery: Query[Arr[String], String] =
+      sql"""
+        SELECT pg_advisory_xact_lock(hashtextextended(t.tag, 0))::text
+        FROM (SELECT unnest($_text) AS tag ORDER BY 1) AS t
+      """.query(text)
+
+    /** The no-op `DO UPDATE` makes a duplicate `event_id` still produce a `RETURNING` row, so the caller always gets
+      * the committed envelope. `xmax = 0` then distinguishes a freshly inserted row from one that already existed: on a
+      * real insert the row carries no updating transaction id, whereas the upsert path leaves `xmax` set. That flag is
+      * what keeps the outbox from re-publishing a redelivered event.
+      */
+    def insertEventsQuery(
+      n: Int,
+    ): Query[
+      List[UUID *: String *: Int *: Json *: Json *: Boolean *: Json *: EmptyTuple],
+      UUID *: Long *: OffsetDateTime *: Boolean *: Long *: EmptyTuple,
+    ] =
+      val rows = (uuid *: text *: int4 *: jsonb *: jsonb *: bool *: jsonb).values.list(n)
+      sql"""
+        INSERT INTO #${schema.events} (event_id, event_type, event_version, tags, payload, is_external, headers)
+        VALUES $rows
+        ON CONFLICT (event_id) DO UPDATE SET event_id = EXCLUDED.event_id
+        RETURNING event_id, sequence_number, recorded_at, (xmax = 0) AS inserted, commit_group
+      """.query(uuid *: int8 *: timestamptz *: bool *: int8)
+
+    def insertEventTagsCommand(
+      n: Int,
+    ): Command[List[String *: Long *: EmptyTuple]] =
+      val pairs = (text *: int8).values.list(n)
+      sql"""
+        INSERT INTO #${schema.eventTags} (tag, sequence_number)
+        VALUES $pairs
+        ON CONFLICT DO NOTHING
+      """.command
+
+    val lastSequenceQuery: Query[Void, Long] =
+      sql"""
+        SELECT COALESCE(MAX(sequence_number), 0)
+        FROM #${schema.events}
+      """.query(int8)
+
+    def lastSequenceByEventTypesQuery(
+      numEventTypes: Int,
+    ): Query[List[String], Long] =
+      sql"""
+        SELECT COALESCE(MAX(sequence_number), 0)
+        FROM #${schema.events}
+        WHERE event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+      """.query(int8)
+
+    val lastSequenceByTagsQuery: Query[Arr[String], Long] =
+      sql"""
+        SELECT COALESCE(MAX(perTag.latest), 0)
+        FROM unnest($_text) AS t(tag)
+        CROSS JOIN LATERAL (
+          SELECT MAX(et.sequence_number) AS latest
+          FROM #${schema.eventTags} et
+          WHERE et.tag = t.tag
+        ) AS perTag
+      """.query(int8)
+
+    def lastSequenceByBothQuery(
+      numTags: Int,
+      numEventTypes: Int,
+    ): Query[List[String] *: List[String] *: EmptyTuple, Long] =
+      sql"""
+        SELECT COALESCE(MAX(et.sequence_number), 0)
+        FROM #${schema.eventTags} et
+        JOIN #${schema.events} e ON e.sequence_number = et.sequence_number
+        WHERE et.tag = ANY(ARRAY[${text.list(numTags)}])
+          AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+      """.query(int8)
+
+    // A scalar subquery so the horizon is computed once per statement, not once per row.
+    val horizon: Fragment[Void] =
+      sql"(SELECT pg_snapshot_xmin(pg_current_snapshot())::text::bigint)"
+
+    def projectionReadFragment(
+      after: ReadCursor,
+      eventTypes: List[String],
+      tags: List[String],
+      maxEvents: Int,
+    ): AppliedFragment =
+      val base =
+        sql"""
+          SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+                 e.headers, e.recorded_at, e.commit_group
+          FROM #${schema.events} e
+          WHERE e.commit_group < $horizon
+            AND (e.commit_group, e.sequence_number) > ($int8, $int8)
+        """.apply(after.commitGroup *: after.globalPosition *: EmptyTuple)
+      val byEventType =
+        if eventTypes.isEmpty then AppliedFragment.empty
+        else sql"AND e.event_type = ANY(ARRAY[${text.list(eventTypes.size)}])".apply(eventTypes)
+      val byTag =
+        if tags.isEmpty then AppliedFragment.empty
+        else sql"""
+            AND EXISTS (
+              SELECT 1
+              FROM #${schema.eventTags} et
+              WHERE et.sequence_number = e.sequence_number
+                AND et.tag = ANY(ARRAY[${text.list(tags.size)}])
+            )
+          """.apply(tags)
+      val page = sql"ORDER BY e.commit_group, e.sequence_number LIMIT $int4".apply(maxEvents)
+      base |+| byEventType |+| byTag |+| page
+
+    /** Visible rows at or past the horizon are exactly those a projection read leaves out to wait for an earlier write. */
+    val heldBackQuery: Query[Void, Boolean] =
+      sql"""
+        SELECT EXISTS (SELECT 1 FROM #${schema.events} WHERE commit_group >= $horizon)
+      """.query(bool)
+
+    val cursorAtQuery: Query[Long, Long *: Long *: EmptyTuple] =
+      sql"""
+        SELECT commit_group, sequence_number
+        FROM #${schema.events}
+        WHERE sequence_number <= $int8
+        ORDER BY sequence_number DESC
+        LIMIT 1
+      """.query(int8 *: int8)
+
+    val readAllQuery: Query[Long, EventRow] =
+      sql"""
+        SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
+               commit_group
+        FROM #${schema.events}
+        WHERE sequence_number > $int8
+        ORDER BY sequence_number ASC
+      """.query(eventDecoder)
+
+    val readAllLimitedQuery: Query[Long *: Int *: EmptyTuple, EventRow] =
+      sql"""
+        SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
+               commit_group
+        FROM #${schema.events}
+        WHERE sequence_number > $int8
+        ORDER BY sequence_number ASC
+        LIMIT $int4
+      """.query(eventDecoder)
+
+    def readByEventTypesQuery(
+      numEventTypes: Int,
+    ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
+      sql"""
+        SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
+               commit_group
+        FROM #${schema.events}
+        WHERE sequence_number > $int8
+          AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+        ORDER BY sequence_number ASC
+      """.query(eventDecoder)
+
+    def readByEventTypesLimitedQuery(
+      numEventTypes: Int,
+    ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
+      sql"""
+        SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
+               commit_group
+        FROM #${schema.events}
+        WHERE sequence_number > $int8 
+          AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+        ORDER BY sequence_number ASC
+        LIMIT $int4
+      """.query(eventDecoder)
+
+    def readByTagsQuery(
+      numTags: Int,
+    ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
       sql"""
         SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
                e.headers, e.recorded_at, e.commit_group
-        FROM events e
-        WHERE e.commit_group < $horizon
-          AND (e.commit_group, e.sequence_number) > ($int8, $int8)
-      """.apply(after.commitGroup *: after.globalPosition *: EmptyTuple)
-    val byEventType =
-      if eventTypes.isEmpty then AppliedFragment.empty
-      else sql"AND e.event_type = ANY(ARRAY[${text.list(eventTypes.size)}])".apply(eventTypes)
-    val byTag =
-      if tags.isEmpty then AppliedFragment.empty
-      else sql"""
+        FROM #${schema.events} e
+        WHERE e.sequence_number > $int8
           AND EXISTS (
             SELECT 1
-            FROM event_tags et
+            FROM #${schema.eventTags} et
             WHERE et.sequence_number = e.sequence_number
-              AND et.tag = ANY(ARRAY[${text.list(tags.size)}])
+              AND et.tag = ANY(ARRAY[${text.list(numTags)}])
           )
-        """.apply(tags)
-    val page = sql"ORDER BY e.commit_group, e.sequence_number LIMIT $int4".apply(maxEvents)
-    base |+| byEventType |+| byTag |+| page
+        ORDER BY e.sequence_number ASC
+      """.query(eventDecoder)
 
-  /** Visible rows at or past the horizon are exactly those a projection read leaves out to wait for an earlier write. */
-  private val heldBackQuery: Query[Void, Boolean] =
-    sql"""
-      SELECT EXISTS (SELECT 1 FROM events WHERE commit_group >= $horizon)
-    """.query(bool)
+    def readByTagsLimitedQuery(
+      numTags: Int,
+    ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
+      sql"""
+        SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+               e.headers, e.recorded_at, e.commit_group
+        FROM #${schema.events} e
+        WHERE e.sequence_number > $int8
+          AND EXISTS (
+            SELECT 1
+            FROM #${schema.eventTags} et
+            WHERE et.sequence_number = e.sequence_number
+              AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+          )
+        ORDER BY e.sequence_number ASC
+        LIMIT $int4
+      """.query(eventDecoder)
 
-  private val cursorAtQuery: Query[Long, Long *: Long *: EmptyTuple] =
-    sql"""
-      SELECT commit_group, sequence_number
-      FROM events
-      WHERE sequence_number <= $int8
-      ORDER BY sequence_number DESC
-      LIMIT 1
-    """.query(int8 *: int8)
+    def readByBothQuery(
+      numEventTypes: Int,
+      numTags: Int,
+    ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
+      sql"""
+        SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+               e.headers, e.recorded_at, e.commit_group
+        FROM #${schema.events} e
+        WHERE e.sequence_number > $int8
+          AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+          AND EXISTS (
+            SELECT 1
+            FROM #${schema.eventTags} et
+            WHERE et.sequence_number = e.sequence_number
+              AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+          )
+        ORDER BY e.sequence_number ASC
+      """.query(eventDecoder)
 
-  private val readAllQuery: Query[Long, EventRow] =
-    sql"""
-      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
-             commit_group
-      FROM events
-      WHERE sequence_number > $int8
-      ORDER BY sequence_number ASC
-    """.query(eventDecoder)
-
-  private val readAllLimitedQuery: Query[Long *: Int *: EmptyTuple, EventRow] =
-    sql"""
-      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
-             commit_group
-      FROM events
-      WHERE sequence_number > $int8
-      ORDER BY sequence_number ASC
-      LIMIT $int4
-    """.query(eventDecoder)
-
-  private def readByEventTypesQuery(
-    numEventTypes: Int,
-  ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
-    sql"""
-      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
-             commit_group
-      FROM events
-      WHERE sequence_number > $int8
-        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-      ORDER BY sequence_number ASC
-    """.query(eventDecoder)
-
-  private def readByEventTypesLimitedQuery(
-    numEventTypes: Int,
-  ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
-    sql"""
-      SELECT sequence_number, event_id, event_type, event_version, tags, payload, is_external, headers, recorded_at,
-             commit_group
-      FROM events
-      WHERE sequence_number > $int8 
-        AND event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-      ORDER BY sequence_number ASC
-      LIMIT $int4
-    """.query(eventDecoder)
-
-  private def readByTagsQuery(
-    numTags: Int,
-  ): Query[Long *: List[String] *: EmptyTuple, EventRow] =
-    sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
-             e.headers, e.recorded_at, e.commit_group
-      FROM events e
-      WHERE e.sequence_number > $int8
-        AND EXISTS (
-          SELECT 1
-          FROM event_tags et
-          WHERE et.sequence_number = e.sequence_number
-            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
-        )
-      ORDER BY e.sequence_number ASC
-    """.query(eventDecoder)
-
-  private def readByTagsLimitedQuery(
-    numTags: Int,
-  ): Query[Long *: List[String] *: Int *: EmptyTuple, EventRow] =
-    sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
-             e.headers, e.recorded_at, e.commit_group
-      FROM events e
-      WHERE e.sequence_number > $int8
-        AND EXISTS (
-          SELECT 1
-          FROM event_tags et
-          WHERE et.sequence_number = e.sequence_number
-            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
-        )
-      ORDER BY e.sequence_number ASC
-      LIMIT $int4
-    """.query(eventDecoder)
-
-  private def readByBothQuery(
-    numEventTypes: Int,
-    numTags: Int,
-  ): Query[Long *: List[String] *: List[String] *: EmptyTuple, EventRow] =
-    sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
-             e.headers, e.recorded_at, e.commit_group
-      FROM events e
-      WHERE e.sequence_number > $int8
-        AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-        AND EXISTS (
-          SELECT 1
-          FROM event_tags et
-          WHERE et.sequence_number = e.sequence_number
-            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
-        )
-      ORDER BY e.sequence_number ASC
-    """.query(eventDecoder)
-
-  private def readByBothLimitedQuery(
-    numEventTypes: Int,
-    numTags: Int,
-  ): Query[Long *: List[String] *: List[String] *: Int *: EmptyTuple, EventRow] =
-    sql"""
-      SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
-             e.headers, e.recorded_at, e.commit_group
-      FROM events e
-      WHERE e.sequence_number > $int8
-        AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
-        AND EXISTS (
-          SELECT 1
-          FROM event_tags et
-          WHERE et.sequence_number = e.sequence_number
-            AND et.tag = ANY(ARRAY[${text.list(numTags)}])
-        )
-      ORDER BY e.sequence_number ASC
-      LIMIT $int4
-    """.query(eventDecoder)
+    def readByBothLimitedQuery(
+      numEventTypes: Int,
+      numTags: Int,
+    ): Query[Long *: List[String] *: List[String] *: Int *: EmptyTuple, EventRow] =
+      sql"""
+        SELECT e.sequence_number, e.event_id, e.event_type, e.event_version, e.tags, e.payload, e.is_external,
+               e.headers, e.recorded_at, e.commit_group
+        FROM #${schema.events} e
+        WHERE e.sequence_number > $int8
+          AND e.event_type = ANY(ARRAY[${text.list(numEventTypes)}])
+          AND EXISTS (
+            SELECT 1
+            FROM #${schema.eventTags} et
+            WHERE et.sequence_number = e.sequence_number
+              AND et.tag = ANY(ARRAY[${text.list(numTags)}])
+          )
+        ORDER BY e.sequence_number ASC
+        LIMIT $int4
+      """.query(eventDecoder)

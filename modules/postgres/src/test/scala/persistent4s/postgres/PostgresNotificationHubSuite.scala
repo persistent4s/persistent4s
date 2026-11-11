@@ -142,7 +142,7 @@ object PostgresNotificationHubSuite extends IOSuite:
 
   test("a subscriber receives notifications sent once LISTEN is registered") { container =>
     module(container, maxConnections = 4).use { components =>
-      hub(components.module.sessions).use { hub =>
+      hub(components.module.sessions.pool).use { hub =>
         hub.listenR(channel).use { messages =>
           for
             id       <- freshId("payload")
@@ -162,7 +162,7 @@ object PostgresNotificationHubSuite extends IOSuite:
 
   test("the hub reconnects after its session is terminated and signals a catch-up") { container =>
     module(container, maxConnections = 4).use { components =>
-      hub(components.module.sessions).use { hub =>
+      hub(components.module.sessions.pool).use { hub =>
         hub.listenR(channel).use { messages =>
           for
             id         <- freshId("reconnect")
@@ -239,7 +239,7 @@ object PostgresNotificationHubSuite extends IOSuite:
 
   test("a projection keeps projecting after the database was unreachable") { container =>
     module(container, maxConnections = 4).use { components =>
-      val sessions = components.module.sessions
+      val sessions = components.module.sessions.pool
       for
         id                     <- freshId("db-outage")
         down                   <- Ref.of[IO, Boolean](false)
@@ -259,8 +259,12 @@ object PostgresNotificationHubSuite extends IOSuite:
                          if event.payload.value == s"$id-before" then before.complete(()).void
                          else after.complete(()).void.whenA(event.payload.value == s"$id-after")
         _ <- hub(flaky).use { hub =>
-               val store = PostgresEventStore[IO, HubEvent](flaky, eventCodec, hub)
-               DefaultProjector(store, PostgresProjectionCheckpoint.make[IO](flaky))
+               val store =
+                 PostgresEventStore[IO, HubEvent](PostgresSessions(flaky, PostgresSchema.Public), eventCodec, hub)
+               DefaultProjector(
+                 store,
+                 PostgresProjectionCheckpoint.make[IO](PostgresSessions(flaky, PostgresSchema.Public)),
+               )
                  .run(projection)
                  .compile
                  .drain
@@ -287,7 +291,7 @@ object PostgresNotificationHubSuite extends IOSuite:
   test("subscribing to a channel the hub does not listen on fails") { container =>
     module(container, maxConnections = 2).use { components =>
       val unknown = Identifier.fromValue("not_listened").fold(error => sys.error(error), identity)
-      hub(components.module.sessions).use { hub =>
+      hub(components.module.sessions.pool).use { hub =>
         hub
           .listenR(unknown)
           .use_

@@ -55,9 +55,33 @@ for
 yield ...
 ```
 
-The module owns what every domain shares: the connection pool (`sessions`), the schema, projection checkpoints,
+The module owns what every domain shares: the connection pool (`sessions`), the tables, projection checkpoints,
 command snapshots, leader election, the message outbox, the saga repository and `sendNotification`. Each domain has
 its own `eventStore`, `transactionalStore`, `commandRuntime`, projection runtimes and `startSync`.
+
+### Schema of the persistent4s tables
+
+By default the module creates its tables (`events`, `event_tags`, `event_outbox`, `message_outbox`,
+`projection_checkpoints`, `command_snapshots`, `leader_leases`, `saga_instances`) in PostgreSQL's `public` schema.
+Set `schema` to keep them apart from the application's own tables:
+
+```hocon
+persistent4s.postgres {
+  host = "localhost"
+  user = "app"
+  password = "secret"
+  database = "app"
+  schema = "persistent4s"
+}
+```
+
+The module creates the schema at startup when it is missing, and every statement it runs names its tables with that
+schema, so the connection's `search_path` does not matter. Application tables stay where the application puts them;
+queries joining both remain plain SQL, e.g. `JOIN persistent4s.events e ON ...`. SQL outside persistent4s that reads
+these tables, such as CDC triggers, must name the schema too.
+
+`module.sessions` is a `PostgresSessions[F]`: the pool (`sessions.pool`, `sessions.use(...)`) together with that
+schema. Repositories, stores and outboxes take it instead of a bare pool, so they always address the module's tables.
 
 All projections and outbox relays of a module receive PostgreSQL notifications through one listening session, opened
 on first use. If that session fails, the module reconnects with exponential backoff (500 ms, doubling up to 5 s) and,
@@ -183,8 +207,8 @@ object BookRepository:
       .derived[BookState]("books")
       .key(_.bookId)
 
-final class BookRepository(pool: Resource[IO, Session[IO]])
-    extends DerivedPostgresRepository[IO, UUID, BookState](pool, BookRepository.table):
+final class BookRepository(sessions: PostgresSessions[IO])
+    extends DerivedPostgresRepository[IO, UUID, BookState](sessions, BookRepository.table):
 
   def findWithCopies(copies: Int): IO[List[BookState]] =
     filterBy(_.availableCopies).is(copies).run
@@ -349,8 +373,8 @@ def forTherapist(therapistId: String): IO[(List[AppointmentState], ReadCursor)] 
 ```
 
 The read must use the supplied session: `find(session, key)`, `findMany(session, keys)`, a filtered query's
-`run(session)`, or any Skunk statement on it. `PostgresProjectionCheckpoint.cursor(session, name)` is available for
-custom read models that manage their own transaction.
+`run(session)`, or any Skunk statement on it. `PostgresProjectionCheckpoint.cursor(session, schema, name)` is
+available for custom read models that manage their own transaction.
 
 ## PostgreSQL telemetry
 

@@ -99,7 +99,10 @@ object PostgresSagaRepositorySuite extends IOSuite:
                   .withUserAndPassword(config.user, config.password)
                   .withDatabase(config.database)
                   .pooled(4)
-      yield Fixture(PostgresSagaRepository[IO](pool, claimTtl = ClaimTtl), pool)
+      yield Fixture(
+        PostgresSagaRepository[IO](PostgresSessions(pool, PostgresSchema.Public), claimTtl = ClaimTtl),
+        pool,
+      )
     }
 
   // ----- schema -----

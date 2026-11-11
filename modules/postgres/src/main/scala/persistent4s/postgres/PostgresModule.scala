@@ -87,20 +87,21 @@ object PostgresModuleError:
       "Another domain of this PostgresModule already enabled the event outbox. Its relay decodes every queued event " +
         "with that domain's codec, so only one domain per module may enable it."
 
-/** Shared PostgreSQL infrastructure for one service: a connection pool, the schema, projection checkpoints, command
+/** Shared PostgreSQL infrastructure for one service: a connection pool, the tables, projection checkpoints, command
   * snapshots, leader election, the message outbox, the saga repository and a single notification listener. None of it
   * depends on an event type, so a service builds one module and then one [[PostgresDomain]] per event type with
   * [[domain]]; every domain shares this module's pool and listening session.
   *
   * `sessions` is exposed for application read model repositories, so event storage, snapshots and atomic projection
-  * commits need no second pool or duplicate configuration.
+  * commits need no second pool or duplicate configuration. It carries the [[PostgresSchema]] the module created its
+  * tables in, which atomic repositories need to commit their checkpoints.
   *
   * Query spans use sanitized SQL summaries; pool and wire-protocol spans are disabled. Bound parameters are excluded
   * from query attributes. Skunk can still include values in exception details or mixed literal/parameter SQL text, so
   * applications must sanitize those fields before export. Providers must come from the application's telemetry SDK.
   *
   * @param sessions
-  *   the shared session pool
+  *   the shared session pool and the schema of the persistent4s tables
   * @param messageOutbox
   *   present only when the module was built with `enableMessageOutbox = true` or `enableSaga = true`; otherwise `None`
   *   and no message outbox table is created
@@ -108,7 +109,7 @@ object PostgresModuleError:
   *   present only when the module was built with `enableSaga = true`
   */
 final class PostgresModule[F[_]: Async: Logger: Tracer: Meter: SecureRandom] private (
-  val sessions: Resource[F, Session[F]],
+  val sessions: PostgresSessions[F],
   val checkpoint: ProjectionCheckpoint[F],
   val snapshotStore: PostgresCommandSnapshotStore[F],
   val leaderElection: PostgresLeaderElection[F],
@@ -175,7 +176,11 @@ final class PostgresModule[F[_]: Async: Logger: Tracer: Meter: SecureRandom] pri
     Resource.make(
       outboxEnabled.getAndSet(true).flatMap { alreadyEnabled =>
         if alreadyEnabled then PostgresModuleError.OutboxAlreadyEnabled.raiseError[F, Unit]
-        else sessions.use(_.execute(PostgresOutbox.createTableCommand)).void.onError(_ => outboxEnabled.set(false))
+        else
+          sessions
+            .use(_.execute(PostgresOutbox.Statements(sessions.schema).createTableCommand))
+            .void
+            .onError(_ => outboxEnabled.set(false))
       },
     )(_ => outboxEnabled.set(false))
 
@@ -217,12 +222,14 @@ object PostgresModule:
     for
       _ <- Resource.eval(
              Logger[F].info(
-               s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database}",
+               s"Connecting to PostgreSQL at ${config.host}:${config.port}/${config.database} " +
+                 s"(persistent4s schema ${config.schema.name})",
              ),
            )
-      pool   <- createSessionPool[F](config)
-      _      <- Resource.eval(initializeDatabase[F](pool, enableMessageOutbox, enableSaga))
-      module <- module[F](pool, enableMessageOutbox, enableSaga)
+      pool    <- createSessionPool[F](config)
+      sessions = PostgresSessions(pool, config.schema)
+      _       <- Resource.eval(initializeDatabase[F](sessions, enableMessageOutbox, enableSaga))
+      module  <- module[F](sessions, enableMessageOutbox, enableSaga)
     yield module
 
   /** Wire the components shared by every domain. `SecureRandom` is built here rather than demanded from the caller, and
@@ -230,25 +237,25 @@ object PostgresModule:
     * single session.
     */
   private def module[F[_]: Async: Logger: Tracer: Meter](
-    pool: Resource[F, Session[F]],
+    sessions: PostgresSessions[F],
     enableMessageOutbox: Boolean,
     enableSaga: Boolean,
   ): Resource[F, PostgresModule[F]] =
     for
       given SecureRandom[F] <- Resource.eval(SecureRandom.javaSecuritySecureRandom[F])
-      notificationHub       <- PostgresNotificationHub.make[F](pool)
+      notificationHub       <- PostgresNotificationHub.make[F](sessions.pool)
       checkpoint            <- Resource.eval(
-                      InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](pool)),
+                      InstrumentedProjectionCheckpoint.make[F](PostgresProjectionCheckpoint.make[F](sessions)),
                     )
       outboxEnabled      <- Resource.eval(Ref.of[F, Boolean](false))
       runningProjections <- Resource.eval(Ref.of[F, Set[String]](Set.empty))
     yield new PostgresModule[F](
-      pool,
+      sessions,
       checkpoint,
-      PostgresCommandSnapshotStore.make[F](pool),
-      PostgresLeaderElection.make[F](pool),
-      if enableMessageOutbox || enableSaga then Some(PostgresMessageOutbox[F](pool, notificationHub)) else None,
-      if enableSaga then Some(PostgresSagaRepository[F](pool)) else None,
+      PostgresCommandSnapshotStore.make[F](sessions),
+      PostgresLeaderElection.make[F](sessions),
+      if enableMessageOutbox || enableSaga then Some(PostgresMessageOutbox[F](sessions, notificationHub)) else None,
+      if enableSaga then Some(PostgresSagaRepository[F](sessions)) else None,
       notificationHub,
       outboxEnabled,
       runningProjections,
@@ -328,37 +335,50 @@ object PostgresModule:
       // misleading. We expose it as `TrustAll` so the config is honest about what it does.
       case PostgresSslMode.TrustAll => SSL.Trusted
 
+  /** The schema is created only when missing: `CREATE SCHEMA IF NOT EXISTS` still requires the CREATE privilege on the
+    * database, which a role using an existing schema, `public` included, may not have.
+    */
   private def initializeDatabase[F[_]: Async: Logger](
-    pool: Resource[F, Session[F]],
+    sessions: PostgresSessions[F],
     enableMessageOutbox: Boolean,
     enableSaga: Boolean,
   ): F[Unit] =
-    pool.use { session =>
+    val schema = sessions.schema
+    val statements = Statements(schema)
+    sessions.use { session =>
       for
-        eventsTableExists <- checkTableExists(session, "events")
+        schemaExists <- session.unique(statements.schemaExistsQuery)(schema.name)
+        _            <- (Logger[F].info(s"Schema ${schema.name} not found, creating it...") *>
+               session.execute(statements.createSchemaCommand)).unlessA(schemaExists)
+        eventsTableExists <- session.unique(statements.tableExistsQuery)(schema.name *: "events" *: EmptyTuple)
         _                 <-
-          if !eventsTableExists then Logger[F].info("Event store schema not found, creating schema...")
-          else Logger[F].info("Event store schema already exists, ensuring required objects are present")
-        _ <- createSchema(session, enableMessageOutbox, enableSaga)
+          if !eventsTableExists then Logger[F].info(s"Event store tables not found in ${schema.name}, creating them...")
+          else
+            Logger[F].info(s"Event store tables already exist in ${schema.name}, ensuring required objects are present")
+        _ <- createTables(session, schema, enableMessageOutbox, enableSaga)
       yield ()
     }
 
-  private def checkTableExists[F[_]: Sync](session: Session[F], tableName: String): F[Boolean] =
-    session.unique(checkTableExistsQuery)(tableName).map(_ > 0)
-
-  private def createSchema[F[_]: Sync](
+  private def createTables[F[_]: Sync](
     session: Session[F],
+    schema: PostgresSchema,
     enableMessageOutbox: Boolean,
     enableSaga: Boolean,
   ): F[Unit] =
+    val statements = Statements(schema)
+    val checkpointStatements = PostgresProjectionCheckpoint.Statements(schema)
+    val messageOutboxStatements = PostgresMessageOutbox.Statements(schema)
+    val sagaStatements = PostgresSagaRepository.Statements(schema)
+    import statements.*
+
     val outboxMessageDdl =
-      if enableMessageOutbox || enableSaga then session.execute(PostgresMessageOutbox.createTableCommand).void
+      if enableMessageOutbox || enableSaga then session.execute(messageOutboxStatements.createTableCommand).void
       else Sync[F].unit
 
     val sagaDdl =
       if enableSaga then
-        session.execute(PostgresSagaRepository.createTableCommand) *>
-          session.execute(PostgresSagaRepository.createDueIndexCommand).void
+        session.execute(sagaStatements.createTableCommand) *>
+          session.execute(sagaStatements.createDueIndexCommand).void
       else Sync[F].unit
 
     session.execute(createTableCommand) *>
@@ -372,96 +392,111 @@ object PostgresModule:
       session.execute(createEventTagsTableCommand) *>
       session.execute(createEventTagsSequenceIndexCommand) *>
       outboxMessageDdl *>
-      session.execute(PostgresProjectionCheckpoint.createTableCommand) *>
-      session.execute(PostgresProjectionCheckpoint.addCommitGroupCommand) *>
-      session.execute(PostgresLeaderElection.createTableCommand) *>
-      session.execute(PostgresCommandSnapshotStore.createTableCommand) *>
+      session.execute(checkpointStatements.createTableCommand) *>
+      session.execute(checkpointStatements.addCommitGroupCommand) *>
+      session.execute(PostgresLeaderElection.Statements(schema).createTableCommand) *>
+      session.execute(PostgresCommandSnapshotStore.Statements(schema).createTableCommand) *>
       sagaDdl
 
-  private val checkTableExistsQuery: Query[String, Long] =
-    sql"""
-      SELECT COUNT(*)
-      FROM information_schema.tables
-      WHERE table_schema = 'public'
-        AND table_name = $text
-    """.query(int8)
+  final private[postgres] class Statements(schema: PostgresSchema):
 
-  private val createTableCommand: Command[Void] =
-    sql"""
-      CREATE TABLE IF NOT EXISTS events (
-        sequence_number BIGSERIAL PRIMARY KEY,
-        event_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
-        event_type      TEXT        NOT NULL,
-        event_version   INTEGER     NOT NULL DEFAULT 1,
-        tags            JSONB       NOT NULL DEFAULT '[]',
-        payload         JSONB       NOT NULL DEFAULT '{}',
-        is_external     BOOLEAN     NOT NULL,
-        headers         JSONB       NOT NULL DEFAULT '{}',
-        recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-        commit_group    BIGINT      NOT NULL DEFAULT (pg_current_xact_id()::text::bigint),
+    val schemaExistsQuery: Query[String, Boolean] =
+      sql"""
+        SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $text)
+      """.query(bool)
 
-        CONSTRAINT unique_event_id UNIQUE (event_id)
-      )
-    """.command
+    val createSchemaCommand: Command[Void] =
+      sql"""
+        CREATE SCHEMA IF NOT EXISTS #${schema.quotedName}
+      """.command
 
-  private val addEventVersionCommand: Command[Void] =
-    sql"""
-      ALTER TABLE events
-      ADD COLUMN IF NOT EXISTS event_version INTEGER NOT NULL DEFAULT 1
-    """.command
+    val tableExistsQuery: Query[String *: String *: EmptyTuple, Boolean] =
+      sql"""
+        SELECT EXISTS (
+          SELECT 1
+          FROM information_schema.tables
+          WHERE table_schema = $text
+            AND table_name = $text
+        )
+      """.query(bool)
 
-  /** Mirrors [[addEventVersionCommand]]: an events table created before author-supplied headers existed must gain the
-    * column in place, or every append would fail against it.
-    */
-  private val addHeadersCommand: Command[Void] =
-    sql"""
-      ALTER TABLE events
-      ADD COLUMN IF NOT EXISTS headers JSONB NOT NULL DEFAULT '{}'
-    """.command
+    val createTableCommand: Command[Void] =
+      sql"""
+        CREATE TABLE IF NOT EXISTS #${schema.events} (
+          sequence_number BIGSERIAL PRIMARY KEY,
+          event_id        UUID        NOT NULL DEFAULT gen_random_uuid(),
+          event_type      TEXT        NOT NULL,
+          event_version   INTEGER     NOT NULL DEFAULT 1,
+          tags            JSONB       NOT NULL DEFAULT '[]',
+          payload         JSONB       NOT NULL DEFAULT '{}',
+          is_external     BOOLEAN     NOT NULL,
+          headers         JSONB       NOT NULL DEFAULT '{}',
+          recorded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+          commit_group    BIGINT      NOT NULL DEFAULT (pg_current_xact_id()::text::bigint),
 
-  /** An events table created before commit groups existed gains the column with 0 for every existing row, which keeps
-    * those rows in position order ahead of every later write. The default is set separately so it only applies to new
-    * rows: each write is then grouped under the id of the transaction that stored it (see [[persistent4s.ReadCursor]]).
-    */
-  private val addCommitGroupCommand: Command[Void] =
-    sql"""
-      ALTER TABLE events
-      ADD COLUMN IF NOT EXISTS commit_group BIGINT NOT NULL DEFAULT 0
-    """.command
+          CONSTRAINT unique_event_id UNIQUE (event_id)
+        )
+      """.command
 
-  private val setCommitGroupDefaultCommand: Command[Void] =
-    sql"""
-      ALTER TABLE events
-      ALTER COLUMN commit_group SET DEFAULT (pg_current_xact_id()::text::bigint)
-    """.command
+    val addEventVersionCommand: Command[Void] =
+      sql"""
+        ALTER TABLE #${schema.events}
+        ADD COLUMN IF NOT EXISTS event_version INTEGER NOT NULL DEFAULT 1
+      """.command
 
-  /** Serves projection reads, which walk the log in (commit_group, sequence_number) order, and the held-back check. */
-  private val createCommitOrderIndexCommand: Command[Void] =
-    sql"""
-      CREATE INDEX IF NOT EXISTS idx_events_commit_order ON events (commit_group, sequence_number)
-    """.command
+    /** Mirrors [[addEventVersionCommand]]: an events table created before author-supplied headers existed must gain the
+      * column in place, or every append would fail against it.
+      */
+    val addHeadersCommand: Command[Void] =
+      sql"""
+        ALTER TABLE #${schema.events}
+        ADD COLUMN IF NOT EXISTS headers JSONB NOT NULL DEFAULT '{}'
+      """.command
 
-  /** Serves projection reads filtered by event type, the filter every projection applies. */
-  private val createEventTypeCommitOrderIndexCommand: Command[Void] =
-    sql"""
-      CREATE INDEX IF NOT EXISTS idx_events_event_type_commit_order ON events (event_type, commit_group, sequence_number)
-    """.command
+    /** An events table created before commit groups existed gains the column with 0 for every existing row, which keeps
+      * those rows in position order ahead of every later write. The default is set separately so it only applies to new
+      * rows: each write is then grouped under the id of the transaction that stored it (see
+      * [[persistent4s.ReadCursor]]).
+      */
+    val addCommitGroupCommand: Command[Void] =
+      sql"""
+        ALTER TABLE #${schema.events}
+        ADD COLUMN IF NOT EXISTS commit_group BIGINT NOT NULL DEFAULT 0
+      """.command
 
-  private val createEventTagsTableCommand: Command[Void] =
-    sql"""
-      CREATE TABLE IF NOT EXISTS event_tags (
-        tag             TEXT   NOT NULL,
-        sequence_number BIGINT NOT NULL REFERENCES events(sequence_number) ON DELETE CASCADE,
-        PRIMARY KEY (tag, sequence_number)
-      )
-    """.command
+    val setCommitGroupDefaultCommand: Command[Void] =
+      sql"""
+        ALTER TABLE #${schema.events}
+        ALTER COLUMN commit_group SET DEFAULT (pg_current_xact_id()::text::bigint)
+      """.command
 
-  private val createEventTypeIndexCommand: Command[Void] =
-    sql"""
-      CREATE INDEX IF NOT EXISTS idx_events_event_type ON events (event_type)
-    """.command
+    /** Serves projection reads, which walk the log in (commit_group, sequence_number) order, and the held-back check. */
+    val createCommitOrderIndexCommand: Command[Void] =
+      sql"""
+        CREATE INDEX IF NOT EXISTS idx_events_commit_order ON #${schema.events} (commit_group, sequence_number)
+      """.command
 
-  private val createEventTagsSequenceIndexCommand: Command[Void] =
-    sql"""
-      CREATE INDEX IF NOT EXISTS idx_event_tags_sequence_number ON event_tags (sequence_number)
-    """.command
+    /** Serves projection reads filtered by event type, the filter every projection applies. */
+    val createEventTypeCommitOrderIndexCommand: Command[Void] =
+      sql"""
+        CREATE INDEX IF NOT EXISTS idx_events_event_type_commit_order ON #${schema.events} (event_type, commit_group, sequence_number)
+      """.command
+
+    val createEventTagsTableCommand: Command[Void] =
+      sql"""
+        CREATE TABLE IF NOT EXISTS #${schema.eventTags} (
+          tag             TEXT   NOT NULL,
+          sequence_number BIGINT NOT NULL REFERENCES #${schema.events}(sequence_number) ON DELETE CASCADE,
+          PRIMARY KEY (tag, sequence_number)
+        )
+      """.command
+
+    val createEventTypeIndexCommand: Command[Void] =
+      sql"""
+        CREATE INDEX IF NOT EXISTS idx_events_event_type ON #${schema.events} (event_type)
+      """.command
+
+    val createEventTagsSequenceIndexCommand: Command[Void] =
+      sql"""
+        CREATE INDEX IF NOT EXISTS idx_event_tags_sequence_number ON #${schema.eventTags} (sequence_number)
+      """.command

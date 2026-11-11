@@ -87,7 +87,7 @@ object PostgresEventSchemaSuite extends IOSuite:
       PostgresModule
         .makeWithConfig[IO](postgresConfig(container))
         .flatMap(_.domain(eventCodec))
-        .map(components => Resources(components.eventStore, components.module.sessions))
+        .map(components => Resources(components.eventStore, components.module.sessions.pool))
     }
 
   private type Container = PostgreSQLContainer[Nothing]
@@ -186,7 +186,11 @@ object PostgresEventSchemaSuite extends IOSuite:
         Left(new UnsupportedOperationException)
 
     PostgresNotificationHub.make[IO](resources.sessions).use { hub =>
-      val store = PostgresEventStore[IO, VersionedEvent](resources.sessions, malformedCodec, hub)
+      val store = PostgresEventStore[IO, VersionedEvent](
+        PostgresSessions(resources.sessions, PostgresSchema.Public),
+        malformedCodec,
+        hub,
+      )
 
       for
         tag    <- IO(Tag("malformed-json", UUID.randomUUID().toString))

@@ -18,20 +18,18 @@ package persistent4s.examples.library.domain.book
 
 import java.util.UUID
 
-import cats.effect.{IO, Resource}
+import cats.effect.IO
 
-import persistent4s.postgres.{DerivedPostgresRepository, PostgresTable}
-
-import skunk.Session
+import persistent4s.postgres.{DerivedPostgresRepository, PostgresSessions, PostgresTable}
 
 final class BookRepository private (
-  pool: Resource[IO, Session[IO]],
-) extends DerivedPostgresRepository[IO, UUID, BookState](pool, BookRepository.table)
+  sessions: PostgresSessions[IO],
+) extends DerivedPostgresRepository[IO, UUID, BookState](sessions, BookRepository.table)
 
 object BookRepository:
 
   private val table: PostgresTable[UUID, BookState] =
     PostgresTable.derived[BookState]("books").key(_.bookId)
 
-  def make(pool: Resource[IO, Session[IO]]): BookRepository =
-    new BookRepository(pool)
+  def make(sessions: PostgresSessions[IO]): BookRepository =
+    new BookRepository(sessions)

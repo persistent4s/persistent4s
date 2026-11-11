@@ -70,7 +70,11 @@ object PostgresGeneratedWriteSuite extends IOSuite:
           ),
         )
         .map(pool =>
-          Resources(pool, DerivedPostgresRepository(pool, stateTable), DerivedPostgresRepository(pool, compositeTable)),
+          Resources(
+            pool,
+            DerivedPostgresRepository(PostgresSessions(pool, PostgresSchema.Public), stateTable),
+            DerivedPostgresRepository(PostgresSessions(pool, PostgresSchema.Public), compositeTable),
+          ),
         )
     }
 
@@ -235,7 +239,7 @@ object PostgresGeneratedWriteSuite extends IOSuite:
     val initial = freshState()
     val unavailablePool =
       Resource.eval(IO.raiseError[Session[IO]](new AssertionError("Unexpected repository connection")))
-    val repository = DerivedPostgresRepository(unavailablePool, stateTable)
+    val repository = DerivedPostgresRepository(PostgresSessions(unavailablePool, PostgresSchema.Public), stateTable)
 
     for
       result <- resources.pool.use { session =>

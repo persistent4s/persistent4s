@@ -16,7 +16,7 @@
 
 package persistent4s.postgres
 
-import cats.effect.{Async, Resource}
+import cats.effect.Async
 import cats.syntax.all.*
 
 import persistent4s.{CommandSnapshotStore, SnapshotId, StoredCommandSnapshot}
@@ -27,13 +27,15 @@ import skunk.implicits.*
 
 /** PostgreSQL-backed command snapshot cache. Older concurrent saves cannot overwrite a newer snapshot position. */
 final class PostgresCommandSnapshotStore[F[_]: Async] private[postgres] (
-  pool: Resource[F, Session[F]],
+  sessions: PostgresSessions[F],
 ) extends CommandSnapshotStore[F]:
 
-  import PostgresCommandSnapshotStore.*
+  private val statements = PostgresCommandSnapshotStore.Statements(sessions.schema)
+
+  import statements.*
 
   override def load(snapshotId: SnapshotId, key: String, version: Int): F[Option[StoredCommandSnapshot]] =
-    pool.use(_.option(loadQuery)(snapshotId.value *: key *: version *: EmptyTuple))
+    sessions.use(_.option(loadQuery)(snapshotId.value *: key *: version *: EmptyTuple))
 
   override def save(
     snapshotId: SnapshotId,
@@ -41,7 +43,7 @@ final class PostgresCommandSnapshotStore[F[_]: Async] private[postgres] (
     version: Int,
     snapshot: StoredCommandSnapshot,
   ): F[Unit] =
-    pool
+    sessions
       .use(
         _.execute(saveCommand)(
           snapshotId.value *:
@@ -57,62 +59,64 @@ final class PostgresCommandSnapshotStore[F[_]: Async] private[postgres] (
       .void
 
   override def delete(snapshotId: SnapshotId, key: String, version: Int): F[Unit] =
-    pool.use(_.execute(deleteCommand)(snapshotId.value *: key *: version *: EmptyTuple)).void
+    sessions.use(_.execute(deleteCommand)(snapshotId.value *: key *: version *: EmptyTuple)).void
 
 object PostgresCommandSnapshotStore:
 
-  private val loadQuery: Query[String *: String *: Int *: EmptyTuple, StoredCommandSnapshot] =
-    sql"""
-      SELECT global_position, event_count, filter_fingerprint, payload
-      FROM command_snapshots
-      WHERE snapshot_id = $text
-        AND snapshot_key = $text
-        AND snapshot_version = $int4
-    """.query(int8 *: int8 *: text *: text).to[StoredCommandSnapshot]
+  final private[postgres] class Statements(schema: PostgresSchema):
 
-  private val saveCommand: Command[String *: String *: Int *: Long *: Long *: String *: String *: EmptyTuple] =
-    sql"""
-      INSERT INTO command_snapshots (
-        snapshot_id,
-        snapshot_key,
-        snapshot_version,
-        global_position,
-        event_count,
-        filter_fingerprint,
-        payload
-      )
-      VALUES ($text, $text, $int4, $int8, $int8, $text, $text)
-      ON CONFLICT (snapshot_id, snapshot_key, snapshot_version) DO UPDATE SET
-        global_position = EXCLUDED.global_position,
-        event_count = EXCLUDED.event_count,
-        filter_fingerprint = EXCLUDED.filter_fingerprint,
-        payload = EXCLUDED.payload,
-        updated_at = now()
-      WHERE command_snapshots.global_position <= EXCLUDED.global_position
-    """.command
+    val loadQuery: Query[String *: String *: Int *: EmptyTuple, StoredCommandSnapshot] =
+      sql"""
+        SELECT global_position, event_count, filter_fingerprint, payload
+        FROM #${schema.commandSnapshots}
+        WHERE snapshot_id = $text
+          AND snapshot_key = $text
+          AND snapshot_version = $int4
+      """.query(int8 *: int8 *: text *: text).to[StoredCommandSnapshot]
 
-  private val deleteCommand: Command[String *: String *: Int *: EmptyTuple] =
-    sql"""
-      DELETE FROM command_snapshots
-      WHERE snapshot_id = $text
-        AND snapshot_key = $text
-        AND snapshot_version = $int4
-    """.command
+    val saveCommand: Command[String *: String *: Int *: Long *: Long *: String *: String *: EmptyTuple] =
+      sql"""
+        INSERT INTO #${schema.commandSnapshots} (
+          snapshot_id,
+          snapshot_key,
+          snapshot_version,
+          global_position,
+          event_count,
+          filter_fingerprint,
+          payload
+        )
+        VALUES ($text, $text, $int4, $int8, $int8, $text, $text)
+        ON CONFLICT (snapshot_id, snapshot_key, snapshot_version) DO UPDATE SET
+          global_position = EXCLUDED.global_position,
+          event_count = EXCLUDED.event_count,
+          filter_fingerprint = EXCLUDED.filter_fingerprint,
+          payload = EXCLUDED.payload,
+          updated_at = now()
+        WHERE command_snapshots.global_position <= EXCLUDED.global_position
+      """.command
 
-  private[postgres] val createTableCommand: Command[Void] =
-    sql"""
-      CREATE TABLE IF NOT EXISTS command_snapshots (
-        snapshot_id        TEXT        NOT NULL,
-        snapshot_key       TEXT        NOT NULL,
-        snapshot_version   INTEGER     NOT NULL,
-        global_position    BIGINT      NOT NULL CHECK (global_position >= 0),
-        event_count        BIGINT      NOT NULL CHECK (event_count >= 0),
-        filter_fingerprint TEXT        NOT NULL,
-        payload            TEXT        NOT NULL,
-        updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (snapshot_id, snapshot_key, snapshot_version)
-      )
-    """.command
+    val deleteCommand: Command[String *: String *: Int *: EmptyTuple] =
+      sql"""
+        DELETE FROM #${schema.commandSnapshots}
+        WHERE snapshot_id = $text
+          AND snapshot_key = $text
+          AND snapshot_version = $int4
+      """.command
 
-  def make[F[_]: Async](pool: Resource[F, Session[F]]): PostgresCommandSnapshotStore[F] =
-    new PostgresCommandSnapshotStore(pool)
+    val createTableCommand: Command[Void] =
+      sql"""
+        CREATE TABLE IF NOT EXISTS #${schema.commandSnapshots} (
+          snapshot_id        TEXT        NOT NULL,
+          snapshot_key       TEXT        NOT NULL,
+          snapshot_version   INTEGER     NOT NULL,
+          global_position    BIGINT      NOT NULL CHECK (global_position >= 0),
+          event_count        BIGINT      NOT NULL CHECK (event_count >= 0),
+          filter_fingerprint TEXT        NOT NULL,
+          payload            TEXT        NOT NULL,
+          updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+          PRIMARY KEY (snapshot_id, snapshot_key, snapshot_version)
+        )
+      """.command
+
+  def make[F[_]: Async](sessions: PostgresSessions[F]): PostgresCommandSnapshotStore[F] =
+    new PostgresCommandSnapshotStore(sessions)
