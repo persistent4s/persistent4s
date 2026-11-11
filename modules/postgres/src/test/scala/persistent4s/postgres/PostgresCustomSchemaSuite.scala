@@ -200,6 +200,37 @@ object PostgresCustomSchemaSuite extends IOSuite:
     yield expect.all(read == (Some(RecordedValue(id, "v")), ReadCursor(0L, 7L)), stored.contains(committed))
   }
 
+  test("a module refuses to start an empty event store while another schema holds events") { fixture =>
+    for
+      config  <- freshDatabase(fixture.config)
+      _       <- appendInPublic(config, "kept in public")
+      started <- PostgresModule.makeWithConfig[IO](config).use_.attempt
+      created <- session(config).use(_.unique(schemaExists)(Schema.name))
+    yield expect.all(
+      started == Left(PostgresModuleError.EventsInOtherSchema(Schema.name, List("public"))),
+      !created,
+    )
+  }
+
+  test("a module starts with the events once the tables moved into the configured schema") { fixture =>
+    for
+      config   <- freshDatabase(fixture.config)
+      _        <- appendInPublic(config, "moved")
+      _        <- session(config).use(moveTablesFromPublic)
+      restored <- PostgresModule.makeWithConfig[IO](config).flatMap(_.domain(eventCodec)).use { domain =>
+                    domain.eventStore.readFrom(0L, EventFilter()).compile.toList
+                  }
+    yield expect(restored.map(_.payload) == List(Recorded("moved")))
+  }
+
+  test("an empty event store in another schema does not block a new one") { fixture =>
+    for
+      config  <- freshDatabase(fixture.config)
+      _       <- PostgresModule.makeWithConfig[IO](config.copy(schema = PostgresSchema.Public)).use_
+      started <- PostgresModule.makeWithConfig[IO](config).use_.attempt
+    yield expect(started.isRight)
+  }
+
   pureTest("a schema name must be a single PostgreSQL identifier") {
     expect.all(
       PostgresSchema.from("persistent4s").isRight,
@@ -211,6 +242,27 @@ object PostgresCustomSchemaSuite extends IOSuite:
 
   private def pending(tag: Tag, value: String): PendingEvent[SchemaEvent] =
     PendingEvent(Recorded(value), Set(tag), EventTypeName.of[Recorded], isExternal = false)
+
+  /** A new database on the suite's server, configured for [[Schema]]. */
+  private def freshDatabase(config: PostgresConfig): IO[PostgresConfig] =
+    val name = s"guard_${UUID.randomUUID().toString.replace("-", "")}"
+    session(config).use(_.execute(sql"CREATE DATABASE #$name".command)).as(config.copy(database = name))
+
+  /** Stores one event the way a service did before it configured a schema. */
+  private def appendInPublic(config: PostgresConfig, value: String): IO[Unit] =
+    PostgresModule
+      .makeWithConfig[IO](config.copy(schema = PostgresSchema.Public))
+      .flatMap(_.domain(eventCodec))
+      .use(_.eventStore.appendUnchecked(List(pending(Tag("guard", value), value))).void)
+
+  private def moveTablesFromPublic(session: Session[IO]): IO[Unit] =
+    session.execute(sql"CREATE SCHEMA #${Schema.quotedName}".command) *>
+      Persistent4sTables.toList.traverse_ { table =>
+        session.execute(sql"ALTER TABLE IF EXISTS public.#$table SET SCHEMA #${Schema.quotedName}".command)
+      }
+
+  private val schemaExists: Query[String, Boolean] =
+    sql"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $text)".query(bool)
 
   private def append(fixture: Fixture, tag: Tag, value: String): IO[Unit] =
     fixture.domain.eventStore.appendUnchecked(List(pending(tag, value))).void

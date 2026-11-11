@@ -80,6 +80,13 @@ schema, so the connection's `search_path` does not matter. Application tables st
 queries joining both remain plain SQL, e.g. `JOIN persistent4s.events e ON ...`. SQL outside persistent4s that reads
 these tables, such as CDC triggers, must name the schema too.
 
+Changing `schema` on a database that already has an event store does not move it. On the first start in the new schema
+the module checks the other schemas, and if one already holds persistent4s events it fails with
+`PostgresModuleError.EventsInOtherSchema` instead of starting with an empty store. Move the tables first, e.g.
+`ALTER TABLE public.events SET SCHEMA persistent4s` for each persistent4s table (indexes and sequences follow), or keep
+`schema` pointing at where the events are. An empty event store elsewhere does not block the start, but two services
+sharing one database must not each keep events in their own schema.
+
 `module.sessions` is a `PostgresSessions[F]`: the pool (`sessions.pool`, `sessions.use(...)`) together with that
 schema. Repositories, stores and outboxes take it instead of a bare pool, so they always address the module's tables.
 
