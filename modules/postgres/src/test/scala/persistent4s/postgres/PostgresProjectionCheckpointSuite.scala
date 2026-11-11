@@ -48,8 +48,12 @@ object PostgresProjectionCheckpointSuite extends IOSuite:
         .withDatabase(cfg.database)
         .pooled(cfg.maxConnections)
         .flatMap { pool =>
-          for _ <- Resource.eval(pool.use(_.execute(PostgresProjectionCheckpoint.createTableCommand).void))
-          yield PostgresProjectionCheckpoint.make[IO](pool)
+          for _ <- Resource.eval(
+                     pool.use(
+                       _.execute(PostgresProjectionCheckpoint.Statements(PostgresSchema.Public).createTableCommand).void,
+                     ),
+                   )
+          yield PostgresProjectionCheckpoint.make[IO](PostgresSessions(pool, PostgresSchema.Public))
         }
     }
 

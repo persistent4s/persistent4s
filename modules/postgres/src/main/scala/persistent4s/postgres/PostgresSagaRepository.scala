@@ -43,12 +43,18 @@ import java.time.Instant
   *   channel notified when [[start]] enqueues messages, so a message relay wakes up without waiting for its poll
   */
 final case class PostgresSagaRepository[F[_]: Async] private (
-  pool: Resource[F, Session[F]],
+  sessions: PostgresSessions[F],
   claimTtl: FiniteDuration,
   channelId: Identifier,
 ) extends SagaRepository[F]:
 
   import PostgresSagaRepository.*
+
+  private val statements = Statements(sessions.schema)
+
+  private val messageStatements = PostgresMessageOutbox.Statements(sessions.schema)
+
+  import statements.*
 
   override def start(
     id: UUID,
@@ -58,7 +64,7 @@ final case class PostgresSagaRepository[F[_]: Async] private (
     deadline: Option[Instant],
     messages: List[OutgoingMessage],
   ): F[Boolean] =
-    pool.use { session =>
+    sessions.use { session =>
       session.transaction.use { _ =>
         session.option(insertInstanceQuery)(id, sagaName, key, data, deadline.map(_.atOffset(ZoneOffset.UTC))).flatMap {
           case None    => Async[F].pure(false)
@@ -68,7 +74,7 @@ final case class PostgresSagaRepository[F[_]: Async] private (
     }
 
   override def find(id: UUID): F[Option[SagaRecord]] =
-    pool.use(_.option(selectByIdQuery)(id)).map(_.map(fromRow))
+    sessions.use(_.option(selectByIdQuery)(id)).map(_.map(fromRow))
 
   override def advance(
     id: UUID,
@@ -78,12 +84,12 @@ final case class PostgresSagaRepository[F[_]: Async] private (
     data: String,
     deadline: Option[Instant],
   ): F[Boolean] =
-    pool
+    sessions
       .use(_.option(advanceQuery)(status, step, data, deadline.map(_.atOffset(ZoneOffset.UTC)), id, expectedStep))
       .map(_.isDefined)
 
   override def claimExpired(sagaName: String, limit: Int)(handle: List[SagaRecord] => F[Unit]): F[Int] =
-    pool.use { session =>
+    sessions.use { session =>
       session.transaction.use { _ =>
         session
           .prepare(claimExpiredQuery)
@@ -97,16 +103,16 @@ final case class PostgresSagaRepository[F[_]: Async] private (
   private def enqueueMessages(session: Session[F], messages: List[OutgoingMessage]): F[Unit] =
     if messages.isEmpty then Async[F].unit
     else
-      session.prepare(PostgresMessageOutbox.insertCommand).flatMap(cmd => messages.traverse_(cmd.execute)) *>
+      session.prepare(messageStatements.insertCommand).flatMap(cmd => messages.traverse_(cmd.execute)) *>
         session.channel(channelId).notify("")
 
 object PostgresSagaRepository:
 
   def apply[F[_]: Async](
-    pool: Resource[F, Session[F]],
+    sessions: PostgresSessions[F],
     claimTtl: FiniteDuration = 30.seconds,
     channelId: Identifier = PostgresMessageOutbox.NotificationChannel,
-  ): PostgresSagaRepository[F] = new PostgresSagaRepository[F](pool, claimTtl, channelId)
+  ): PostgresSagaRepository[F] = new PostgresSagaRepository[F](sessions, claimTtl, channelId)
 
   private val statusCodec: Codec[SagaStatus] =
     text.eimap(s => SagaStatus.fromString(s).toRight(s"unknown saga status: '$s'"))(_.toString)
@@ -124,75 +130,77 @@ object PostgresSagaRepository:
         deadline = deadline.map(_.toInstant), createdAt = createdAt.toInstant, updatedAt = updatedAt.toInstant,
       )
 
-  private[postgres] val createTableCommand: Command[Void] =
-    sql"""
-      CREATE TABLE IF NOT EXISTS saga_instances (
-        id          UUID        PRIMARY KEY,
-        saga_name   TEXT        NOT NULL,
-        saga_key    TEXT        NOT NULL,
-        status      TEXT        NOT NULL,
-        step        INT         NOT NULL,
-        data        TEXT        NOT NULL,
-        deadline    TIMESTAMPTZ,
-        created_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-        updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-      )
-    """.command
+  final private[postgres] class Statements(schema: PostgresSchema):
 
-  private[postgres] val createDueIndexCommand: Command[Void] =
-    sql"""
-      CREATE INDEX IF NOT EXISTS idx_saga_instances_due
-        ON saga_instances (saga_name, deadline)
-        WHERE status = 'Pending' AND deadline IS NOT NULL
-    """.command
+    val createTableCommand: Command[Void] =
+      sql"""
+        CREATE TABLE IF NOT EXISTS #${schema.sagaInstances} (
+          id          UUID        PRIMARY KEY,
+          saga_name   TEXT        NOT NULL,
+          saga_key    TEXT        NOT NULL,
+          status      TEXT        NOT NULL,
+          step        INT         NOT NULL,
+          data        TEXT        NOT NULL,
+          deadline    TIMESTAMPTZ,
+          created_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+          updated_at  TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+        )
+      """.command
 
-  private val insertInstanceQuery: Query[(UUID, String, String, String, Option[OffsetDateTime]), UUID] =
-    sql"""
-      INSERT INTO saga_instances (id, saga_name, saga_key, status, step, data, deadline)
-      VALUES (
-        $uuid, $text, $text, 'Pending', 0, $text,
-        ${timestamptz.opt}
-      )
-      ON CONFLICT (id) DO NOTHING
-      RETURNING id
-    """.query(uuid)
+    val createDueIndexCommand: Command[Void] =
+      sql"""
+        CREATE INDEX IF NOT EXISTS idx_saga_instances_due
+          ON #${schema.sagaInstances} (saga_name, deadline)
+          WHERE status = 'Pending' AND deadline IS NOT NULL
+      """.command
 
-  private val selectByIdQuery: Query[UUID, SagaRow] =
-    sql"""
-      SELECT id, saga_name, saga_key, status, step, data, deadline, created_at, updated_at
-      FROM saga_instances
-      WHERE id = $uuid
-    """.query(sagaRowCodec)
+    val insertInstanceQuery: Query[(UUID, String, String, String, Option[OffsetDateTime]), UUID] =
+      sql"""
+        INSERT INTO #${schema.sagaInstances} (id, saga_name, saga_key, status, step, data, deadline)
+        VALUES (
+          $uuid, $text, $text, 'Pending', 0, $text,
+          ${timestamptz.opt}
+        )
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id
+      """.query(uuid)
 
-  private val advanceQuery: Query[(SagaStatus, Int, String, Option[OffsetDateTime], UUID, Int), UUID] =
-    sql"""
-      UPDATE saga_instances
-      SET status = $statusCodec,
-          step = $int4,
-          data = $text,
-          deadline = ${timestamptz.opt},
-          updated_at = clock_timestamp()
-      WHERE id = $uuid
-        AND step = $int4
-        AND status = 'Pending'
-      RETURNING id
-    """.query(uuid)
+    val selectByIdQuery: Query[UUID, SagaRow] =
+      sql"""
+        SELECT id, saga_name, saga_key, status, step, data, deadline, created_at, updated_at
+        FROM #${schema.sagaInstances}
+        WHERE id = $uuid
+      """.query(sagaRowCodec)
 
-  private val claimExpiredQuery: Query[(Long, String, Int), SagaRow] =
-    sql"""
-      UPDATE saga_instances
-      SET deadline = clock_timestamp() + ($int8 * interval '1 millisecond'),
-          updated_at = clock_timestamp()
-      WHERE id IN (
-        SELECT id
-        FROM saga_instances
-        WHERE saga_name = $text
+    val advanceQuery: Query[(SagaStatus, Int, String, Option[OffsetDateTime], UUID, Int), UUID] =
+      sql"""
+        UPDATE #${schema.sagaInstances}
+        SET status = $statusCodec,
+            step = $int4,
+            data = $text,
+            deadline = ${timestamptz.opt},
+            updated_at = clock_timestamp()
+        WHERE id = $uuid
+          AND step = $int4
           AND status = 'Pending'
-          AND deadline IS NOT NULL
-          AND deadline < clock_timestamp()
-        ORDER BY deadline ASC
-        LIMIT $int4
-        FOR UPDATE SKIP LOCKED
-      )
-      RETURNING id, saga_name, saga_key, status, step, data, deadline, created_at, updated_at
-    """.query(sagaRowCodec)
+        RETURNING id
+      """.query(uuid)
+
+    val claimExpiredQuery: Query[(Long, String, Int), SagaRow] =
+      sql"""
+        UPDATE #${schema.sagaInstances}
+        SET deadline = clock_timestamp() + ($int8 * interval '1 millisecond'),
+            updated_at = clock_timestamp()
+        WHERE id IN (
+          SELECT id
+          FROM #${schema.sagaInstances}
+          WHERE saga_name = $text
+            AND status = 'Pending'
+            AND deadline IS NOT NULL
+            AND deadline < clock_timestamp()
+          ORDER BY deadline ASC
+          LIMIT $int4
+          FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, saga_name, saga_key, status, step, data, deadline, created_at, updated_at
+      """.query(sagaRowCodec)

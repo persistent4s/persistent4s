@@ -16,7 +16,7 @@
 
 package persistent4s.postgres
 
-import cats.effect.{Async, Resource}
+import cats.effect.Async
 import cats.syntax.all.*
 
 import persistent4s.{AtomicRepository, ProjectionCommit, ReadCursor}
@@ -28,22 +28,24 @@ import skunk.data.{TransactionAccessMode, TransactionIsolationLevel}
   *
   * Implementors describe their explicit SQL callbacks with [[PostgresRepositoryTable]]. This class owns empty-input
   * handling, key deduplication, missing-key reconstruction, chunked reads and writes, session acquisition, transactions
-  * and the optimistic checkpoint update. The pool must point to the same database as the
-  * [[PostgresProjectionCheckpoint]] supplied to the projector.
+  * and the optimistic checkpoint update. `sessions` must point to the same database and schema as the
+  * [[PostgresProjectionCheckpoint]] supplied to the projector; [[PostgresModule.sessions]] does.
   */
 abstract class PostgresAtomicRepository[F[_]: Async, K, S](
-  pool: Resource[F, Session[F]],
+  sessions: PostgresSessions[F],
 ) extends AtomicRepository[F, K, S]:
+
+  private val checkpoints = PostgresProjectionCheckpoint.Statements(sessions.schema)
 
   /** The session-bound SQL operations for this projection table. */
   protected val table: PostgresRepositoryTable[F, K, S]
 
   /** Run an additional repository query with a pooled session. */
-  final protected def useSession[A](f: Session[F] => F[A]): F[A] = pool.use(f)
+  final protected def useSession[A](f: Session[F] => F[A]): F[A] = sessions.use(f)
 
   final override def findMany(keys: List[K]): F[Map[K, Option[S]]] =
     if keys.isEmpty then Async[F].pure(Map.empty)
-    else pool.use(findMany(_, keys))
+    else sessions.use(findMany(_, keys))
 
   /** Like [[findMany]], using the caller's connection and transaction, e.g. inside [[readWithCursor]]. */
   final def findMany(session: Session[F], keys: List[K]): F[Map[K, Option[S]]] =
@@ -83,20 +85,20 @@ abstract class PostgresAtomicRepository[F[_]: Async, K, S](
     *   the query result and the cursor of the projection it reflects
     */
   final def readWithCursor[A](projectionName: String)(read: Session[F] => F[A]): F[(A, ReadCursor)] =
-    pool.use { session =>
+    sessions.use { session =>
       session.transaction(TransactionIsolationLevel.RepeatableRead, TransactionAccessMode.ReadOnly).use { _ =>
-        (read(session), PostgresProjectionCheckpoint.cursor(session, projectionName)).tupled
+        (read(session), PostgresProjectionCheckpoint.cursor(session, checkpoints, projectionName)).tupled
       }
     }
 
   final override def persist(upserts: Map[K, S], deletes: List[K]): F[Unit] =
     if upserts.isEmpty && deletes.isEmpty then Async[F].unit
-    else pool.use(session => session.transaction.use(_ => table.write(session, upserts, deletes)))
+    else sessions.use(session => session.transaction.use(_ => table.write(session, upserts, deletes)))
 
   final override def persistAtomically(commit: ProjectionCommit[K, S]): F[Unit] =
-    pool.use { session =>
+    sessions.use { session =>
       session.transaction.use { _ =>
         table.write(session, commit.upserts, commit.deletes) *>
-          PostgresProjectionCheckpoint.compareAndSet(session, commit.expected, commit.checkpoint)
+          PostgresProjectionCheckpoint.compareAndSet(session, checkpoints, commit.expected, commit.checkpoint)
       }
     }

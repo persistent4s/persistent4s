@@ -60,13 +60,15 @@ import persistent4s.LeaderElection
   * `task` is started from scratch each time leadership is acquired; it is not resumed.
   */
 final class PostgresLeaderElection[F[_]: Async: SecureRandom] private (
-  pool: Resource[F, Session[F]],
+  sessions: PostgresSessions[F],
   ttl: FiniteDuration,
   pollInterval: FiniteDuration,
   renewTimeout: FiniteDuration,
 ) extends LeaderElection[F]:
 
-  import PostgresLeaderElection.*
+  private val statements = PostgresLeaderElection.Statements(sessions.schema)
+
+  import statements.*
 
   private val ttlMillis: Long = ttl.toMillis
 
@@ -136,13 +138,13 @@ final class PostgresLeaderElection[F[_]: Async: SecureRandom] private (
     acquireLoop
 
   private def tryAcquire(name: String, holder: UUID): F[Boolean] =
-    pool.use(_.option(acquireQuery)(name, holder, ttlMillis)).map(_.contains(holder))
+    sessions.use(_.option(acquireQuery)(name, holder, ttlMillis)).map(_.contains(holder))
 
   private def renew(name: String, holder: UUID): F[Boolean] =
-    pool.use(_.option(renewQuery)(ttlMillis, name, holder)).map(_.contains(holder))
+    sessions.use(_.option(renewQuery)(ttlMillis, name, holder)).map(_.contains(holder))
 
   private def release(name: String, holder: UUID): F[Unit] =
-    pool.use(_.execute(releaseCommand)(name, holder)).void
+    sessions.use(_.execute(releaseCommand)(name, holder)).void
 
   /** Best-effort: a failed release only costs failover latency, never safety. */
   private def releaseQuietly(name: String, holder: UUID): F[Unit] =
@@ -159,7 +161,7 @@ object PostgresLeaderElection:
     *   how long a single acquire/renew/release query is waited on before being abandoned.
     */
   def make[F[_]: Async: SecureRandom](
-    pool: Resource[F, Session[F]],
+    sessions: PostgresSessions[F],
     ttl: FiniteDuration = 30.seconds,
     pollInterval: FiniteDuration = 5.seconds,
     renewTimeout: FiniteDuration = 5.seconds,
@@ -172,42 +174,44 @@ object PostgresLeaderElection:
       s"renewTimeout ($renewTimeout) must be shorter than the renewal interval (${ttl / 3}) so that a lease has room " +
         "for more than one attempt",
     )
-    new PostgresLeaderElection(pool, ttl, pollInterval, renewTimeout)
+    new PostgresLeaderElection(sessions, ttl, pollInterval, renewTimeout)
 
-  private[postgres] val createTableCommand: Command[Void] =
-    sql"""
-      CREATE TABLE IF NOT EXISTS leader_leases (
-        name       TEXT        PRIMARY KEY,
-        holder     UUID        NOT NULL,
-        expires_at TIMESTAMPTZ NOT NULL
-      )
-    """.command
+  def createTable[F[_]: Concurrent](sessions: PostgresSessions[F]): F[Unit] =
+    sessions.use(_.execute(Statements(sessions.schema).createTableCommand)).void
 
-  def createTable[F[_]: Concurrent](pool: Resource[F, Session[F]]): F[Unit] =
-    pool.use(_.execute(createTableCommand)).void
+  final private[postgres] class Statements(schema: PostgresSchema):
 
-  // Insert the lease, or steal it only if the current one has already expired (DB clock). RETURNING yields a row iff
-  // we now hold it.
-  private val acquireQuery: Query[(String, UUID, Long), UUID] =
-    sql"""
-      INSERT INTO leader_leases (name, holder, expires_at)
-      VALUES ($text, $uuid, clock_timestamp() + ($int8 * interval '1 millisecond'))
-      ON CONFLICT (name) DO UPDATE
-        SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
-        WHERE leader_leases.expires_at < clock_timestamp()
-      RETURNING holder
-    """.query(uuid)
+    val createTableCommand: Command[Void] =
+      sql"""
+        CREATE TABLE IF NOT EXISTS #${schema.leaderLeases} (
+          name       TEXT        PRIMARY KEY,
+          holder     UUID        NOT NULL,
+          expires_at TIMESTAMPTZ NOT NULL
+        )
+      """.command
 
-  // Push expiry forward only while we still hold it. RETURNING is empty if a standby has taken over.
-  private val renewQuery: Query[(Long, String, UUID), UUID] =
-    sql"""
-      UPDATE leader_leases
-      SET expires_at = clock_timestamp() + ($int8 * interval '1 millisecond')
-      WHERE name = $text AND holder = $uuid
-      RETURNING holder
-    """.query(uuid)
+    // Insert the lease, or steal it only if the current one has already expired (DB clock). RETURNING yields a row iff
+    // we now hold it.
+    val acquireQuery: Query[(String, UUID, Long), UUID] =
+      sql"""
+        INSERT INTO #${schema.leaderLeases} (name, holder, expires_at)
+        VALUES ($text, $uuid, clock_timestamp() + ($int8 * interval '1 millisecond'))
+        ON CONFLICT (name) DO UPDATE
+          SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at
+          WHERE leader_leases.expires_at < clock_timestamp()
+        RETURNING holder
+      """.query(uuid)
 
-  private val releaseCommand: Command[(String, UUID)] =
-    sql"""
-      DELETE FROM leader_leases WHERE name = $text AND holder = $uuid
-    """.command
+    // Push expiry forward only while we still hold it. RETURNING is empty if a standby has taken over.
+    val renewQuery: Query[(Long, String, UUID), UUID] =
+      sql"""
+        UPDATE #${schema.leaderLeases}
+        SET expires_at = clock_timestamp() + ($int8 * interval '1 millisecond')
+        WHERE name = $text AND holder = $uuid
+        RETURNING holder
+      """.query(uuid)
+
+    val releaseCommand: Command[(String, UUID)] =
+      sql"""
+        DELETE FROM #${schema.leaderLeases} WHERE name = $text AND holder = $uuid
+      """.command

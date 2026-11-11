@@ -31,20 +31,22 @@ import skunk.implicits.*
   * table, keyed by projection name. This survives application restarts, allowing projectors to resume from where they
   * left off.
   *
-  * @param pool
-  *   a resource for obtaining database sessions
+  * @param sessions
+  *   the session pool and the schema of the `projection_checkpoints` table
   */
 final class PostgresProjectionCheckpoint[F[_]: Async: Logger] private (
-  pool: Resource[F, Session[F]],
+  sessions: PostgresSessions[F],
 ) extends ProjectionCheckpoint[F]:
 
-  import PostgresProjectionCheckpoint.*
+  private val statements = PostgresProjectionCheckpoint.Statements(sessions.schema)
+
+  import statements.*
 
   override def load(projectionName: String): F[Option[ProjectionCheckpointState]] =
-    pool.use(_.option(loadQuery)(projectionName))
+    sessions.use(_.option(loadQuery)(projectionName))
 
   override def save(state: ProjectionCheckpointState): F[Unit] =
-    pool
+    sessions
       .use(
         _.execute(upsertCommand)(
           state.projectionName *: state.cursor.commitGroup *: state.cursor.globalPosition *: state.running *:
@@ -67,7 +69,7 @@ final class PostgresProjectionCheckpoint[F[_]: Async: Logger] private (
     *   a list of all stored [[persistent4s.ProjectionCheckpointState]] values
     */
   override def loadAll(): F[List[ProjectionCheckpointState]] =
-    pool.use(_.execute(loadAllQuery))
+    sessions.use(_.execute(loadAllQuery))
 
 object PostgresProjectionCheckpoint:
 
@@ -75,17 +77,25 @@ object PostgresProjectionCheckpoint:
     * [[persistent4s.ReadCursor.Start]] before its first checkpoint. Read in the same snapshot as the projection's view
     * to learn exactly which events that view reflects, as [[PostgresAtomicRepository.readWithCursor]] does.
     */
-  def cursor[F[_]: Functor](session: Session[F], projectionName: String): F[ReadCursor] =
-    session.option(loadQuery)(projectionName).map(_.fold(ReadCursor.Start)(_.cursor))
+  def cursor[F[_]: Functor](session: Session[F], schema: PostgresSchema, projectionName: String): F[ReadCursor] =
+    cursor(session, Statements(schema), projectionName)
+
+  private[postgres] def cursor[F[_]: Functor](
+    session: Session[F],
+    statements: Statements,
+    projectionName: String,
+  ): F[ReadCursor] =
+    session.option(statements.loadQuery)(projectionName).map(_.fold(ReadCursor.Start)(_.cursor))
 
   private[postgres] def compareAndSet[F[_]: MonadThrow](
     session: Session[F],
+    statements: Statements,
     expected: ReadCursor,
     state: ProjectionCheckpointState,
   ): F[Unit] =
     val update =
       if expected == ReadCursor.Start then
-        session.option(insertInitialQuery)(
+        session.option(statements.insertInitialQuery)(
           state.projectionName *:
             state.cursor.commitGroup *:
             state.cursor.globalPosition *:
@@ -94,7 +104,7 @@ object PostgresProjectionCheckpoint:
             EmptyTuple,
         )
       else
-        session.option(updateIfCurrentQuery)(
+        session.option(statements.updateIfCurrentQuery)(
           state.cursor.commitGroup *:
             state.cursor.globalPosition *:
             state.running *:
@@ -116,79 +126,81 @@ object PostgresProjectionCheckpoint:
         ProjectionCheckpointState(name, ReadCursor(commitGroup, globalPosition), running, error)
     }
 
-  private val loadQuery: Query[String, ProjectionCheckpointState] =
-    sql"""
-      SELECT projection_name, commit_group, global_position, running, error
-      FROM projection_checkpoints
-      WHERE projection_name = $text
-    """.query(checkpointDecoder)
+  final private[postgres] class Statements(schema: PostgresSchema):
 
-  private val loadAllQuery: Query[Void, ProjectionCheckpointState] =
-    sql"""
-      SELECT projection_name, commit_group, global_position, running, error
-      FROM projection_checkpoints
-      ORDER BY projection_name ASC
-    """.query(checkpointDecoder)
+    val loadQuery: Query[String, ProjectionCheckpointState] =
+      sql"""
+        SELECT projection_name, commit_group, global_position, running, error
+        FROM #${schema.projectionCheckpoints}
+        WHERE projection_name = $text
+      """.query(checkpointDecoder)
 
-  private val upsertCommand: Command[String *: Long *: Long *: Boolean *: Option[String] *: EmptyTuple] =
-    sql"""
-      INSERT INTO projection_checkpoints (projection_name, commit_group, global_position, running, error)
-      VALUES ($text, $int8, $int8, $bool, ${text.opt})
-      ON CONFLICT (projection_name) DO UPDATE SET
-        commit_group = EXCLUDED.commit_group,
-        global_position = EXCLUDED.global_position,
-        running = EXCLUDED.running,
-        error = EXCLUDED.error
-    """.command
+    val loadAllQuery: Query[Void, ProjectionCheckpointState] =
+      sql"""
+        SELECT projection_name, commit_group, global_position, running, error
+        FROM #${schema.projectionCheckpoints}
+        ORDER BY projection_name ASC
+      """.query(checkpointDecoder)
 
-  private val insertInitialQuery: Query[String *: Long *: Long *: Boolean *: Option[String] *: EmptyTuple, Long] =
-    sql"""
-      INSERT INTO projection_checkpoints (projection_name, commit_group, global_position, running, error)
-      VALUES ($text, $int8, $int8, $bool, ${text.opt})
-      ON CONFLICT (projection_name) DO UPDATE SET
-        commit_group = EXCLUDED.commit_group,
-        global_position = EXCLUDED.global_position,
-        running = EXCLUDED.running,
-        error = EXCLUDED.error
-      WHERE projection_checkpoints.commit_group = 0
-        AND projection_checkpoints.global_position = -1
-      RETURNING global_position
-    """.query(int8)
+    val upsertCommand: Command[String *: Long *: Long *: Boolean *: Option[String] *: EmptyTuple] =
+      sql"""
+        INSERT INTO #${schema.projectionCheckpoints} (projection_name, commit_group, global_position, running, error)
+        VALUES ($text, $int8, $int8, $bool, ${text.opt})
+        ON CONFLICT (projection_name) DO UPDATE SET
+          commit_group = EXCLUDED.commit_group,
+          global_position = EXCLUDED.global_position,
+          running = EXCLUDED.running,
+          error = EXCLUDED.error
+      """.command
 
-  private val updateIfCurrentQuery
-    : Query[Long *: Long *: Boolean *: Option[String] *: String *: Long *: Long *: EmptyTuple, Long] =
-    sql"""
-      UPDATE projection_checkpoints
-      SET
-        commit_group = $int8,
-        global_position = $int8,
-        running = $bool,
-        error = ${text.opt}
-      WHERE projection_name = $text
-        AND commit_group = $int8
-        AND global_position = $int8
-      RETURNING global_position
-    """.query(int8)
+    val insertInitialQuery: Query[String *: Long *: Long *: Boolean *: Option[String] *: EmptyTuple, Long] =
+      sql"""
+        INSERT INTO #${schema.projectionCheckpoints} (projection_name, commit_group, global_position, running, error)
+        VALUES ($text, $int8, $int8, $bool, ${text.opt})
+        ON CONFLICT (projection_name) DO UPDATE SET
+          commit_group = EXCLUDED.commit_group,
+          global_position = EXCLUDED.global_position,
+          running = EXCLUDED.running,
+          error = EXCLUDED.error
+        WHERE projection_checkpoints.commit_group = 0
+          AND projection_checkpoints.global_position = -1
+        RETURNING global_position
+      """.query(int8)
 
-  val createTableCommand: Command[Void] =
-    sql"""
-      CREATE TABLE IF NOT EXISTS projection_checkpoints (
-        projection_name TEXT   PRIMARY KEY,
-        commit_group    BIGINT NOT NULL DEFAULT 0,
-        global_position BIGINT NOT NULL,
-        running BOOLEAN NOT NULL,
-        error TEXT
-      )
-    """.command
+    val updateIfCurrentQuery
+      : Query[Long *: Long *: Boolean *: Option[String] *: String *: Long *: Long *: EmptyTuple, Long] =
+      sql"""
+        UPDATE #${schema.projectionCheckpoints}
+        SET
+          commit_group = $int8,
+          global_position = $int8,
+          running = $bool,
+          error = ${text.opt}
+        WHERE projection_name = $text
+          AND commit_group = $int8
+          AND global_position = $int8
+        RETURNING global_position
+      """.query(int8)
 
-  /** A checkpoint saved before commit groups existed points at an event stored in commit group 0, which is exactly
-    * where those events stay.
-    */
-  val addCommitGroupCommand: Command[Void] =
-    sql"""
-      ALTER TABLE projection_checkpoints
-      ADD COLUMN IF NOT EXISTS commit_group BIGINT NOT NULL DEFAULT 0
-    """.command
+    val createTableCommand: Command[Void] =
+      sql"""
+        CREATE TABLE IF NOT EXISTS #${schema.projectionCheckpoints} (
+          projection_name TEXT   PRIMARY KEY,
+          commit_group    BIGINT NOT NULL DEFAULT 0,
+          global_position BIGINT NOT NULL,
+          running BOOLEAN NOT NULL,
+          error TEXT
+        )
+      """.command
 
-  def make[F[_]: Async: Logger](pool: Resource[F, Session[F]]): PostgresProjectionCheckpoint[F] =
-    new PostgresProjectionCheckpoint(pool)
+    /** A checkpoint saved before commit groups existed points at an event stored in commit group 0, which is exactly
+      * where those events stay.
+      */
+    val addCommitGroupCommand: Command[Void] =
+      sql"""
+        ALTER TABLE #${schema.projectionCheckpoints}
+        ADD COLUMN IF NOT EXISTS commit_group BIGINT NOT NULL DEFAULT 0
+      """.command
+
+  def make[F[_]: Async: Logger](sessions: PostgresSessions[F]): PostgresProjectionCheckpoint[F] =
+    new PostgresProjectionCheckpoint(sessions)

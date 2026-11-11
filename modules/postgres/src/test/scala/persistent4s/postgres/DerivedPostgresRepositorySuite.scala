@@ -77,7 +77,9 @@ object DerivedPostgresRepositorySuite extends IOSuite:
           Resource
             .eval(
               pool.use { session =>
-                session.execute(PostgresProjectionCheckpoint.createTableCommand).void *>
+                session
+                  .execute(PostgresProjectionCheckpoint.Statements(PostgresSchema.Public).createTableCommand)
+                  .void *>
                   session.execute(createScalarTable).void *>
                   session.execute(createCompositeTable).void
               },
@@ -85,9 +87,9 @@ object DerivedPostgresRepositorySuite extends IOSuite:
             .as(
               Resources(
                 pool,
-                DerivedPostgresRepository(pool, scalarTable),
-                DerivedPostgresRepository(pool, compositeTable),
-                PostgresProjectionCheckpoint.make(pool),
+                DerivedPostgresRepository(PostgresSessions(pool, PostgresSchema.Public), scalarTable),
+                DerivedPostgresRepository(PostgresSessions(pool, PostgresSchema.Public), compositeTable),
+                PostgresProjectionCheckpoint.make(PostgresSessions(pool, PostgresSchema.Public)),
               ),
             )
         }
@@ -433,7 +435,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
 
   test("run rejects negative bounds before opening a connection or returning an empty page") { _ =>
     val pool = Resource.eval(IO.raiseError[Session[IO]](new AssertionError("Database connection must not be opened")))
-    val repository = DerivedPostgresRepository(pool, scalarTable)
+    val repository = DerivedPostgresRepository(PostgresSessions(pool, PostgresSchema.Public), scalarTable)
     val queries = List(
       repository.query.withLimit(-1)                                    -> PaginationError.NegativeLimit(-1),
       repository.query.withLimit(Int.MinValue, maxLimit = 0)            -> PaginationError.NegativeLimit(Int.MinValue),
@@ -528,7 +530,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
   test("counts and nested selections validate pagination before acquiring a connection") { _ =>
     val unavailable =
       Resource.eval[IO, Session[IO]](IO.raiseError(new AssertionError("Unexpected database connection")))
-    val repository = DerivedPostgresRepository(unavailable, scalarTable)
+    val repository = DerivedPostgresRepository(PostgresSessions(unavailable, PostgresSchema.Public), scalarTable)
     val inner = repository.query.withOffset(-7L).select(_.rowId)
     for
       count  <- repository.query.withLimit(-1).count.attempt
@@ -581,7 +583,10 @@ object DerivedPostgresRepositorySuite extends IOSuite:
 
   test("related-row enrichment applies to find, all, and generated filters") { resources =>
     val state = paginationStates(1).head
-    val repository = new DerivedPostgresRepository[IO, UUID, ScalarState](resources.pool, scalarTable):
+    val repository = new DerivedPostgresRepository[IO, UUID, ScalarState](
+      PostgresSessions(resources.pool, PostgresSchema.Public),
+      scalarTable,
+    ):
       override protected def enrich(
         @scala.annotation.unused session: Session[IO],
         rows: List[ScalarState],
@@ -606,7 +611,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
     given PostgresRow[VarcharState] = PostgresRow
       .flattened[VarcharState](identity, PostgresRow.columnCodec[VarcharState](_.value)(skunk.codec.all.varchar(10)))
     val table = PostgresTable.derived[VarcharState]("derived_varchar_state").key(_.id)
-    val repository = DerivedPostgresRepository(resources.pool, table)
+    val repository = DerivedPostgresRepository(PostgresSessions(resources.pool, PostgresSchema.Public), table)
     val setup = resources.pool
       .use(
         _.execute(sql"CREATE TABLE derived_varchar_state (id BIGINT PRIMARY KEY, value VARCHAR(10) NOT NULL)".command),
@@ -646,7 +651,7 @@ object DerivedPostgresRepositorySuite extends IOSuite:
       ) { _ =>
         resources.pool.use(_.execute(sql"DROP TABLE derived_paged_state".command)).void
       }
-      .as(DerivedPostgresRepository(resources.pool, table))
+      .as(DerivedPostgresRepository(PostgresSessions(resources.pool, PostgresSchema.Public), table))
 
   private val compositeTable: PostgresTable[(UUID, UUID), CompositeState] =
     PostgresTable
