@@ -22,9 +22,9 @@ import skunk.Session
 
 /** A session pool together with the [[PostgresSchema]] holding the persistent4s tables of its database.
   *
-  * Everything that reads or writes those tables takes this instead of a bare pool, so it always addresses the schema the
-  * module created them in. [[PostgresModule.sessions]] provides it; build one directly only for a pool the module does
-  * not own, e.g. in tests.
+  * Everything that reads or writes those tables takes this instead of a bare pool, so it always addresses the schema
+  * the module created them in. [[PostgresModule.sessions]] provides it; build one directly only for a pool the module
+  * does not own, e.g. in tests.
   *
   * @param pool
   *   the session pool, also usable for application queries

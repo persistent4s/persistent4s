@@ -33,14 +33,21 @@ final class PostgresSchema private (val name: String):
 
   private[postgres] val quotedName: String = SqlIdentifier.schema(name)
 
-  private[postgres] val events: String                = table("events")
-  private[postgres] val eventTags: String             = table("event_tags")
-  private[postgres] val eventOutbox: String           = table("event_outbox")
-  private[postgres] val messageOutbox: String         = table("message_outbox")
+  private[postgres] val events: String = table("events")
+
+  private[postgres] val eventTags: String = table("event_tags")
+
+  private[postgres] val eventOutbox: String = table("event_outbox")
+
+  private[postgres] val messageOutbox: String = table("message_outbox")
+
   private[postgres] val projectionCheckpoints: String = table("projection_checkpoints")
-  private[postgres] val commandSnapshots: String      = table("command_snapshots")
-  private[postgres] val leaderLeases: String          = table("leader_leases")
-  private[postgres] val sagaInstances: String         = table("saga_instances")
+
+  private[postgres] val commandSnapshots: String = table("command_snapshots")
+
+  private[postgres] val leaderLeases: String = table("leader_leases")
+
+  private[postgres] val sagaInstances: String = table("saga_instances")
 
   override def equals(other: Any): Boolean =
     other match

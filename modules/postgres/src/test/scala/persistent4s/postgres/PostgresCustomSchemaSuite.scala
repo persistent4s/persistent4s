@@ -112,9 +112,9 @@ object PostgresCustomSchemaSuite extends IOSuite:
   }
 
   test("the event store, event outbox and message outbox use the configured schema") { fixture =>
-    val store   = fixture.domain.transactionalStore
-    val tag     = Tag("course", UUID.randomUUID().toString)
-    val filter  = EventFilter(Set(EventTypeName.of[Recorded]), Set(tag))
+    val store = fixture.domain.transactionalStore
+    val tag = Tag("course", UUID.randomUUID().toString)
+    val filter = EventFilter(Set(EventTypeName.of[Recorded]), Set(tag))
     val message = OutgoingMessage("schema.topic", Some(tag.value), "payload")
     for
       appended  <- store.appendWithMessages(filter, 0L, List(message), List(pending(tag, "first")))
@@ -132,8 +132,8 @@ object PostgresCustomSchemaSuite extends IOSuite:
                   .compile
                   .toList
                   .timeout(10.seconds)
-      _         <- fixture.domain.outbox.get.markPublished(queued.map(_.metadata.globalPosition))
-      drained   <- fixture.domain.module.messageOutbox.get.drainBatch(10)(_ => IO.unit)
+      _       <- fixture.domain.outbox.get.markPublished(queued.map(_.metadata.globalPosition))
+      drained <- fixture.domain.module.messageOutbox.get.drainBatch(10)(_ => IO.unit)
     yield expect.all(
       read.map(_.payload) == List(Recorded("first"), Recorded("second")),
       limited.map(_.payload) == List(Recorded("first")),
@@ -147,13 +147,13 @@ object PostgresCustomSchemaSuite extends IOSuite:
   }
 
   test("checkpoints, snapshots, leader leases and sagas use the configured schema") { fixture =>
-    val module     = fixture.domain.module
+    val module = fixture.domain.module
     val projection = s"projection-${UUID.randomUUID()}"
     val snapshotId = SnapshotId(s"snapshot-${UUID.randomUUID()}")
-    val snapshot   = StoredCommandSnapshot(globalPosition = 3L, eventCount = 2L, filterFingerprint = "f", payload = "{}")
-    val sagaName   = s"saga-${UUID.randomUUID()}"
-    val sagaId     = SagaId.instance(sagaName, "k1")
-    val lease      = s"lease-${UUID.randomUUID()}"
+    val snapshot = StoredCommandSnapshot(globalPosition = 3L, eventCount = 2L, filterFingerprint = "f", payload = "{}")
+    val sagaName = s"saga-${UUID.randomUUID()}"
+    val sagaId = SagaId.instance(sagaName, "k1")
+    val lease = s"lease-${UUID.randomUUID()}"
     for
       _          <- module.checkpoint.save(ProjectionCheckpointState(projection, ReadCursor(0L, 5L), true, None))
       checkpoint <- module.checkpoint.load(projection)
@@ -164,14 +164,14 @@ object PostgresCustomSchemaSuite extends IOSuite:
       deleted    <- module.snapshotStore.load(snapshotId, "key", 1)
       leading    <- Deferred[IO, Long]
       leader     <- module.leaderElection
-                      .runAsLeader(lease)(leaseCount(module, lease).flatMap(leading.complete) *> IO.never)
-                      .start
-      leases     <- leading.get.timeout(10.seconds).guarantee(leader.cancel)
-      sagas       = module.sagaRepository.get
-      started    <- sagas.start(sagaId, sagaName, "k1", "data", Some(Instant.now().minusSeconds(1)), Nil)
-      advanced   <- sagas.advance(sagaId, 0, SagaStatus.Pending, 1, "data-1", Some(Instant.now().minusSeconds(1)))
-      claimed    <- sagas.claimExpired(sagaName, 10)(_ => IO.unit)
-      saga       <- sagas.find(sagaId)
+                  .runAsLeader(lease)(leaseCount(module, lease).flatMap(leading.complete) *> IO.never)
+                  .start
+      leases   <- leading.get.timeout(10.seconds).guarantee(leader.cancel)
+      sagas     = module.sagaRepository.get
+      started  <- sagas.start(sagaId, sagaName, "k1", "data", Some(Instant.now().minusSeconds(1)), Nil)
+      advanced <- sagas.advance(sagaId, 0, SagaStatus.Pending, 1, "data-1", Some(Instant.now().minusSeconds(1)))
+      claimed  <- sagas.claimExpired(sagaName, 10)(_ => IO.unit)
+      saga     <- sagas.find(sagaId)
     yield expect.all(
       checkpoint.map(_.cursor).contains(ReadCursor(0L, 5L)),
       all.exists(_.projectionName == projection),
@@ -186,13 +186,15 @@ object PostgresCustomSchemaSuite extends IOSuite:
   }
 
   test("an atomic repository commits its domain rows with the checkpoint in the persistent4s schema") { fixture =>
-    val module     = fixture.domain.module
+    val module = fixture.domain.module
     val repository = module.repository(valueTable)
     val projection = s"values-${UUID.randomUUID()}"
-    val id         = UUID.randomUUID()
-    val committed  = ProjectionCheckpointState(projection, ReadCursor(0L, 7L), true, None)
+    val id = UUID.randomUUID()
+    val committed = ProjectionCheckpointState(projection, ReadCursor(0L, 7L), true, None)
     for
-      _      <- repository.persistAtomically(ProjectionCommit(Map(id -> RecordedValue(id, "v")), Nil, ReadCursor.Start, committed))
+      _ <- repository.persistAtomically(
+             ProjectionCommit(Map(id -> RecordedValue(id, "v")), Nil, ReadCursor.Start, committed),
+           )
       read   <- repository.readWithCursor(projection)(repository.find(_, id))
       stored <- module.checkpoint.load(projection)
     yield expect.all(read == (Some(RecordedValue(id, "v")), ReadCursor(0L, 7L)), stored.contains(committed))
