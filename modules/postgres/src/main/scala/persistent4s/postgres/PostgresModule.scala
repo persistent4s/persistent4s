@@ -87,6 +87,32 @@ object PostgresModuleError:
       "Another domain of this PostgresModule already enabled the event outbox. Its relay decodes every queued event " +
         "with that domain's codec, so only one domain per module may enable it."
 
+  /** Raised at startup when the configured schema has no event store yet while other schemas of the database already
+    * hold persistent4s events, typically `public` after a service sets `schema` on an existing database. Starting
+    * anyway would create a new, empty event store beside the existing one and silently ignore it.
+    *
+    * @param schema
+    *   the configured schema
+    * @param others
+    *   the schemas whose `events` table holds events
+    */
+  final case class EventsInOtherSchema(schema: String, others: List[String]) extends PostgresModuleError:
+
+    override def getMessage: String =
+      s"""The configured schema '$schema' has no event store, but persistent4s events already exist in ${others
+          .map(other => s"'$other'")
+          .mkString(", ")}.
+         |
+         |Starting would create a new, empty event store in '$schema' and ignore the existing events. Either set
+         |`schema` to where the events are, or move the persistent4s tables into '$schema' before starting, e.g.
+         |
+         |  CREATE SCHEMA IF NOT EXISTS "$schema";
+         |  ALTER TABLE "${others.head}".events SET SCHEMA "$schema";
+         |
+         |and the same for event_tags, event_outbox, message_outbox, projection_checkpoints, command_snapshots,
+         |leader_leases and saga_instances where they exist. Indexes and sequences move with their tables; SQL outside
+         |persistent4s that names these tables, such as triggers, must be updated too.""".stripMargin
+
 /** Shared PostgreSQL infrastructure for one service: a connection pool, the tables, projection checkpoints, command
   * snapshots, leader election, the message outbox, the saga repository and a single notification listener. None of it
   * depends on an event type, so a service builds one module and then one [[PostgresDomain]] per event type with
@@ -337,6 +363,9 @@ object PostgresModule:
 
   /** The schema is created only when missing: `CREATE SCHEMA IF NOT EXISTS` still requires the CREATE privilege on the
     * database, which a role using an existing schema, `public` included, may not have.
+    *
+    * Before creating the event store in a schema for the first time, the module makes sure no other schema already
+    * holds persistent4s events (see [[PostgresModuleError.EventsInOtherSchema]]).
     */
   private def initializeDatabase[F[_]: Async: Logger](
     sessions: PostgresSessions[F],
@@ -347,17 +376,48 @@ object PostgresModule:
     val statements = Statements(schema)
     sessions.use { session =>
       for
-        schemaExists <- session.unique(statements.schemaExistsQuery)(schema.name)
-        _            <- (Logger[F].info(s"Schema ${schema.name} not found, creating it...") *>
-               session.execute(statements.createSchemaCommand)).unlessA(schemaExists)
         eventsTableExists <- session.unique(statements.tableExistsQuery)(schema.name *: "events" *: EmptyTuple)
-        _                 <-
+        _                 <- ensureNoEventsElsewhere(session, schema).unlessA(eventsTableExists)
+        schemaExists      <- session.unique(statements.schemaExistsQuery)(schema.name)
+        _                 <- (Logger[F].info(s"Schema ${schema.name} not found, creating it...") *>
+               session.execute(statements.createSchemaCommand)).unlessA(schemaExists)
+        _ <-
           if !eventsTableExists then Logger[F].info(s"Event store tables not found in ${schema.name}, creating them...")
           else
             Logger[F].info(s"Event store tables already exist in ${schema.name}, ensuring required objects are present")
         _ <- createTables(session, schema, enableMessageOutbox, enableSaga)
       yield ()
     }
+
+  /** Event stores found in other schemas are identified by the columns persistent4s gives its `events` table. Only
+    * those that hold events count: an empty one loses nothing if the configured schema starts a store of its own.
+    */
+  private def ensureNoEventsElsewhere[F[_]: Sync](session: Session[F], schema: PostgresSchema): F[Unit] =
+    for
+      candidates <- session.execute(eventStoreSchemasQuery)(schema.name)
+      nonEmpty   <- candidates.filterA(other => session.unique(holdsEventsQuery(other)))
+      _          <- PostgresModuleError
+             .EventsInOtherSchema(schema.name, nonEmpty)
+             .raiseError[F, Unit]
+             .whenA(nonEmpty.nonEmpty)
+    yield ()
+
+  private val eventStoreSchemasQuery: Query[String, String] =
+    sql"""
+      SELECT table_schema::text
+      FROM information_schema.columns
+      WHERE table_name = 'events'
+        AND table_schema <> $text
+        AND column_name IN ('sequence_number', 'event_id', 'event_type', 'tags', 'payload', 'is_external')
+      GROUP BY table_schema
+      HAVING COUNT(*) = 6
+      ORDER BY table_schema
+    """.query(text)
+
+  // Schema names come from the catalog here, so they are quoted rather than validated like configured ones.
+  private def holdsEventsQuery(schema: String): Query[Void, Boolean] =
+    val quoted = "\"" + schema.replace("\"", "\"\"") + "\""
+    sql"SELECT EXISTS (SELECT 1 FROM #$quoted.events)".query(bool)
 
   private def createTables[F[_]: Sync](
     session: Session[F],
