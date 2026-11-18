@@ -76,6 +76,14 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
 
   sealed trait EmptyFamily extends E
 
+  sealed abstract class TransferEvent extends E:
+
+    def id: String
+
+  final case class TransferSent(id: String) extends TransferEvent
+
+  final case class TransferReceived(id: String) extends TransferEvent
+
   private val books = Scope[UUID]("library.book")
 
   private val members = Scope[UUID]("library.member")
@@ -270,6 +278,52 @@ object EventSourcedProjectionFamilySuite extends SimpleIOSuite:
     yield expect(counters.filter == Set(EventTypeName.of[Started], EventTypeName.of[Bumped])) and
       expect(counters.resolveKeys(env(new Started("a"))) == List("a")) and
       expect(bumped.contains(2))
+  }
+
+  test("an enum family dispatches a parameterless case under its own schema") {
+    import SignalEvent.*
+
+    val signals = new EventSourcedProjection[IO, E, String, Int]:
+      val name = "signal-family"
+      protected val repository: Repository[IO, String, Int] = noopRepository
+      protected val eventHandlers = handlers:
+        onFamily[SignalEvent] {
+          case Reset    => "signal"
+          case Ping(id) => id
+        }.handle {
+          case (_, Reset)       => Some(0)
+          case (state, Ping(_)) => state.map(_ + 1)
+        }
+
+    for
+      reset  <- signals.handle(Some(5), envAs(Reset, resetSchema.eventType))
+      pinged <- signals.handle(Some(5), env(new Ping("a")))
+    yield expect(signals.filter == Set(EventTypeName.fromString("signal.reset"), EventTypeName.of[Ping])) and
+      expect(signals.resolveKeys(envAs(Reset, resetSchema.eventType)) == List("signal")) and
+      expect(signals.resolveKeys(env(new Ping("a"))) == List("a")) and
+      expect(reset.contains(0)) and
+      expect(pinged.contains(6))
+  }
+
+  pureTest("a sealed abstract class is rejected by on and handled as a family by onFamily") {
+    val errors = typeCheckErrors(
+      """
+      new EventSourcedProjection[IO, E, String, Int]:
+        val name = "transfer-on"
+        protected val repository: Repository[IO, String, Int] = noopRepository
+        protected val eventHandlers = handlers:
+          on[TransferEvent](_.id).set(_ => 1)
+      """,
+    )
+
+    val transfers = new EventSourcedProjection[IO, E, String, Int]:
+      val name = "transfers"
+      protected val repository: Repository[IO, String, Int] = noopRepository
+      protected val eventHandlers = handlers:
+        onFamily[TransferEvent](_.id).set(_ => 1)
+
+    expect(errors.exists(_.message.contains("TransferEvent is a sealed family of events"))) and
+      expect(transfers.filter == Set(EventTypeName.of[TransferSent], EventTypeName.of[TransferReceived]))
   }
 
   pureTest("onFamily does not compile for a type that is not a sealed family") {
