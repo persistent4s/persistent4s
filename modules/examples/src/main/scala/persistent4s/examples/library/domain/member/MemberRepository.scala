@@ -18,20 +18,18 @@ package persistent4s.examples.library.domain.member
 
 import java.util.UUID
 
-import cats.effect.{IO, Resource}
+import cats.effect.IO
 
-import persistent4s.postgres.{DerivedPostgresRepository, PostgresTable}
-
-import skunk.Session
+import persistent4s.postgres.{DerivedPostgresRepository, PostgresSessions, PostgresTable}
 
 final class MemberRepository private (
-  pool: Resource[IO, Session[IO]],
-) extends DerivedPostgresRepository[IO, UUID, MemberState](pool, MemberRepository.table)
+  sessions: PostgresSessions[IO],
+) extends DerivedPostgresRepository[IO, UUID, MemberState](sessions, MemberRepository.table)
 
 object MemberRepository:
 
   private val table: PostgresTable[UUID, MemberState] =
     PostgresTable.derived[MemberState]("members").key(_.memberId)
 
-  def make(pool: Resource[IO, Session[IO]]): MemberRepository =
-    new MemberRepository(pool)
+  def make(sessions: PostgresSessions[IO]): MemberRepository =
+    new MemberRepository(sessions)

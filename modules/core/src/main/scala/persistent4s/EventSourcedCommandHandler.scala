@@ -32,12 +32,14 @@ final case class CommandScopeViolation(
       s"Event ${eventType.value} uses command scopes that were not acquired: " +
         missingScopes.toList.map(_.value).sorted.mkString(", "),
     )
+    with Persistent4sFailure
 
 /** Raised when a high-level command emits an event type that it did not register with `on[Event]`. */
 final case class UnregisteredCommandEvent(eventClass: String)
     extends IllegalArgumentException(
       s"No event schema is registered for emitted event $eventClass; declare an on[Event] transition or ignore it",
     )
+    with Persistent4sFailure
 
 final private case class EventDescription(
   eventType: EventTypeName,

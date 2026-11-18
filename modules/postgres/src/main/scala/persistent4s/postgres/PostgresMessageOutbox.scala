@@ -33,17 +33,21 @@ import persistent4s.*
   * through the shared [[PostgresNotificationHub]], which must listen on `channelId`.
   */
 final case class PostgresMessageOutbox[F[_]: Async] private (
-  pool: Resource[F, Session[F]],
+  sessions: PostgresSessions[F],
   notificationHub: PostgresNotificationHub[F],
   channelId: Identifier,
 ) extends MessageOutbox[F]:
 
   import PostgresMessageOutbox.*
 
+  private val statements = Statements(sessions.schema)
+
+  import statements.*
+
   override def enqueue(messages: List[OutgoingMessage]): F[Unit] =
     if messages.isEmpty then Async[F].unit
     else
-      pool.use { session =>
+      sessions.use { session =>
         session.transaction.use { _ =>
           session.prepare(insertCommand).flatMap(cmd => messages.traverse_(cmd.execute)) *>
             session.channel(channelId).notify("")
@@ -51,7 +55,7 @@ final case class PostgresMessageOutbox[F[_]: Async] private (
       }
 
   override def drainBatch(batchSize: Int)(publish: List[(Long, OutgoingMessage)] => F[Unit]): F[Int] =
-    pool.use { session =>
+    sessions.use { session =>
       session.transaction.use { _ =>
         session.prepare(selectBatchQuery).flatMap(_.stream(batchSize, batchSize).compile.toList).flatMap { rows =>
           val entries = rows.map(fromRow)
@@ -72,10 +76,10 @@ object PostgresMessageOutbox:
     Identifier.fromValue("persistent4s_messages").getOrElse(sys.error("Invalid channel identifier"))
 
   def apply[F[_]: Async](
-    pool: Resource[F, Session[F]],
+    sessions: PostgresSessions[F],
     notificationHub: PostgresNotificationHub[F],
     channelId: Identifier = NotificationChannel,
-  ): PostgresMessageOutbox[F] = new PostgresMessageOutbox[F](pool, notificationHub, channelId)
+  ): PostgresMessageOutbox[F] = new PostgresMessageOutbox[F](sessions, notificationHub, channelId)
 
   private type MessageRow = Long *: String *: Option[String] *: String *: Map[String, String] *: EmptyTuple
 
@@ -92,32 +96,34 @@ object PostgresMessageOutbox:
 
   private val messageRowCodec: Codec[MessageRow] = int8 *: text *: text.opt *: text *: headersCodec
 
-  private[postgres] val createTableCommand: Command[Void] =
-    sql"""
-      CREATE TABLE IF NOT EXISTS message_outbox (
-        id BIGSERIAL PRIMARY KEY,
-        topic TEXT NOT NULL,
-        message_key TEXT,
-        payload TEXT NOT NULL,
-        headers JSONB NOT NULL DEFAULT '{}',
-        enqueud_at TIMESTAMPTZ NOT NULL DEFAULT now()
-      )
-    """.command
+  final private[postgres] class Statements(schema: PostgresSchema):
 
-  private[postgres] val insertCommand: Command[OutgoingMessage] =
-    sql"""
-      INSERT INTO message_outbox (topic, message_key, payload, headers)
-      VALUES ($text, ${text.opt}, $text, $headersCodec)
-    """.command.contramap(m => m.topic *: m.key *: m.payload *: m.headers *: EmptyTuple)
+    val createTableCommand: Command[Void] =
+      sql"""
+        CREATE TABLE IF NOT EXISTS #${schema.messageOutbox} (
+          id BIGSERIAL PRIMARY KEY,
+          topic TEXT NOT NULL,
+          message_key TEXT,
+          payload TEXT NOT NULL,
+          headers JSONB NOT NULL DEFAULT '{}',
+          enqueud_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        )
+      """.command
 
-  private val selectBatchQuery: Query[Int, MessageRow] =
-    sql"""
-      SELECT id, topic, message_key, payload, headers
-      FROM message_outbox
-      ORDER BY id ASC
-      LIMIT $int4
-      FOR UPDATE SKIP LOCKED
-    """.query(messageRowCodec)
+    val insertCommand: Command[OutgoingMessage] =
+      sql"""
+        INSERT INTO #${schema.messageOutbox} (topic, message_key, payload, headers)
+        VALUES ($text, ${text.opt}, $text, $headersCodec)
+      """.command.contramap(m => m.topic *: m.key *: m.payload *: m.headers *: EmptyTuple)
 
-  private val deleteCommand: Command[Arr[Long]] =
-    sql"DELETE FROM message_outbox WHERE id = ANY($_int8)".command
+    val selectBatchQuery: Query[Int, MessageRow] =
+      sql"""
+        SELECT id, topic, message_key, payload, headers
+        FROM #${schema.messageOutbox}
+        ORDER BY id ASC
+        LIMIT $int4
+        FOR UPDATE SKIP LOCKED
+      """.query(messageRowCodec)
+
+    val deleteCommand: Command[Arr[Long]] =
+      sql"DELETE FROM #${schema.messageOutbox} WHERE id = ANY($_int8)".command

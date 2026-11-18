@@ -99,7 +99,10 @@ object PostgresSagaRepositorySuite extends IOSuite:
                   .withUserAndPassword(config.user, config.password)
                   .withDatabase(config.database)
                   .pooled(4)
-      yield Fixture(PostgresSagaRepository[IO](pool, claimTtl = ClaimTtl), pool)
+      yield Fixture(
+        PostgresSagaRepository[IO](PostgresSessions(pool, PostgresSchema.Public), claimTtl = ClaimTtl),
+        pool,
+      )
     }
 
   // ----- schema -----
@@ -166,7 +169,7 @@ object PostgresSagaRepositorySuite extends IOSuite:
     * written in the past.
     */
   private def startExpired(fixture: Fixture, sagaName: String, key: String): IO[java.util.UUID] =
-    start(fixture, sagaName, key, expiresIn = Some(-1.second)).as(sagaId(sagaName, key))
+    start(fixture, sagaName, key, expiresIn = Some((-1).second)).as(sagaId(sagaName, key))
 
   private def claimIds(fixture: Fixture, sagaName: String, limit: Int = 10): IO[List[java.util.UUID]] =
     Ref.of[IO, List[SagaRecord]](Nil).flatMap { claimed =>

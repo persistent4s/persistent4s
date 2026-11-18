@@ -18,15 +18,13 @@ package persistent4s.examples.library.domain.borrowing
 
 import java.util.UUID
 
-import cats.effect.{IO, Resource}
+import cats.effect.IO
 
-import persistent4s.postgres.{DerivedPostgresRepository, PostgresTable}
-
-import skunk.Session
+import persistent4s.postgres.{DerivedPostgresRepository, PostgresSessions, PostgresTable}
 
 final class BorrowingRepository private (
-  pool: Resource[IO, Session[IO]],
-) extends DerivedPostgresRepository[IO, (UUID, UUID), BorrowingState](pool, BorrowingRepository.table):
+  sessions: PostgresSessions[IO],
+) extends DerivedPostgresRepository[IO, (UUID, UUID), BorrowingState](sessions, BorrowingRepository.table):
 
   def getActiveBorrowings: IO[List[BorrowingState]] =
     filterBy(_.returnedAt).isNull.run
@@ -39,5 +37,5 @@ object BorrowingRepository:
   private val table: PostgresTable[(UUID, UUID), BorrowingState] =
     PostgresTable.derived[BorrowingState]("borrowings").key(state => (state.bookId, state.memberId))
 
-  def make(pool: Resource[IO, Session[IO]]): BorrowingRepository =
-    new BorrowingRepository(pool)
+  def make(sessions: PostgresSessions[IO]): BorrowingRepository =
+    new BorrowingRepository(sessions)

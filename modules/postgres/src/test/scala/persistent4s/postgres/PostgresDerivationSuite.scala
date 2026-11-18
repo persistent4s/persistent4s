@@ -244,7 +244,10 @@ object PostgresDerivationSuite extends SimpleIOSuite:
       .key(_.bookId)
       .column(_.bookId, "id")
       .column(_.displayTitle, "title")
-    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](
+      PostgresSessions(Resource.eval(IO.never), PostgresSchema.Public),
+      table,
+    )
     val query = repository
       .filterBy(_.displayTitle)
       .is("Dune")
@@ -270,7 +273,10 @@ object PostgresDerivationSuite extends SimpleIOSuite:
 
   test("unfiltered and omitted-filter queries retain SQL ordering and pagination") {
     val table = PostgresTable.derived[BookState]("books").key(_.bookId)
-    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](
+      PostgresSessions(Resource.eval(IO.never), PostgresSchema.Public),
+      table,
+    )
     val base = repository.query.orderBy(_.bookId)
     val page = table.filterQuery(base.withLimit(2).withOffset(4).plan)
     val omitted = table.filterQuery(
@@ -298,7 +304,10 @@ object PostgresDerivationSuite extends SimpleIOSuite:
 
   test("limits bind the capped count in SQL and retain long offsets") {
     val table = PostgresTable.derived[BookState]("books").key(_.bookId)
-    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](
+      PostgresSessions(Resource.eval(IO.never), PostgresSchema.Public),
+      table,
+    )
     val base = repository.query.orderBy(_.bookId).withOffset(Long.MaxValue)
     val cases = List(
       base.withLimit(0)                                     -> 0,
@@ -326,7 +335,10 @@ object PostgresDerivationSuite extends SimpleIOSuite:
 
   test("paged IN queries combine every chunk before applying a single SQL limit") {
     val table = PostgresTable.derived[BookState]("books").key(_.bookId).withBatchSize(2)
-    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](
+      PostgresSessions(Resource.eval(IO.never), PostgresSchema.Public),
+      table,
+    )
     val query = repository
       .filterBy(_.displayTitle)
       .in(List("Dune", "Foundation", "Solaris"))
@@ -352,7 +364,10 @@ object PostgresDerivationSuite extends SimpleIOSuite:
 
   test("paged SQL queries reject plans exceeding PostgreSQL's parameter limit") {
     val table = PostgresTable.derived[BookState]("books").key(_.bookId)
-    val repository = DerivedPostgresRepository[IO, UUID, BookState](Resource.eval(IO.never), table)
+    val repository = DerivedPostgresRepository[IO, UUID, BookState](
+      PostgresSessions(Resource.eval(IO.never), PostgresSchema.Public),
+      table,
+    )
     val query = repository.filterBy(_.HTTPStatus).in(0 until Short.MaxValue.toInt).withLimit(1)
 
     IO(table.filterQuery(query.plan)).attempt.map { result =>
@@ -367,7 +382,8 @@ object PostgresDerivationSuite extends SimpleIOSuite:
   test("query bounds fail through IO before acquiring a session, including empty queries") {
     val table = PostgresTable.derived[BookState]("books").key(_.bookId)
     val pool = Resource.eval(IO.raiseError[skunk.Session[IO]](new AssertionError("Query bounds accessed PostgreSQL")))
-    val repository = DerivedPostgresRepository[IO, UUID, BookState](pool, table)
+    val repository =
+      DerivedPostgresRepository[IO, UUID, BookState](PostgresSessions(pool, PostgresSchema.Public), table)
     val negativeLimit = repository.query.withLimit(-1).run
     val negativeOffset = repository.query.withOffset(-1).run
     val invalidZeroLimit = repository.query.withLimit(0).withOffset(-1).run
@@ -398,7 +414,8 @@ object PostgresDerivationSuite extends SimpleIOSuite:
     val table = PostgresTable.derived[BookState]("books").key(_.bookId)
     val pool =
       Resource.eval(IO.raiseError[skunk.Session[IO]](new AssertionError("Invalid maximum accessed PostgreSQL")))
-    val repository = DerivedPostgresRepository[IO, UUID, BookState](pool, table)
+    val repository =
+      DerivedPostgresRepository[IO, UUID, BookState](PostgresSessions(pool, PostgresSchema.Public), table)
     val queries = List(
       repository.query.withLimit(50, maxLimit = -1),
       repository.query.withLimit(0, maxLimit = -1),

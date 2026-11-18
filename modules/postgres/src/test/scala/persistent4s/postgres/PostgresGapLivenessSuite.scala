@@ -201,7 +201,7 @@ object PostgresGapLivenessSuite extends IOSuite:
   ProjectorKinds.foreach { kind =>
     test(s"$kind reaches a matching event that sits behind more than one pass of non-matching events") { components =>
       for
-        _       <- truncate(components.module.sessions)
+        _       <- truncate(components.module.sessions.pool)
         _       <- appendNoise(components.eventStore, PassLimit * 3)
         _       <- appendTarget(components.eventStore, "after-noise")
         handled <- project(projector(kind, components), expected = 1, within = 5.seconds)
@@ -213,7 +213,7 @@ object PostgresGapLivenessSuite extends IOSuite:
       // projector starts listening, so no notification will arrive to drive the catch-up.
       val stretches = 4
       for
-        _ <- truncate(components.module.sessions)
+        _ <- truncate(components.module.sessions.pool)
         _ <- (1 to stretches).toList.traverse_ { stretch =>
                appendNoise(components.eventStore, PassLimit - 1) *>
                  appendTarget(components.eventStore, s"stretch-$stretch")
@@ -310,7 +310,7 @@ object PostgresGapLivenessSuite extends IOSuite:
       components =>
         val account = UUID.randomUUID().toString
         for
-          _      <- truncate(components.module.sessions)
+          _      <- truncate(components.module.sessions.pool)
           _      <- appendLedger(components.eventStore, account, "opened")
           _      <- appendLedger(components.eventStore, account, "funded")
           _      <- appendNoise(components.eventStore, LongHistory)
@@ -324,7 +324,7 @@ object PostgresGapLivenessSuite extends IOSuite:
       val unrelated = UUID.randomUUID().toString
       val unrelatedId = UUID.randomUUID()
       for
-        _ <- truncate(components.module.sessions)
+        _ <- truncate(components.module.sessions.pool)
         _ <- appendLedger(components.eventStore, account, "opened")
         _ <- appendLedger(components.eventStore, unrelated, "elsewhere", Some(unrelatedId))
         // Re-appending a stored id burns the sequence_number allocated for the discarded row, leaving a gap.
@@ -347,7 +347,7 @@ object PostgresGapLivenessSuite extends IOSuite:
         .attempt
         .map(_.leftMap(_.toString).flatMap(_.bimap(rejection => s"rejected: $rejection", _.map(_.payload))))
     for
-      _     <- truncate(components.module.sessions)
+      _     <- truncate(components.module.sessions.pool)
       _     <- appendLedger(components.eventStore, account, "opened")
       _     <- appendLedger(components.eventStore, account, "funded")
       first <- withdraw

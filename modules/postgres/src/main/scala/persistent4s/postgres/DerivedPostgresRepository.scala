@@ -16,7 +16,7 @@
 
 package persistent4s.postgres
 
-import cats.effect.{Async, Resource}
+import cats.effect.Async
 import cats.syntax.all.*
 
 import skunk.{AppliedFragment, Codec, Session}
@@ -28,11 +28,11 @@ import skunk.codec.all.{bool, int8}
   * and atomic checkpoint persistence need no application SQL.
   */
 class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
-  pool: Resource[F, Session[F]],
+  sessions: PostgresSessions[F],
   final protected val mapping: PostgresTable[K, S],
   customize: PostgresRepositoryTable[F, K, S] => PostgresRepositoryTable[F, K, S] =
     (table: PostgresRepositoryTable[F, K, S]) => table,
-) extends PostgresAtomicRepository[F, K, S](pool):
+) extends PostgresAtomicRepository[F, K, S](sessions):
 
   final override protected val table: PostgresRepositoryTable[F, K, S] =
     val base = customize(mapping.repositoryTable[F])
@@ -313,16 +313,16 @@ class DerivedPostgresRepository[F[_]: Async, K, S <: Product](
 object DerivedPostgresRepository:
 
   def apply[F[_]: Async, K, S <: Product](
-    pool: Resource[F, Session[F]],
+    sessions: PostgresSessions[F],
     table: PostgresTable[K, S],
   ): DerivedPostgresRepository[F, K, S] =
-    new DerivedPostgresRepository(pool, table)
+    new DerivedPostgresRepository(sessions, table)
 
   /** Build a derived repository while replacing one or more generated session-bound callbacks. */
   def customized[F[_]: Async, K, S <: Product](
-    pool: Resource[F, Session[F]],
+    sessions: PostgresSessions[F],
     table: PostgresTable[K, S],
   )(
     customize: PostgresRepositoryTable[F, K, S] => PostgresRepositoryTable[F, K, S],
   ): DerivedPostgresRepository[F, K, S] =
-    new DerivedPostgresRepository(pool, table, customize)
+    new DerivedPostgresRepository(sessions, table, customize)

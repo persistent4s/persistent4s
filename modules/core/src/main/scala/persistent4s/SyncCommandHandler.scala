@@ -61,8 +61,9 @@ final case class SyncCommandHandler[F[_], C, E <: Event, K, PS](
 ):
 
   /** Run the command, then wait until the projection has processed and persisted every event it produced. Fails with
-    * the projection's own error if any of the events fail to process, or with a timeout error if the projection doesn't
-    * catch up in time. The events are appended either way - this only gates the return, it cannot undo the write.
+    * [[ProjectionEventFailed]] if any of the events fail to process, or with [[ProjectionCatchUpTimeout]] if the
+    * projection doesn't catch up in time. The events are appended either way - this only gates the return, it cannot
+    * undo the write.
     */
   def runSync(command: C)(using F: Temporal[F]): F[Map[K, Option[PS]]] =
     topic.subscribeAwait(maxQueued).use { stream =>
@@ -71,7 +72,8 @@ final case class SyncCommandHandler[F[_], C, E <: Event, K, PS](
         ids        = envelopes.filter(e => filter.isEmpty || filter.contains(e.metadata.eventType)).map(_.metadata.id).toSet
         result    <-
           if ids.isEmpty then F.pure(Map.empty[K, Option[PS]])
-          else F.timeout(SyncCommandHandler.awaitAll(stream, ids), timeout)
+          else
+            F.timeoutTo(SyncCommandHandler.awaitAll(stream, ids), timeout, F.raiseError(new ProjectionCatchUpTimeout))
       yield result
     }
 

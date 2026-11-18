@@ -22,9 +22,13 @@ import cats.syntax.all.*
 import fs2.Stream
 import org.typelevel.otel4s.metrics.Meter
 import org.typelevel.otel4s.trace.Tracer
+import io.opentelemetry.api.common.AttributeKey
+import org.typelevel.otel4s.oteljava.testkit.OtelJavaTestkit
 import weaver.SimpleIOSuite
 
 import java.util.UUID
+
+import scala.jdk.CollectionConverters.*
 
 object InstrumentedEventStoreSuite extends SimpleIOSuite:
 
@@ -179,6 +183,45 @@ object InstrumentedEventStoreSuite extends SimpleIOSuite:
                    (store.readForProjection(ReadCursor.Start, EventFilter(), 10), store.cursorAt(5L)).tupled
                  }
     yield expect(clue(results) == List.fill(2)((inner.read, ReadCursor(7L, 5L))))
+  }
+
+  test("failures other than conflicts are counted with their operation and error type") {
+    val pending =
+      List[PendingEvent[TestEvent]](
+        PendingEvent(TestEvent.Created("x"), Set.empty, EventTypeName.of[TestEvent.Created], isExternal = false),
+      )
+    OtelJavaTestkit.inMemory[IO]().use { testkit =>
+      for
+        meter  <- testkit.meterProvider.get("event-store-test")
+        stores <- {
+          given Meter[IO] = meter
+          (
+            InstrumentedEventStore.make[IO, TestEvent](SentinelStore()),
+            InstrumentedEventStore.make[IO, TestEvent](ConflictingStore()),
+          ).tupled
+        }
+        (failing, conflicting) = stores
+        _                     <- failing.append(EventFilter(), 0L, pending).attempt
+        _                     <- failing.appendUnchecked(pending).attempt
+        _                     <- conflicting.append(EventFilter(), 0L, pending).attempt
+        metrics               <- testkit.collectMetrics
+        points                 = metrics
+                   .filter(_.getName == "persistent4s.eventstore.errors")
+                   .flatMap(_.getLongSumData.getPoints.asScala)
+        recorded = points.map { point =>
+                     val attributes = point.getAttributes
+                     (
+                       attributes.get(AttributeKey.stringKey("operation")),
+                       attributes.get(AttributeKey.stringKey("error.type")),
+                     )
+                   }
+      yield expect(
+        recorded.toSet == Set(
+          "append"           -> "java.lang.UnsupportedOperationException",
+          "append_unchecked" -> "java.lang.UnsupportedOperationException",
+        ),
+      ) and expect(points.forall(_.getValue == 1L))
+    }
   }
 
   test("append delegates to inner store") {

@@ -24,6 +24,26 @@ import org.typelevel.log4cats.Logger
 import org.typelevel.otel4s.trace.Tracer
 import org.typelevel.otel4s.metrics.Meter
 import java.util.UUID
+import java.util.concurrent.TimeoutException
+
+/** Sent to commands waiting on a projection when it fails to process one of their events. The events are already saved;
+  * the projection pauses with `cause` until it is resumed.
+  *
+  * @param projectionName
+  *   the projection that failed
+  * @param eventId
+  *   the event it could not process
+  * @param cause
+  *   the projection's error
+  */
+final case class ProjectionEventFailed(projectionName: String, eventId: UUID, cause: Throwable)
+    extends RuntimeException(s"Projection $projectionName failed to process event $eventId: ${cause.getMessage}", cause)
+    with Persistent4sFailure
+
+/** Raised when a projection does not process a command's events before the wait expires. The events are already saved. */
+final class ProjectionCatchUpTimeout
+    extends TimeoutException("Projection did not catch up in time")
+    with Persistent4sFailure
 
 /** Drives a [[Projection]] by reading events from an [[EventStore]], tracking progress via a [[ProjectionCheckpoint]],
   * and reacting to [[EventNotification]]s. Delivery semantics (batching, retry, checkpoint frequency) are determined by
@@ -42,7 +62,8 @@ trait Projector[F[_], A <: Event]:
     *   the projection to run
     * @param topic
     *   an optional topic to publish the projection state after a batch is processed. Used by [[SyncCommandHandler]] to
-    *   wait for the projection to catch up before returning from a command.
+    *   wait for the projection to catch up before returning from a command. A failing event is published as a
+    *   [[ProjectionEventFailed]].
     */
   def run[K, S](
     projection: Projection[F, A, K, S],

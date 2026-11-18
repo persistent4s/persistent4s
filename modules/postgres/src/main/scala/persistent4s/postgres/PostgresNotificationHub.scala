@@ -30,7 +30,7 @@ import org.typelevel.log4cats.Logger
 import skunk.Session
 import skunk.data.{Identifier, Notification}
 
-import persistent4s.Backoff
+import persistent4s.{Backoff, Persistent4sFailure}
 
 /** Shares one PostgreSQL `LISTEN` session between every notification consumer of the process.
   *
@@ -128,7 +128,9 @@ object PostgresNotificationHub:
     case CatchUp
 
   /** Raised when the notification streams of the listening session end without an error. */
-  case object ListenerStopped extends RuntimeException("PostgreSQL notification listener stopped")
+  case object ListenerStopped
+      extends RuntimeException("PostgreSQL notification listener stopped")
+      with Persistent4sFailure
 
   val DefaultMaxQueued: Int = 1024
 

@@ -29,7 +29,7 @@ import fs2.{Chunk, Stream}
 import fs2.kafka.*
 import io.circe.{Json, parser}
 
-import persistent4s.{Event, EventCodec, EventEnvelope, EventMetadata, EventTypeName, Outbox, Tag}
+import persistent4s.{Event, EventCodec, EventEncodingFailed, EventEnvelope, EventMetadata, EventTypeName, Outbox, Tag}
 import persistent4s.EventSubscriber
 import persistent4s.EventPublisher
 import persistent4s.MessagePublisher
@@ -91,7 +91,7 @@ object KafkaModule:
           val headers = buildHeaders(envelope)
           Async[F].pure(ProducerRecord(topic, key, value).withHeaders(headers))
         case Left(error) =>
-          Async[F].raiseError(new RuntimeException(s"EventCodec failed to encode event: ${error.getMessage}", error))
+          Async[F].raiseError(EventEncodingFailed(envelope.payload.getClass.getName, error))
 
     KafkaProducer.resource(settings).map { producer =>
       new EventPublisher[F, A] {

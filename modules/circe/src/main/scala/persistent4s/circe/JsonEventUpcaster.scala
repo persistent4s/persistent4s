@@ -20,7 +20,7 @@ import scala.util.control.NonFatal
 
 import io.circe.Json
 
-import persistent4s.EventTypeName
+import persistent4s.{EventTypeName, Persistent4sFailure}
 
 /** A stored event is newer than the event schema understood by this application. */
 final case class FutureEventVersion(
@@ -31,6 +31,7 @@ final case class FutureEventVersion(
       s"Event ${eventType.value} has schema version $storedVersion, but this application only supports up to " +
         s"version $currentVersion",
     )
+    with Persistent4sFailure
 
 /** No upcast step was registered for one version in an event's evolution chain. */
 final case class MissingEventUpcast(
@@ -41,6 +42,7 @@ final case class MissingEventUpcast(
       s"Event ${eventType.value} requires an upcast from version $fromVersion to ${fromVersion + 1} " +
         s"before it can be decoded as version $currentVersion",
     )
+    with Persistent4sFailure
 
 /** Invalid schema version read from storage. */
 final case class InvalidEventVersion(
@@ -49,6 +51,7 @@ final case class InvalidEventVersion(
 ) extends IllegalArgumentException(
       s"Event ${eventType.value} has invalid schema version $storedVersion; versions start at 1",
     )
+    with Persistent4sFailure
 
 /** Ordered JSON transformations for evolving stored payloads of event `E`. Each step transforms exactly one schema
   * version into the next. Upcasters operate on JSON before the current Circe `Decoder[E]` runs, so old event classes do

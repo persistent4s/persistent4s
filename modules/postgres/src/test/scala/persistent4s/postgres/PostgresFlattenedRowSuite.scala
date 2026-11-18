@@ -232,7 +232,10 @@ object PostgresFlattenedRowSuite extends SimpleIOSuite:
   test("derived filters accept nested fields through Option.map and flatMap") {
     given PostgresRow[Person] = PostgresRow.flattened[Person](lowerCase)
     val table = PostgresTable.derived[Person]("people").key(_.id)
-    val repository = DerivedPostgresRepository[IO, Long, Person](Resource.eval(IO.never), table)
+    val repository = DerivedPostgresRepository[IO, Long, Person](
+      PostgresSessions(Resource.eval(IO.never), PostgresSchema.Public),
+      table,
+    )
     val query = repository
       .filterBy(_.home.city)
       .is("Sion")
@@ -260,7 +263,10 @@ object PostgresFlattenedRowSuite extends SimpleIOSuite:
   test("nested selections and grouped counts use flattened columns") {
     given PostgresRow[Person] = PostgresRow.flattened[Person](lowerCase)
     val table = PostgresTable.derived[Person]("people").key(_.id)
-    val repository = DerivedPostgresRepository[IO, Long, Person](Resource.eval(IO.never), table)
+    val repository = DerivedPostgresRepository[IO, Long, Person](
+      PostgresSessions(Resource.eval(IO.never), PostgresSchema.Public),
+      table,
+    )
     val query = repository.filterBy(_.active).is(true).withLimit(10).withOffset(2)
     val selection = query.select(_.work.flatMap(_.postalCode)).statement
     val grouped = table.countByQuery("home.city", text, query.plan)
@@ -271,7 +277,7 @@ object PostgresFlattenedRowSuite extends SimpleIOSuite:
       final case class Person(id: Long, address: Address)
       given PostgresRow[Person] = PostgresRow.flattened[Person](_.replace(".", "_"))
       val table = PostgresTable.derived[Person]("people").key(_.id)
-      val repository = DerivedPostgresRepository[IO, Long, Person](Resource.eval(IO.never), table)
+      val repository = DerivedPostgresRepository[IO, Long, Person](PostgresSessions(Resource.eval(IO.never), PostgresSchema.Public), table)
       val count: IO[Map[String, Long]] = repository.query.countBy(_.address.city)
     """)
     IO.pure(

@@ -45,13 +45,20 @@ object PostgresLeaderElectionSuite extends IOSuite:
         .withUserAndPassword(cfg.user, cfg.password)
         .withDatabase(cfg.database)
         .pooled(cfg.maxConnections)
-        .evalTap(pool => pool.use(_.execute(PostgresLeaderElection.createTableCommand).void))
+        .evalTap(pool =>
+          pool.use(_.execute(PostgresLeaderElection.Statements(PostgresSchema.Public).createTableCommand).void),
+        )
     }
 
   // Test-fast timings. renewTimeout (400ms) < ttl/3 (667ms), as `make` requires.
   private def election(pool: Resource[IO, Session[IO]]): IO[PostgresLeaderElection[IO]] =
     SecureRandom.javaSecuritySecureRandom[IO].map { implicit sr =>
-      PostgresLeaderElection.make[IO](pool, ttl = 2.seconds, pollInterval = 300.millis, renewTimeout = 400.millis)
+      PostgresLeaderElection.make[IO](
+        PostgresSessions(pool, PostgresSchema.Public),
+        ttl = 2.seconds,
+        pollInterval = 300.millis,
+        renewTimeout = 400.millis,
+      )
     }
 
   /** A task that records itself as active while it runs (until cancelled). */

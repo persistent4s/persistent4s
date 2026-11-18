@@ -182,7 +182,12 @@ final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
                            persistProgress(progress, projectionState, Some(error)) *>
                              topic.traverse_(t =>
                                Async[F].timeoutTo(
-                                 t.publish1((event.metadata.id, Left(error))).void,
+                                 t.publish1(
+                                   (
+                                     event.metadata.id,
+                                     Left(ProjectionEventFailed(projection.name, event.metadata.id, error)),
+                                   ),
+                                 ).void,
                                  publishTimeout,
                                  Applicative[F].unit,
                                ),

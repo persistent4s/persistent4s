@@ -35,6 +35,7 @@ import org.typelevel.otel4s.trace.Tracer
   *   - counter `persistent4s.events.read`
   *   - histogram `persistent4s.append.duration` (ms)
   *   - counter `persistent4s.conflicts` on [[IndexConflictException]]
+  *   - counter `persistent4s.eventstore.errors` on any other failure, with its `operation` and `error.type`
   */
 final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
   inner: EventStore[F, A],
@@ -42,6 +43,8 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
   eventsRead: Counter[F, Long],
   appendDuration: Histogram[F, Double],
   conflicts: Counter[F, Long],
+  errors: Counter[F, Long],
+  errorType: ErrorType,
 ) extends EventStore[F, A]:
 
   /** Delegated unchanged: the decorator must not hide the inner store's schema registry, or schema-aware handlers would
@@ -71,7 +74,7 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
           case Left(e: IndexConflictException) =>
             conflicts.add(1L, metricAttrs*) *> Async[F].raiseError(e)
           case Left(e) =>
-            Async[F].raiseError(e)
+            recordError("append", e, metricAttrs) *> Async[F].raiseError(e)
         },
       )
 
@@ -86,7 +89,7 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
       .surround(
         Telemetry.timed(appendDuration)(inner.appendUnchecked(events*)).flatMap {
           case Right(w) => eventsAppended.add(eventCount).as(w)
-          case Left(e)  => Async[F].raiseError(e)
+          case Left(e)  => recordError("append_unchecked", e, Nil) *> Async[F].raiseError(e)
         },
       )
 
@@ -107,6 +110,7 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
           .resource,
       )
       .flatMap(_ => inner.readFrom(fromPosition, eventFilter, maxEvents).evalTap(_ => eventsRead.add(1L, metricAttrs*)))
+      .handleErrorWith(e => Stream.exec(recordError("read_from", e, metricAttrs)) ++ Stream.raiseError[F](e))
 
   override def readForProjection(
     after: ReadCursor,
@@ -122,12 +126,19 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
       .addAttributes(spanAttrs*)
       .build
       .surround(
-        inner.readForProjection(after, eventFilter, maxEvents).flatTap { read =>
-          eventsRead.add(read.events.size.toLong, metricAttrs*)
-        },
+        inner
+          .readForProjection(after, eventFilter, maxEvents)
+          .flatTap(read => eventsRead.add(read.events.size.toLong, metricAttrs*))
+          .onError(e => recordError("read_for_projection", e, metricAttrs)),
       )
 
   override def cursorAt(globalPosition: Long): F[ReadCursor] = inner.cursorAt(globalPosition)
+
+  private def recordError(operation: String, error: Throwable, metricAttrs: List[Attribute[String]]): F[Unit] =
+    errors.add(
+      1L,
+      metricAttrs ++ List(Attribute("operation", operation), Attribute("error.type", errorType.name(error)))*,
+    )
 
   private def spanAttributes(f: EventFilter): List[Attribute[String]] =
     List(
@@ -143,8 +154,12 @@ final class InstrumentedEventStore[F[_]: Async: Tracer, A <: Event] private (
 
 object InstrumentedEventStore:
 
+  /** @param errorType
+    *   names failures in the `persistent4s.eventstore.errors` metric (default: their class name)
+    */
   def make[F[_]: Async: Tracer: Meter, A <: Event](
     inner: EventStore[F, A],
+    errorType: ErrorType = ErrorType.default,
   ): F[InstrumentedEventStore[F, A]] =
     for
       eventsAppended <- Meter[F]
@@ -167,13 +182,19 @@ object InstrumentedEventStore:
                      .withDescription("Number of optimistic concurrency conflicts")
                      .withUnit("{conflicts}")
                      .create
-    yield new InstrumentedEventStore(inner, eventsAppended, eventsRead, appendDuration, conflicts)
+      errors <- Meter[F]
+                  .counter[Long]("persistent4s.eventstore.errors")
+                  .withDescription("Number of failed event store operations, excluding concurrency conflicts")
+                  .withUnit("{errors}")
+                  .create
+    yield new InstrumentedEventStore(inner, eventsAppended, eventsRead, appendDuration, conflicts, errors, errorType)
 
   /** Like [[make]], but preserves [[EventNotification]] from the inner store. */
   def makeWithNotification[F[_]: Async: Tracer: Meter, A <: Event](
     inner: EventStore[F, A] & EventNotification[F],
+    errorType: ErrorType = ErrorType.default,
   ): F[EventStore[F, A] & EventNotification[F]] =
-    make(inner).map { instrumented =>
+    make(inner, errorType).map { instrumented =>
       new EventStore[F, A] with EventNotification[F]:
         export instrumented.{append, appendUnchecked, currentRevision, cursorAt, readForProjection, readFrom}
         override def storageSchema(event: A): Option[EventStorageSchema] = instrumented.storageSchema(event)

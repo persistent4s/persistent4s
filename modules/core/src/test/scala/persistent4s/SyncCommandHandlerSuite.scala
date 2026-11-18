@@ -271,8 +271,8 @@ object SyncCommandHandlerSuite extends SimpleIOSuite:
       result   <- sync.runSync(CreateMany(List("a"))).attempt
       stored   <- store.getAll
       isTimeout = result match
-                    case Left(_: java.util.concurrent.TimeoutException) => true
-                    case _                                              => false
+                    case Left(_: ProjectionCatchUpTimeout) => true
+                    case _                                 => false
     yield expect.all(isTimeout, stored.exists(_.payload == TestEvent.Created("a")))
   }
 

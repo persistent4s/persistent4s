@@ -33,7 +33,11 @@ private[postgres] object SqlIdentifier:
     require(isValid(value), s"Invalid PostgreSQL column name [$value]")
     quote(value)
 
-  private def isValid(value: String): Boolean =
+  def schema(value: String): String =
+    require(isValid(value), s"Invalid PostgreSQL schema name [$value]")
+    quote(value)
+
+  def isValid(value: String): Boolean =
     ValidPart.matches(value) && value.getBytes(StandardCharsets.UTF_8).length <= MaxBytes
 
   private def quote(value: String): String =

@@ -35,6 +35,7 @@ final case class ProjectionCheckpointConflict(
 ) extends RuntimeException(
       s"Projection $projectionName is no longer at checkpoint $expected",
     )
+    with Persistent4sFailure
 
 /** A projection repository capable of committing read-model changes and their checkpoint in one transaction.
   *

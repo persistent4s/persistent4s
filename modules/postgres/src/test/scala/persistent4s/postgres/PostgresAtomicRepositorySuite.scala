@@ -58,18 +58,20 @@ object PostgresAtomicRepositorySuite extends IOSuite:
           Resource
             .eval(
               pool.use { session =>
-                session.execute(PostgresProjectionCheckpoint.createTableCommand).void *>
+                session
+                  .execute(PostgresProjectionCheckpoint.Statements(PostgresSchema.Public).createTableCommand)
+                  .void *>
                   session.execute(createStateTable).void
               },
             )
-            .as(Resources(pool, PostgresProjectionCheckpoint.make(pool)))
+            .as(Resources(pool, PostgresProjectionCheckpoint.make(PostgresSessions(pool, PostgresSchema.Public))))
         }
     }
 
   final private class TestRepository(
     pool: Resource[IO, Session[IO]],
     failAfterWrite: Boolean = false,
-  ) extends PostgresAtomicRepository[IO, String, Int](pool):
+  ) extends PostgresAtomicRepository[IO, String, Int](PostgresSessions(pool, PostgresSchema.Public)):
 
     protected val table: PostgresRepositoryTable[IO, String, Int] =
       PostgresRepositoryTable(
@@ -88,7 +90,7 @@ object PostgresAtomicRepositorySuite extends IOSuite:
     pool: Resource[IO, Session[IO]],
     existing: Map[String, Int] = Map.empty,
     batchSize: Int = 2,
-  ) extends PostgresAtomicRepository[IO, String, Int](pool):
+  ) extends PostgresAtomicRepository[IO, String, Int](PostgresSessions(pool, PostgresSchema.Public)):
 
     var fetchCalls: List[List[String]] = Nil
 
@@ -123,7 +125,7 @@ object PostgresAtomicRepositorySuite extends IOSuite:
   final private class RowsRepository(
     pool: Resource[IO, Session[IO]],
     existing: List[EmbeddedState],
-  ) extends PostgresAtomicRepository[IO, String, EmbeddedState](pool):
+  ) extends PostgresAtomicRepository[IO, String, EmbeddedState](PostgresSessions(pool, PostgresSchema.Public)):
 
     var fetchCalls: List[List[String]] = Nil
 

@@ -49,6 +49,9 @@ enum PostgresSslMode derives ConfigReader:
   * @param ssl
   *   SSL/TLS mode (default: [[PostgresSslMode.Disabled]]). For production, set to [[PostgresSslMode.System]]. See
   *   [[PostgresSslMode]] for the per-mode trade-offs.
+  * @param schema
+  *   the schema persistent4s creates its own tables in (default: [[PostgresSchema.Public]]), e.g. `persistent4s` to
+  *   keep them apart from the application's tables
   */
 final case class PostgresConfig(
   host: String,
@@ -58,4 +61,5 @@ final case class PostgresConfig(
   database: String,
   maxConnections: Int = 32,
   ssl: PostgresSslMode = PostgresSslMode.Disabled,
+  schema: PostgresSchema = PostgresSchema.Public,
 ) derives ConfigReader

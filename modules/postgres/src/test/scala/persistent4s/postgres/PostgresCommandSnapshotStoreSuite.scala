@@ -45,8 +45,11 @@ object PostgresCommandSnapshotStoreSuite extends IOSuite:
         .pooled(config.maxConnections)
         .flatMap { pool =>
           Resource
-            .eval(pool.use(_.execute(PostgresCommandSnapshotStore.createTableCommand).void))
-            .as(PostgresCommandSnapshotStore.make(pool))
+            .eval(
+              pool
+                .use(_.execute(PostgresCommandSnapshotStore.Statements(PostgresSchema.Public).createTableCommand).void),
+            )
+            .as(PostgresCommandSnapshotStore.make(PostgresSessions(pool, PostgresSchema.Public)))
         }
     }
 

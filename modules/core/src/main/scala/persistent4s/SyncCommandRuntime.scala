@@ -17,7 +17,6 @@
 package persistent4s
 
 import java.util.UUID
-import java.util.concurrent.TimeoutException
 
 import scala.concurrent.duration.FiniteDuration
 
@@ -38,8 +37,8 @@ final class SyncCommandRuntime[F[_], A <: Event] private (
 
   /** Runs a command and waits for its accepted events to reach the configured projection.
     *
-    * Rejections and commands without matching events return immediately. Command and projection failures keep their
-    * original error. A timeout does not undo saved events.
+    * Rejections and commands without matching events return immediately. Command failures keep their original error; a
+    * projection failure arrives as [[ProjectionEventFailed]]. A timeout does not undo saved events.
     *
     * @param handler
     *   command definition
@@ -73,7 +72,7 @@ object SyncCommandRuntime:
     * @param maxQueued
     *   notifications buffered for each command
     * @param timeoutError
-    *   error raised only when waiting for the projection times out
+    *   error raised only when waiting for the projection times out (default: [[ProjectionCatchUpTimeout]])
     * @return
     *   a runtime shared by all handlers using this event type and projection
     */
@@ -83,7 +82,7 @@ object SyncCommandRuntime:
     filter: Set[EventTypeName],
     timeout: FiniteDuration,
     maxQueued: Int = 256,
-    timeoutError: => Throwable = new TimeoutException("Projection did not catch up in time"),
+    timeoutError: => Throwable = new ProjectionCatchUpTimeout,
   ): SyncCommandRuntime[F, A] =
     val F = Temporal[F]
     val subscribed = topic.subscribeAwait(maxQueued).map { stream => (envelopes: List[EventEnvelope[A]]) =>
