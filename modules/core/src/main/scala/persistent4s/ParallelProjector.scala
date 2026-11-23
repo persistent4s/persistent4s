@@ -350,8 +350,18 @@ final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
                          ),
                        )
         heldBack <- Ref.of[F, Boolean](false)
-      } yield (projectionState, wakeupState, heldBack)
-    }.flatMap { case (projectionState, wakeupState, heldBack) =>
+        waiters  <- topic.traverse(
+                     PausedWaiters.make(
+                       projection.name,
+                       EventFilter(projection.filter, Set.empty),
+                       eventStore,
+                       _,
+                       publishTimeout,
+                     ),
+                   )
+        _ <- waiters.traverse_(_.skipStored).whenA(!initialState.running)
+      } yield (projectionState, wakeupState, heldBack, waiters)
+    }.flatMap { case (projectionState, wakeupState, heldBack, waiters) =>
       val notifications =
         eventStore
           .notification(projection.name)
@@ -373,9 +383,12 @@ final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
           .evalMap { work =>
             (for {
               _     <- work.notif.traverse_(notif => processNotification(notif, projectionState, wakeupState))
+              _     <- waiters.traverse_(_.reset).whenA(work.notif.exists(PausedWaiters.resumes))
               state <- projectionState.get
               read  <- if (state.running && work.pendingEvents)
                         processEvents(projectionState).map(Some(_))
+                      else if (work.pendingEvents)
+                        waiters.flatTraverse(_.answer(state, passLimit))
                       else
                         Applicative[F].pure(None)
               _ <- read.traverse_(r => heldBack.set(r.heldBack))
@@ -384,7 +397,8 @@ final case class ParallelProjector[F[_]: Async: Logger: Parallel, A <: Event](
                 else Applicative[F].unit
             } yield ()).handleErrorWith {
               case _: ProjectionCheckpointConflict => retryAfterConflict(projectionState, wakeupState)
-              case error                           => pauseWithError(projectionState)(error)
+              case error                           =>
+                pauseWithError(projectionState)(error) *> markPending(wakeupState).whenA(waiters.isDefined)
             }
           }
 

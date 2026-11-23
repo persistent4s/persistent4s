@@ -40,6 +40,22 @@ final case class ProjectionEventFailed(projectionName: String, eventId: UUID, ca
     extends RuntimeException(s"Projection $projectionName failed to process event $eventId: ${cause.getMessage}", cause)
     with Persistent4sFailure
 
+/** Sent to commands waiting on a paused projection, as soon as their events are stored, instead of letting them wait
+  * for their timeout. The events are already saved; the projection processes them once it is resumed.
+  *
+  * @param projectionName
+  *   the paused projection
+  * @param eventId
+  *   the event it does not process while paused
+  * @param error
+  *   the first line of the error that paused it, or `None` when it was paused on request
+  */
+final case class ProjectionPaused(projectionName: String, eventId: UUID, error: Option[String])
+    extends RuntimeException(
+      s"Projection $projectionName is paused${error.fold("")(e => s" by an error ($e)")}; event $eventId waits until it is resumed",
+    )
+    with Persistent4sFailure
+
 /** Raised when a projection does not process a command's events before the wait expires. The events are already saved. */
 final class ProjectionCatchUpTimeout
     extends TimeoutException("Projection did not catch up in time")
@@ -63,7 +79,8 @@ trait Projector[F[_], A <: Event]:
     * @param topic
     *   an optional topic to publish the projection state after a batch is processed. Used by [[SyncCommandHandler]] to
     *   wait for the projection to catch up before returning from a command. A failing event is published as a
-    *   [[ProjectionEventFailed]].
+    *   [[ProjectionEventFailed]]; while the projection is paused, each event it does not process is published as a
+    *   [[ProjectionPaused]].
     */
   def run[K, S](
     projection: Projection[F, A, K, S],

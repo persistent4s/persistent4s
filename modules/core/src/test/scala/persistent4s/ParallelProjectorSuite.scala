@@ -770,3 +770,124 @@ object ParallelProjectorSuite extends SimpleIOSuite:
           )
         case other => failure(s"Expected ProjectionEventFailed, got $other"))
   }
+
+  // ---------------------------------------------------------------------------
+  // Commands waiting on a paused projection
+  // ---------------------------------------------------------------------------
+
+  private def appendOne(
+    store: InMemoryStore[TestEvent],
+    event: TestEvent,
+    expected: Long,
+  ): IO[EventEnvelope[TestEvent]] =
+    store
+      .append(
+        EventFilter(),
+        expected,
+        List(PendingEvent(event, Set.empty, EventTypeName.fromInstance(event), false, None, Map.empty)),
+      )
+      .map(_.head)
+
+  private def pausedAnswer(
+    stream: Stream[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])],
+    eventId: UUID,
+  ): IO[ProjectionPaused] =
+    stream.collectFirst { case (`eventId`, Left(paused: ProjectionPaused)) => paused }.compile.lastOrError
+      .timeout(2.seconds)
+
+  test("answers commands waiting on a paused projection as soon as their events are stored, without processing them") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states)
+      topic      <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      answer     <- ParallelProjector(store, checkpoint).run(projection, Some(topic)).compile.drain.background.use { _ =>
+                  for
+                    _      <- store.sendNotification(PauseProjection(projection.name))
+                    _      <- waitUntil(checkpoint.load(projection.name).map(_.exists(!_.running)))
+                    result <- topic.subscribeAwait(16).use { stream =>
+                                appendOne(store, TestEvent.Created("a"), 0L)
+                                  .flatMap(event => pausedAnswer(stream, event.metadata.id))
+                              }
+                  yield result
+                }
+      processed <- handled.get
+    yield expect(answer.projectionName == projection.name) and expect(answer.error.isEmpty) and expect(
+      processed.isEmpty,
+    )
+  }
+
+  test("after an event fails, commands waiting on the events behind it are answered at once with its error") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states, failOnPosition = Some(1L))
+      topic      <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      _          <- seed(store, (Set(entityTag("a")), TestEvent.Created("a")), (Set(entityTag("b")), TestEvent.Created("b")))
+      appended   <- store.readFrom(0L, EventFilter()).compile.toList
+      answer     <- topic.subscribeAwait(16).use { stream =>
+                  ParallelProjector(store, checkpoint)
+                    .run(projection, Some(topic))
+                    .compile
+                    .drain
+                    .background
+                    .use(_ => pausedAnswer(stream, appended(1).metadata.id))
+                }
+    yield expect(answer.error.exists(_.contains("simulated failure at position 1"))) and
+      expect(!answer.error.exists(_.contains("\n")))
+  }
+
+  test("a projection that starts paused answers only the events stored after it started") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states)
+      topic      <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      stored     <- appendOne(store, TestEvent.Created("a"), 0L)
+      _          <- checkpoint.save(
+             ProjectionCheckpointState(projection.name, ReadCursor.Start, false, Some("boom\n\tat somewhere")),
+           )
+      answers <- topic.subscribeAwait(16).use { stream =>
+                   ParallelProjector(store, checkpoint).run(projection, Some(topic)).compile.drain.background.use { _ =>
+                     IO.sleep(100.millis) *> appendOne(store, TestEvent.Created("b"), 1L).flatMap { added =>
+                       stream.take(1).compile.toList.timeout(2.seconds).map(_.map(_._1) -> added)
+                     }
+                   }
+                 }
+      (ids, added) = answers
+    yield expect(ids == List(added.metadata.id)) and expect(!ids.contains(stored.metadata.id))
+  }
+
+  test("resuming a paused projection processes and publishes the events it answered while paused") {
+    for
+      store      <- InMemoryStore.make[TestEvent]
+      checkpoint <- InMemoryCheckpoint.make
+      handled    <- Ref.of[IO, List[EventEnvelope[TestEvent]]](Nil)
+      states     <- Ref.of[IO, Map[String, Int]](Map.empty)
+      projection  = trackingProjection(handled, states)
+      topic      <- Topic[IO, (UUID, Either[Throwable, Map[String, Option[Int]]])]
+      result     <- ParallelProjector(store, checkpoint).run(projection, Some(topic)).compile.drain.background.use { _ =>
+                  for
+                    _     <- store.sendNotification(PauseProjection(projection.name))
+                    _     <- waitUntil(checkpoint.load(projection.name).map(_.exists(!_.running)))
+                    event <- topic.subscribeAwait(16).use { stream =>
+                               appendOne(store, TestEvent.Created("a"), 0L)
+                                 .flatTap(event => pausedAnswer(stream, event.metadata.id))
+                             }
+                    resumed <- topic.subscribeAwait(16).use { stream =>
+                                 store.sendNotification(ResumeProjection(projection.name)) *>
+                                   stream.collectFirst {
+                                     case (id, Right(state)) if id == event.metadata.id => state
+                                   }.compile.lastOrError.timeout(2.seconds)
+                               }
+                  yield resumed
+                }
+      processed <- handled.get
+    yield expect(result == Map("a" -> Some(1))) and expect(processed.size == 1)
+  }
