@@ -38,7 +38,8 @@ final class SyncCommandRuntime[F[_], A <: Event] private (
   /** Runs a command and waits for its accepted events to reach the configured projection.
     *
     * Rejections and commands without matching events return immediately. Command failures keep their original error; a
-    * projection failure arrives as [[ProjectionEventFailed]]. A timeout does not undo saved events.
+    * projection failure arrives as [[ProjectionEventFailed]], and a paused projection answers at once with
+    * [[ProjectionPaused]] instead of letting the wait reach its timeout. Neither, nor a timeout, undoes saved events.
     *
     * @param handler
     *   command definition

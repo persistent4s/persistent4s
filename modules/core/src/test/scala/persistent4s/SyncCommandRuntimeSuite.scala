@@ -275,6 +275,22 @@ object SyncCommandRuntimeSuite extends SimpleIOSuite:
     yield expect(result == Left(projectionFailure))
   }
 
+  test("a paused projection's answer ends the wait at once with ProjectionPaused instead of the timeout") {
+    for
+      topic    <- Topic[IO, Notification]
+      commands <- commandRuntime { events =>
+                    val id = events.head.metadata.id
+                    topic.publish1(id -> Left(ProjectionPaused("records", id, Some("boom")))).void
+                  }
+      runtime = SyncCommandRuntime.fromTopic(commands, topic, createdTypes, 1.minute)
+      result <- run(Record("a"))(using runtime).attempt.timed
+    yield expect(result._1 < 5.seconds) and
+      expect(result._2.left.exists {
+        case ProjectionPaused("records", _, Some("boom")) => true
+        case _                                            => false
+      })
+  }
+
   test("cancelling the projection wait removes the topic subscriber") {
     for
       topic    <- Topic[IO, Notification]
