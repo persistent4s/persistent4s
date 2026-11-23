@@ -58,10 +58,14 @@ final private[persistent4s] class PausedWaiters[F[_]: Async: Logger, A <: Event,
       from <- answered.get.map(_.getOrElse(state.cursor))
       read <- eventStore.readForProjection(from, filter, maxEvents)
       _    <- read.events.traverse_ { event =>
-                val paused = ProjectionPaused(projectionName, event.metadata.id, reason)
-                Async[F].timeoutTo(topic.publish1((event.metadata.id, Left(paused))).void, publishTimeout, Applicative[F].unit)
-              }
-      _    <- read.events.lastOption.traverse_(event => answered.set(Some(event.metadata.cursor)))
+             val paused = ProjectionPaused(projectionName, event.metadata.id, reason)
+             Async[F].timeoutTo(
+               topic.publish1((event.metadata.id, Left(paused))).void,
+               publishTimeout,
+               Applicative[F].unit,
+             )
+           }
+      _ <- read.events.lastOption.traverse_(event => answered.set(Some(event.metadata.cursor)))
     yield Option(read)).handleErrorWith { error =>
       Logger[F].warn(error)(s"Could not answer the commands waiting on paused projection $projectionName").as(None)
     }
@@ -71,7 +75,7 @@ private[persistent4s] object PausedWaiters:
   /** Whether a notification lets the projection run again, after which its answered events are processed as usual. */
   def resumes(notification: EventStoreNotification): Boolean = notification match
     case EventStoreNotification.ResumeProjection(_) | EventStoreNotification.UpdateCheckpointIndex(_, _) => true
-    case _                                                                                                => false
+    case _                                                                                               => false
 
   def make[F[_]: Async: Logger, A <: Event, K, S](
     projectionName: String,
@@ -80,4 +84,6 @@ private[persistent4s] object PausedWaiters:
     topic: Topic[F, (UUID, Either[Throwable, Map[K, Option[S]]])],
     publishTimeout: FiniteDuration,
   ): F[PausedWaiters[F, A, K, S]] =
-    Ref.of[F, Option[ReadCursor]](None).map(new PausedWaiters(projectionName, filter, eventStore, topic, publishTimeout, _))
+    Ref
+      .of[F, Option[ReadCursor]](None)
+      .map(new PausedWaiters(projectionName, filter, eventStore, topic, publishTimeout, _))
